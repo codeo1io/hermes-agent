@@ -6,6 +6,7 @@ import type { PreviewActAction } from '@/lib/preview-act/act-in-page'
 import type { TourAction, TourStep } from '@/lib/tour'
 import { $gateway } from '@/store/gateway'
 import { applyDesktopLayoutPreset, revealDesktopPane } from '@/store/pane-focus'
+import { openPenCanvas, runPenTool } from '@/store/pen'
 import { recordAgentReaction } from '@/store/reactions-local'
 import { setMessages } from '@/store/session'
 import { $tipsEnabled, type ActiveTip, showTip } from '@/store/tips'
@@ -156,6 +157,39 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
       // handler or a main-side throw — without an empty answer the tool
       // would stall its full 30s timeout.
       void Promise.resolve(read ? read() : null).then(answer, () => answer(null))
+    }
+
+    return true
+  }
+
+  if (event.type === 'pen.tool.request') {
+    // pen_canvas tool: run a pen.dev design operation. 'open' opens (or
+    // re-fronts) a Canvas tab; everything else goes to the live canvas —
+    // main falls back to the user's running pen.dev app when no Canvas
+    // tab is open (the HUD-mode path). Empty text = unavailable.
+    const requestId = typeof payload?.request_id === 'string' ? payload.request_id : ''
+
+    if (requestId) {
+      const action = typeof payload?.action === 'string' ? payload.action : ''
+      const args = payload?.args && typeof payload.args === 'object' ? (payload.args as Record<string, unknown>) : {}
+
+      const answer = (result: unknown) =>
+        $gateway.get()?.request('pen.tool.respond', {
+          request_id: requestId,
+          text: result ? JSON.stringify(result) : ''
+        })
+
+      const run =
+        action === 'open'
+          ? openPenCanvas({
+              path: typeof args.path === 'string' ? args.path : undefined,
+              template: typeof args.template === 'string' ? args.template : undefined
+            }).then(doc =>
+              doc ? { success: true, result: { docId: doc.docId, fileURI: doc.fileURI || null } } : null
+            )
+          : runPenTool(action, args)
+
+      void run.then(answer, () => answer(null))
     }
 
     return true

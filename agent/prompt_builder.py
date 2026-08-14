@@ -573,6 +573,11 @@ def hud_surface_note(valid_tool_names: "set[str] | None" = None) -> str:
         ("computer_use" in names and "browser_navigate" in names,
          "When the app underneath is a browser, that means driving the "
          "user's browser rather than opening yours with browser_navigate."),
+        ("pen_canvas" in names,
+         "When the app underneath is pen.dev, design with pen_canvas — "
+         "every action except 'open' reaches their live pen.dev document "
+         "directly, so skip opening a Canvas tab and never reach for "
+         "screenshots or clicks to edit a design."),
         (True, "This is a prior, not a rule: when the request names its own target, follow the request.]"),
     )
     return " ".join(text for ok, text in gated if ok)

@@ -205,6 +205,10 @@ INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
     "read_window_below": _callback_tool(
         "tools.read_window_tool", "read_window_below_tool", "read_window_below_callback",
     ),
+    "pen_canvas": _callback_tool(
+        "tools.pen_canvas_tool", "pen_canvas_tool", "pen_canvas_callback",
+        ("action", "action", ""), ("args", "args"),
+    ),
     "gui_tour": _callback_tool(
         "tools.tour_tool", "tour_tool", "tour_callback",
         ("action", "action", ""), ("surface", "surface"), ("selector", "selector"), ("title", "title"),

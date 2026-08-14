@@ -111,6 +111,12 @@ def _agent_cbs(sid: str) -> dict:
         "drive_preview_callback": lambda payload: _block("preview.act.request", sid, dict(payload), timeout=45),
         # read_window_below (desktop GUI): main process enumerates native windows.
         "read_window_below_callback": lambda: _block("window.read.request", sid, {}, timeout=30),
+        # pen_canvas (desktop GUI): the renderer runs a pen.dev design operation against the
+        # live Canvas tab (or the user's running pen.dev app) and answers pen.tool.respond with
+        # the JSON result. Generous timeout — execute snippets render real design documents,
+        # and a screenshot rasterizes one.
+        "pen_canvas_callback": lambda action, args: _block(
+            "pen.tool.request", sid, {"action": action, "args": args or {}}, timeout=120),
         # setup_mcp (desktop GUI): consent card + install/enable/OAuth; long timeout on purpose
         # (typing an API key, browser OAuth) and, like clarify, a late answer is tolerated.
         "setup_mcp_callback": lambda server, action, reason: _block(

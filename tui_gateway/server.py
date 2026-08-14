@@ -1260,8 +1260,8 @@ def _enable_gateway_prompts() -> None:
 _EXPIRING_REQUESTS = frozenset({
     "secret.request", "sudo.request", "vault.unlock.request", "vault.save_login.request", "vault.code.request", "clarify.request",
     "terminal.read.request",
-    "preview.read.request", "preview.act.request", "window.read.request", "mcp.setup.request",
-    "tour.request",
+    "preview.read.request", "preview.act.request", "window.read.request", "pen.tool.request",
+    "mcp.setup.request", "tour.request",
 })
 
 
