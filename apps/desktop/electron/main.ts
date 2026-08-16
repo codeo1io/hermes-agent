@@ -316,7 +316,7 @@ import {
   setPenAgentHidden,
   setPenHostChrome,
   shutdownPenHost
-} from './pen-canvas'
+} from './pen'
 import { findPenInstallation } from './pen-host'
 import { evictPoolEntries } from './pool-eviction'
 import { clampPoolLimits, parsePoolLimits, POOL_LIMITS_DEFAULTS } from './pool-limits'
