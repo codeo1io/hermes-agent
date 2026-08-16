@@ -1620,7 +1620,7 @@ function wirePenCanvas() {
     const sessionId = payload?.docId ? penDocSessions.get(payload.docId) : null
 
     if (sessionId) {
-      rememberPenSession(sessionId, { docId: payload.docId, path: penDocumentPath(payload) })
+      rememberPenSession(sessionId, { docId: payload.docId, path: penDocumentPath(payload), closed: false })
     }
   })
 
@@ -1662,7 +1662,7 @@ function wirePenCanvas() {
       penDocSessions.set(doc.docId, sessionId)
     }
 
-    rememberPenSession(sessionId, { docId: doc.docId, path: penDocumentPath(doc) || openOptions.path || null })
+    rememberPenSession(sessionId, { docId: doc.docId, path: penDocumentPath(doc) || openOptions.path || null, closed: false })
 
     // `url` is what the renderer's pen tile mounts in its <webview>. Built
     // here so the hermes-pen:// shape stays main's private detail.
@@ -1705,6 +1705,7 @@ function wirePenCanvas() {
       }
 
       penDocSessions.set(entry.docId, sessionId)
+      rememberPenSession(sessionId, { closed: false })
 
       return { docId: entry.docId, url: penCanvasUrl(entry.docId) }
     }
@@ -1722,7 +1723,7 @@ function wirePenCanvas() {
     }
 
     penDocSessions.set(doc.docId, sessionId)
-    rememberPenSession(sessionId, { docId: doc.docId, path: entry.path })
+    rememberPenSession(sessionId, { docId: doc.docId, path: entry.path, closed: false })
 
     return { doc, url: penCanvasUrl(doc.docId) }
   })
@@ -1780,17 +1781,17 @@ function wirePenCanvas() {
   })
 
   ipcMain.handle('hermes:pen:close', (_event, options) => {
-    // Closing is an explicit "I don't want this canvas here" — so the session
-    // stops reopening it on launch or on switch-back. The canvas itself is
-    // untouched (it's a file in the library); `keep: true` is for the internal
-    // swap path, where the drawer is being reused for another session and the
-    // tie must survive.
+    // Closing puts the canvas AWAY — it never detaches it. The tie survives
+    // with closed:true, which means: don't auto-reopen on session switch or
+    // launch, but keep the canvas attached so the reopen pill (and the
+    // library's chat glyph) can always bring it back. Detachment only
+    // happens when the canvas file itself is deleted.
     // Close ALL live documents — the registry, not penDocSessions. A canvas
     // opened before its chat had a session id has no tie entry, and keying
     // close off ties made those canvases unclosable.
     if (!options?.keep) {
       for (const sessionId of penDocSessions.values()) {
-        forgetPenSession(sessionId)
+        rememberPenSession(sessionId, { closed: true })
       }
     }
 
