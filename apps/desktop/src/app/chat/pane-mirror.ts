@@ -11,6 +11,7 @@ import type { ReactElement, ReactNode, PointerEvent as ReactPointerEvent } from 
 
 import { registerPaneCloser, removeTreePane, treePanesWithPrefix } from '@/components/pane-shell/tree/store'
 import type { MenuKit } from '@/components/ui/actions-menu'
+import type { PaneStripTool } from '@/components/ui/pane-tab'
 import { registry } from '@/contrib/registry'
 import type { TileDock } from '@/store/session-states'
 
@@ -42,6 +43,21 @@ export interface PaneMirror<T> {
   /** Mint another tile of this kind — the strip's "+" (see PaneChrome.newTab).
    *  Per tile so a mirror can offer it for some of its tabs and not others. */
   newTab?: (key: string) => (() => void) | undefined
+  /** Glyph buttons the tile contributes to the strip, after the last tab (where
+   *  "+" sits), while it is the ACTIVE pane — e.g. a preview's console /
+   *  DevTools toggles. DATA, not markup: the strip's `PaneStripGlyph` owns the
+   *  styling so every glyph on every strip matches. */
+  stripTools?: (key: string) => readonly PaneStripTool[]
+  /** Glyph buttons the tile contributes to the strip, after the last tab (where
+   *  "+" sits), while it is the ACTIVE pane — e.g. a preview's console /
+   *  DevTools toggles. DATA, not markup: the strip's `PaneStripGlyph` owns the
+   *  styling so every glyph on every strip matches. */
+  stripTools?: (key: string) => readonly PaneStripTool[]
+  /** Suppress the zone's tab strip while this tile is active (the full-page
+   *  treatment — see tree-group's headerVeto). For surfaces that bring their
+   *  OWN chrome (the pen canvas is the whole editor) where even one hermes
+   *  tab row reads as clutter. Close/drag remain available via ⌘K and verbs. */
+  headerVeto?: boolean
   render: (key: string) => ReactNode
   /** Extra rows at the top of the zone tab menu (see PaneChrome.tabMenuPrefix). */
   tabMenuPrefix?: (key: string) => ((kit: MenuKit) => ReactNode) | undefined
@@ -82,6 +98,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
         data: {
           tabLead: cfg.tabLead ? () => cfg.tabLead!(key) : undefined,
           tabTitle: cfg.tabTitle ? () => cfg.tabTitle!(key) : undefined,
+          stripTools: cfg.stripTools ? () => cfg.stripTools!(key) : undefined,
           dock: {
             before: cfg.before?.(tile),
             pane: cfg.anchor?.(tile) ?? 'workspace',
@@ -89,6 +106,7 @@ export function paneMirror<T>(cfg: PaneMirror<T>): () => void {
           },
           minWidth: cfg.minWidth,
           newTab: cfg.newTab?.(key),
+          headerVeto: cfg.headerVeto,
           // Every mirrored tile is a full workspace surface docked beside main —
           // and closeable, which is what keeps its tab when it lands in a zone of
           // its own (see strip-visibility.ts).

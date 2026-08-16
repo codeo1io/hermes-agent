@@ -179,6 +179,8 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
           text: result ? JSON.stringify(result) : ''
         })
 
+      // `open` and `close` are HOST actions (they own the pane), not pen
+      // MCP operations — everything else passes through to the editor.
       const run =
         action === 'open'
           ? openPenCanvas({
@@ -187,7 +189,12 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
             }).then(doc =>
               doc ? { success: true, result: { docId: doc.docId, fileURI: doc.fileURI || null } } : null
             )
-          : runPenTool(action, args)
+          : action === 'close'
+            ? (window.hermesDesktop?.pen?.close() ?? Promise.resolve()).then(() => ({
+                success: true,
+                result: { closed: true }
+              }))
+            : runPenTool(action, args)
 
       void run.then(answer, () => answer(null))
     }
