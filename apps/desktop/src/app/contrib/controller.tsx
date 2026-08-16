@@ -81,7 +81,9 @@ import { isBrowserWindow, isHudWindow } from '@/store/windows'
 
 import { BrowserPopoutShell } from '../chat/browser-popout-shell'
 import type { SessionDragPayload } from '../chat/composer/inline-refs'
-import { watchPenTiles } from '../chat/pen-tile'
+import { watchCanvasTiles } from '../chat/canvas-tile'
+// Side-effect import: registers the pen provider with the canvas-tile surface.
+import '../chat/pen-tile'
 import { watchPreviewTiles } from '../chat/preview-tile'
 import { watchRouteTiles } from '../chat/route-tile'
 import { startSessionDrag } from '../chat/session-drag'
@@ -491,8 +493,9 @@ if (!isBrowserWindow() && !isHudWindow()) {
   watchPreviewTiles()
 }
 
-// Pen canvas panes: mirror open canvases into layout-tree tiles.
-watchPenTiles()
+// Canvas panes: mirror open design surfaces (pen, future providers) into
+// layout-tree tiles.
+watchCanvasTiles()
 
 // A canvas belongs to a SESSION: restore the active session's canvas on
 // launch, and swap it when the user switches chats.
