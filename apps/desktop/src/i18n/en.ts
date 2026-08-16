@@ -2551,6 +2551,9 @@ export const en: Translations = {
     kindImage: 'image',
     kindFile: 'file',
     kindLink: 'link',
+    kindCanvas: 'Canvas',
+    tabCanvases: 'Canvases',
+    openCanvas: 'Open canvas',
     chat: 'Chat',
     copyUrl: 'Copy URL',
     copyPath: 'Copy path'
