@@ -46,7 +46,7 @@ const loadPreviewEngine = () => {
  *  (terminal/preview/window), agent terminal streaming, pane reveal, and
  *  message reactions. */
 export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
-  const { event, payload, explicitSid, isActiveEvent } = ctx
+  const { event, payload, explicitSid, isActiveEvent, sessionId } = ctx
 
   if (event.type === 'terminal.read.request') {
     // read_terminal tool: serialize the renderer's xterm buffer and answer
@@ -183,10 +183,15 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
       // MCP operations — everything else passes through to the editor.
       const run =
         action === 'open'
-          ? openPenCanvas({
-              path: typeof args.path === 'string' ? args.path : undefined,
-              template: typeof args.template === 'string' ? args.template : undefined
-            }).then(doc =>
+          ? openPenCanvas(
+              {
+                path: typeof args.path === 'string' ? args.path : undefined,
+                template: typeof args.template === 'string' ? args.template : undefined
+              },
+              // The route's session — the chat this agent is designing in.
+              // The selected atom is null in a draft; this never is.
+              sessionId ?? undefined
+            ).then(doc =>
               doc ? { success: true, result: { docId: doc.docId, fileURI: doc.fileURI || null } } : null
             )
           : action === 'close'
