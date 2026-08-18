@@ -3059,6 +3059,7 @@ def _run_single_child(
         # Uses tool_call_id to correctly pair parallel tool calls with results.
         tool_trace: list[Dict[str, Any]] = []
         trace_by_id: Dict[str, Dict[str, Any]] = {}
+        _pi_footer: Dict[str, Any] | None = None
         messages = result.get("messages") or []
         if isinstance(messages, list):
             for msg in messages:
@@ -3077,6 +3078,52 @@ def _run_single_child(
                         tc_id = tc.get("id")
                         if tc_id:
                             trace_by_id[tc_id] = entry_t
+                    # Tool activity executed inside an ACP delegate's own
+                    # runtime (pi via the pi-acp bridge) never produces
+                    # hermes-side tool_calls; it rides the assistant
+                    # message's reasoning field as [pi-tool] markers.
+                    # Derive trace entries from them so the parent sees the
+                    # delegate actually used tools instead of an empty trace.
+                    _reasoning_txt = (
+                        msg.get("reasoning") or msg.get("reasoning_content") or ""
+                    )
+                    if _reasoning_txt and "[pi-tool" in _reasoning_txt:
+                        from agent.copilot_acp_client import parse_pi_tool_markers
+
+                        for _mt in parse_pi_tool_markers(_reasoning_txt):
+                            _args_s = _mt.get("args") or ""
+                            tool_trace.append(
+                                {
+                                    "tool": _mt["name"],
+                                    "args_bytes": len(_args_s),
+                                    "input_summary": (
+                                        _summarize_tool_arguments(_args_s)
+                                        if _args_s
+                                        else ""
+                                    ),
+                                    "result_bytes": _mt.get("result_bytes") or 0,
+                                    "status": (
+                                        "error"
+                                        if _mt.get("status") == "FAILED"
+                                        else "ok"
+                                    ),
+                                    "runtime": "delegate",
+                                }
+                            )
+                    # The pi-acp bridge appends a machine-readable
+                    # "pi-delegation-result" footer (status / duration_s /
+                    # touched_files from git snapshots around the run) to the
+                    # final response text. Keep the last one so the parent
+                    # gets an objective change record for the delegate's run.
+                    _content_txt = msg.get("content")
+                    if not isinstance(_content_txt, str):
+                        _content_txt = ""
+                    if "pi-delegation-result" in _content_txt:
+                        from agent.copilot_acp_client import parse_pi_result_footer
+
+                        _parsed_footer = parse_pi_result_footer(_content_txt)
+                        if _parsed_footer is not None:
+                            _pi_footer = _parsed_footer
                 elif msg.get("role") == "tool":
                     content = _stringify_tool_content(msg.get("content", ""))
                     is_error = _looks_like_error_output(content)
@@ -3148,6 +3195,13 @@ def _run_single_child(
                 else 0.0
             ),
         }
+        if _pi_footer is not None:
+            # Objective record of what the pi delegate changed in the tree
+            # (bridge-side git snapshots), carried alongside its own prose
+            # summary so review can start from the diff, not the self-report.
+            entry["touched_files"] = list(
+                _pi_footer.get("touched_files") or []
+            )
         # Per-delegation spend, serialized back to the model alongside
         # tokens/api_calls so the parent can see what each delegation cost.
         # Mirrors _child_cost_usd (which is stripped pre-serialization and

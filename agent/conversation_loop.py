@@ -6731,6 +6731,34 @@ def run_conversation(
                     except Exception:
                         pass
             
+            # Relay tool activity that executed inside the delegate's own
+            # runtime. ACP delegates (pi via the pi-acp bridge) run their
+            # tools natively; the bridge surfaces each execution as
+            # [pi-tool] markers riding the reasoning field. Emitting them as
+            # tool.started/tool.completed gives the delegation live
+            # transcript — and the parent agent's verification of delegated
+            # results — real evidence instead of an empty tool trace.
+            if agent.tool_progress_callback:
+                try:
+                    from agent.copilot_acp_client import parse_pi_tool_markers
+
+                    _pi_tools = parse_pi_tool_markers(
+                        agent._extract_reasoning(assistant_message) or ""
+                    )
+                    for _mt in _pi_tools:
+                        agent.tool_progress_callback(
+                            "tool.started", _mt["name"], _mt.get("args") or ""
+                        )
+                        _rb = _mt.get("result_bytes")
+                        agent.tool_progress_callback(
+                            "tool.completed",
+                            _mt["name"],
+                            result=("result %d bytes" % _rb) if _rb is not None else "",
+                            is_error=_mt.get("status") == "FAILED",
+                        )
+                except Exception:
+                    pass
+
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
             if has_incomplete_scratchpad(assistant_message.content or ""):
