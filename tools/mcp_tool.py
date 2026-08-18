@@ -2800,29 +2800,47 @@ class MCPServerTask:
         Raises on a genuine connection failure so the caller triggers a
         reconnect; returns normally when the session is alive.
         """
-        if not self._ping_unsupported:
-            try:
-                await asyncio.wait_for(self.session.send_ping(), timeout=30.0)
-                return
-            except Exception as exc:
-                # Only a "method not found" means ping is unsupported. Any
-                # other error (timeout, closed transport, session expired) is
-                # a real liveness failure — propagate so we reconnect.
-                if not _is_method_not_found_error(exc):
-                    raise
-                if not self._advertises_tools():
-                    # No ping, no tools → no cheaper probe to fall back to.
-                    raise
-                self._ping_unsupported = True
-                logger.info(
-                    "MCP server '%s': does not implement the optional 'ping' "
-                    "utility (-32601); using 'list_tools' for keepalive on "
-                    "this connection.",
-                    self.name,
-                )
+        # Keepalives are client-initiated RPCs too. Normal tools/resources/
+        # prompts are serialized through ``_rpc_lock`` because overlapping
+        # requests on one MCP transport can wedge or close the underlying
+        # anyio stream. Do not let an idle liveness ping race an active call.
+        # If a user RPC is already in flight, that RPC is itself the stronger
+        # liveness signal, so simply defer this keepalive cycle.
+        if self._rpc_lock.locked():
+            logger.debug(
+                "MCP server '%s': skipping keepalive while an RPC is in flight",
+                self.name,
+            )
+            return
 
-        # Fallback probe for servers without ping support.
-        await asyncio.wait_for(self.session.list_tools(), timeout=30.0)
+        async with self._rpc_lock:
+            session = self.session
+            if session is None:
+                raise RuntimeError("MCP session disappeared before keepalive probe")
+
+            if not self._ping_unsupported:
+                try:
+                    await asyncio.wait_for(session.send_ping(), timeout=30.0)
+                    return
+                except Exception as exc:
+                    # Only a "method not found" means ping is unsupported. Any
+                    # other error (timeout, closed transport, session expired) is
+                    # a real liveness failure — propagate so we reconnect.
+                    if not _is_method_not_found_error(exc):
+                        raise
+                    if not self._advertises_tools():
+                        # No ping, no tools → no cheaper probe to fall back to.
+                        raise
+                    self._ping_unsupported = True
+                    logger.info(
+                        "MCP server '%s': does not implement the optional 'ping' "
+                        "utility (-32601); using 'list_tools' for keepalive on "
+                        "this connection.",
+                        self.name,
+                    )
+
+            # Fallback probe for servers without ping support.
+            await asyncio.wait_for(session.list_tools(), timeout=30.0)
 
     def _mark_session_proven(self) -> None:
         """Record that the current session demonstrated real health.
@@ -2930,6 +2948,13 @@ class MCPServerTask:
                             "reconnect (state: connected → degraded): %s: %s",
                             self.name, type(root).__name__, root,
                         )
+                        # Mark the current session unusable before requesting
+                        # reconnect. Without this, callers can observe _ready
+                        # still set and enter the stale session during the
+                        # transport teardown window, producing another
+                        # ClosedResourceError before the replacement session is
+                        # published.
+                        self._ready.clear()
                         self._reconnect_event.set()
                         break
                     # Keepalive succeeded — the session survived a full
@@ -5733,6 +5758,23 @@ def _get_connected_server_for_call(server_name: str) -> Optional[MCPServerTask]:
         _request_lazy_reconnect(server_name, server)
         with _lock:
             server = _servers.get(server_name)
+
+    # A keepalive/session-expiry reconnect deliberately clears ``_ready``
+    # before the old transport is torn down. Treat that as an in-progress
+    # reconnect even if ``session`` still temporarily references the stale
+    # ClientSession object. Waiting here keeps callers out of that stale-session
+    # window instead of generating a second ClosedResourceError.
+    if server is not None:
+        ready = getattr(server, "_ready", None)
+        if ready is not None and hasattr(ready, "is_set") and not ready.is_set():
+            old_session = getattr(server, "session", None)
+            if _wait_for_server_session_ready(
+                server,
+                old_session=old_session,
+                timeout=5.0,
+            ):
+                return server
+            return None
     return server
 
 

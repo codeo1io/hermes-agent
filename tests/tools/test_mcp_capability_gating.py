@@ -138,6 +138,24 @@ class TestKeepaliveProbe:
         task.session.send_ping.assert_awaited_once()
         task.session.list_tools.assert_not_called()
 
+    async def test_keepalive_skips_while_rpc_is_in_flight(self):
+        """A keepalive must never race a user-visible RPC on the same session."""
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(),
+            send_ping=AsyncMock(),
+        )
+
+        await task._rpc_lock.acquire()
+        try:
+            await task._keepalive_probe()
+        finally:
+            task._rpc_lock.release()
+
+        task.session.send_ping.assert_not_called()
+        task.session.list_tools.assert_not_called()
+
 
 class TestKeepaliveInterval:
     """The keepalive cadence is configurable so servers with short session
