@@ -1830,6 +1830,18 @@ def switch_model(
     # COMMON PATH: Resolve credentials, normalize, get metadata
     # =================================================================
 
+    if os.getenv("HERMES_CLIPROXY_ONLY") == "1":
+        provider_ok = target_provider == "custom" or target_provider == "custom:cliproxyapi"
+        model_ok = new_model.lower().startswith("glm-")
+        if not provider_ok or not model_ok:
+            return ModelSwitchResult(
+                success=False,
+                error_message=(
+                    "Provider/model blocked by HERMES_CLIPROXY_ONLY policy; "
+                    "only custom:cliproxyapi with GLM models is allowed."
+                ),
+            )
+
     provider_changed = target_provider != current_provider
     provider_label = get_label(target_provider)
     if target_provider == "custom" and current_base_url:

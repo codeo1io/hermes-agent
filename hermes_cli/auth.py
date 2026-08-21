@@ -2150,6 +2150,18 @@ def resolve_provider(
         pass
     normalized = _PROVIDER_ALIASES.get(normalized, normalized)
 
+    if os.getenv("HERMES_CLIPROXY_ONLY") == "1":
+        if explicit_api_key or explicit_base_url:
+            raise AuthError(
+                "Explicit provider credentials/endpoints are blocked by HERMES_CLIPROXY_ONLY policy.",
+                code="provider_blocked",
+            )
+        if normalized not in {"auto", "custom", "custom:cliproxyapi"}:
+            raise AuthError(
+                "Provider blocked by HERMES_CLIPROXY_ONLY policy; only CLIProxyAPI is allowed.",
+                code="provider_blocked",
+            )
+
     if normalized == "openrouter":
         return "openrouter"
     if normalized == "custom":

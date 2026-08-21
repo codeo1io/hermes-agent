@@ -98,7 +98,13 @@ def test_stale_env_pool_entry_does_not_count_when_var_unset(tmp_path, monkeypatc
     assert is_provider_explicitly_configured("deepseek") is False
 
 
+def test_cliproxy_only_policy_blocks_direct_provider_resolution(monkeypatch):
+    monkeypatch.setenv("HERMES_CLIPROXY_ONLY", "1")
+    from hermes_cli.auth import AuthError, resolve_provider
 
-
+    with pytest.raises(AuthError) as exc:
+        resolve_provider("openai")
+    assert exc.value.code == "provider_blocked"
+    assert resolve_provider("custom") == "custom"
 
 
