@@ -2152,13 +2152,16 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # Home Assistant
     hass_token = getenv("HASS_TOKEN")
     if hass_token:
-        if Platform.HOMEASSISTANT not in config.platforms:
-            config.platforms[Platform.HOMEASSISTANT] = PlatformConfig()
-        config.platforms[Platform.HOMEASSISTANT].enabled = True
-        config.platforms[Platform.HOMEASSISTANT].token = hass_token
+        # Use the common env-enablement path so an explicit YAML
+        # ``enabled: false`` is preserved. This is important for multiplexed
+        # profiles that share a Home Assistant credential: the secondary
+        # profile can retain HASS_TOKEN for HA tools without opening a second
+        # gateway WebSocket with the same credential.
+        hass_config = _enable_from_env(Platform.HOMEASSISTANT)
+        hass_config.token = hass_token
         hass_url = getenv("HASS_URL")
         if hass_url:
-            config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
+            hass_config.extra["url"] = hass_url
 
     # Email
     email_addr = getenv("EMAIL_ADDRESS")
