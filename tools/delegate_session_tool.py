@@ -31,6 +31,7 @@ from tools.registry import registry, tool_error
 logger = logging.getLogger(__name__)
 
 _SESSION_LOCK = threading.RLock()
+_SESSION_CONDITION = threading.Condition(_SESSION_LOCK)
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
@@ -82,8 +83,10 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "version": 2,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
-        "native_session_id": record.get("native_session_id") or record.get("session_id"),
-        "pi_session_id": record.get("native_session_id") or record.get("session_id"),  # v1 read-alias
+        "native_session_id": record.get("native_session_id")
+        or record.get("session_id"),
+        "pi_session_id": record.get("native_session_id")
+        or record.get("session_id"),  # v1 read-alias
         "owner": record.get("owner"),
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
@@ -113,7 +116,11 @@ def _prune_durable_metadata(root: Path) -> None:
         try:
             stale.unlink()
         except OSError:
-            logger.debug("Could not prune stale delegate-session metadata %s", stale, exc_info=True)
+            logger.debug(
+                "Could not prune stale delegate-session metadata %s",
+                stale,
+                exc_info=True,
+            )
 
 
 def _persist_metadata(record: Dict[str, Any]) -> None:
@@ -129,7 +136,10 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         try:
             tmp.chmod(0o600)
         except OSError:
@@ -137,7 +147,11 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         tmp.replace(path)
         _prune_durable_metadata(path.parent)
     except OSError:
-        logger.debug("Could not persist delegate-session metadata for %s", session_id, exc_info=True)
+        logger.debug(
+            "Could not persist delegate-session metadata for %s",
+            session_id,
+            exc_info=True,
+        )
 
 
 def _load_metadata(session_id: str) -> dict[str, Any] | None:
@@ -160,14 +174,20 @@ def _durable_rows_for_owner(owner: str) -> list[dict[str, Any]]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(data, dict) or data.get("owner") != owner or not data.get("session_id"):
+        if (
+            not isinstance(data, dict)
+            or data.get("owner") != owner
+            or not data.get("session_id")
+        ):
             continue
         rows.append(data)
     return rows
 
 
 def check_delegate_session_requirements() -> bool:
-    pi_available = bool(shutil.which("pi") or Path.home().joinpath(".local", "bin", "pi").is_file())
+    pi_available = bool(
+        shutil.which("pi") or Path.home().joinpath(".local", "bin", "pi").is_file()
+    )
     opencode_available = bool(
         os.environ.get("HERMES_OPENCODE_SERVER_URL", "").strip()
         or shutil.which("opencode")
@@ -240,7 +260,9 @@ def _parent_main_runtime(parent_agent: Any) -> dict[str, Any] | None:
             if isinstance(runtime, dict):
                 return runtime
         except Exception:
-            logger.debug("Could not read parent runtime for Pi question answer", exc_info=True)
+            logger.debug(
+                "Could not read parent runtime for Pi question answer", exc_info=True
+            )
     runtime = {
         key: getattr(parent_agent, key, "") or ""
         for key in ("model", "provider", "base_url", "api_key", "api_mode", "auth_mode")
@@ -272,7 +294,9 @@ def _auto_answer_delegate_question(
     if method == "confirm":
         format_rule = "Answer exactly yes or no."
     elif method == "select" and options:
-        format_rule = "Answer with exactly one of the listed options, with no explanation."
+        format_rule = (
+            "Answer with exactly one of the listed options, with no explanation."
+        )
     else:
         format_rule = "Answer directly and concisely. Return only the answer the delegate should receive."
 
@@ -357,7 +381,8 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
         "native_session_id": record.get("native_session_id") or record["session_id"],
-        "pi_session_id": record.get("native_session_id") or record["session_id"],  # kept for model-callers
+        "pi_session_id": record.get("native_session_id")
+        or record["session_id"],  # kept for model-callers
         "status": record.get("status", "unknown"),
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
@@ -383,33 +408,87 @@ def _lookup(session_id: str, parent_agent: Any) -> Dict[str, Any] | None:
         return record
 
 
+def _notify_state_locked(record: Dict[str, Any]) -> None:
+    record["state_generation"] = int(record.get("state_generation") or 0) + 1
+    _SESSION_CONDITION.notify_all()
+
+
+def _transition_status_locked(record: Dict[str, Any], new_status: str) -> bool:
+    """Set session status and wake waiters only on a real transition.
+
+    A running->running re-set (dispatch marks the turn running, then _run_turn
+    re-asserts it) must not produce a spurious wake that looks like turn
+    completion to a supervisor blocked in action='wait'. Callers must hold
+    _SESSION_CONDITION (the lock, not the waiter protocol).
+    """
+    if record.get("status") == new_status:
+        return False
+    record["status"] = new_status
+    record["updated_at"] = time.time()
+    _notify_state_locked(record)
+    return True
+
+
+def _delegate_dead(client: Any) -> bool:
+    proc = getattr(client, "_proc", None)
+    if proc is not None and proc.poll() is not None:
+        return True
+    is_dead = getattr(client, "is_dead", None)
+    return callable(is_dead) and bool(is_dead())
+
+
+def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
+    """Fold a dead native process into error state and wake any waiters.
+
+    A dead worker is a meaningful state change, not a nap: both status and
+    wait surface it immediately instead of burning their timeout windows.
+    """
+    client = record.get("client")
+    if client is None or record.get("status") in {"closed", "error"}:
+        return False
+    if not _delegate_dead(client):
+        return False
+    proc = getattr(client, "_proc", None)
+    exit_code = getattr(proc, "returncode", None) if proc is not None else None
+    backend = record.get("backend") or "pi"
+    with _SESSION_CONDITION:
+        record["error"] = f"{backend} delegate process exited with code {exit_code}"
+        changed = _transition_status_locked(record, "error")
+    if changed:
+        _persist_metadata(record)
+    return changed
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
-    with _SESSION_LOCK:
+    with _SESSION_CONDITION:
         if record.get("status") == "closed":
             return
-        record["status"] = "running"
         record["error"] = ""
-        record["updated_at"] = time.time()
+        _transition_status_locked(record, "running")
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
         state = result.get("state") if isinstance(result, dict) else {}
-        with _SESSION_LOCK:
+        with _SESSION_CONDITION:
             record["last_result"] = result
             record["native_session_id"] = (
-                state.get("sessionId") if isinstance(state, dict) else None
-            ) or record.get("native_session_id") or record["session_id"]
+                (state.get("sessionId") if isinstance(state, dict) else None)
+                or record.get("native_session_id")
+                or record["session_id"]
+            )
             if record.get("status") != "closed":
-                record["status"] = "idle"
-            record["updated_at"] = time.time()
+                _transition_status_locked(record, "idle")
+            else:
+                record["updated_at"] = time.time()
         _persist_metadata(record)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
-        with _SESSION_LOCK:
-            if record.get("status") != "closed":
-                record["status"] = "error"
+        with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
-            record["updated_at"] = time.time()
+            if record.get("status") != "closed":
+                _transition_status_locked(record, "error")
+            else:
+                record["updated_at"] = time.time()
         _persist_metadata(record)
 
 
@@ -420,10 +499,9 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
         name=f"delegate-{record['session_id'][:8]}",
         daemon=True,
     )
-    with _SESSION_LOCK:
+    with _SESSION_CONDITION:
         record["thread"] = thread
-        record["status"] = "running"
-        record["updated_at"] = time.time()
+        _transition_status_locked(record, "running")
     thread.start()
 
 
@@ -451,6 +529,7 @@ def delegate_session(
     context: Optional[str] = None,
     message: Optional[str] = None,
     timeout: Optional[int] = None,
+    wait_seconds: Optional[float] = None,
     backend: Optional[str] = None,
     parent_agent: Any = None,
 ) -> str:
@@ -459,18 +538,36 @@ def delegate_session(
         return tool_error("delegate_session requires a parent agent context.")
 
     normalized = (action or "start").strip().lower()
-    if normalized not in {"start", "resume", "send", "steer", "status", "messages", "list", "stop"}:
+    if normalized not in {
+        "start",
+        "resume",
+        "send",
+        "steer",
+        "status",
+        "wait",
+        "messages",
+        "list",
+        "stop",
+    }:
         return tool_error(
-            "Unknown action. Use start, resume, send, steer, status, messages, list, or stop."
+            "Unknown action. Use start, resume, send, steer, status, wait, messages, list, or stop."
         )
     if backend is not None and str(backend).strip().lower() not in _KNOWN_BACKENDS:
         return tool_error(f"Unknown backend {backend!r}. Use 'pi' or 'opencode'.")
     effective_timeout = float(max(10, min(int(timeout or 900), 3600)))
+    try:
+        effective_wait = max(
+            0.0, min(float(120 if wait_seconds is None else wait_seconds), 3600.0)
+        )
+    except (TypeError, ValueError):
+        return tool_error("wait_seconds must be a number between 0 and 3600.")
     owner = _owner_key(parent_agent)
 
     if normalized == "list":
         with _SESSION_LOCK:
-            live_records = [record for record in _SESSIONS.values() if record.get("owner") == owner]
+            live_records = [
+                record for record in _SESSIONS.values() if record.get("owner") == owner
+            ]
             live_ids = {str(record.get("session_id") or "") for record in live_records}
             rows = [_summary(record, include_result=False) for record in live_records]
         for meta in _durable_rows_for_owner(owner):
@@ -480,8 +577,12 @@ def delegate_session(
             rows.append({
                 "session_id": sid,
                 "backend": meta.get("backend") or "pi",
-                "native_session_id": meta.get("native_session_id") or meta.get("pi_session_id") or sid,
-                "pi_session_id": meta.get("pi_session_id") or meta.get("native_session_id") or sid,
+                "native_session_id": meta.get("native_session_id")
+                or meta.get("pi_session_id")
+                or sid,
+                "pi_session_id": meta.get("pi_session_id")
+                or meta.get("native_session_id")
+                or sid,
                 "status": "offline",
                 "cwd": meta.get("cwd"),
                 "created_at": meta.get("created_at"),
@@ -510,31 +611,39 @@ def delegate_session(
             existing = _SESSIONS.get(handle)
             if existing is not None:
                 if existing.get("owner") != owner:
-                    return tool_error("That delegate session belongs to another conversation.")
-                if backend is not None and (existing.get("backend") or "pi") != backend_name:
+                    return tool_error(
+                        "That delegate session belongs to another conversation."
+                    )
+                if (
+                    backend is not None
+                    and (existing.get("backend") or "pi") != backend_name
+                ):
                     return tool_error(
                         f"Session {handle} is a {existing.get('backend') or 'pi'} delegate session; "
                         f"it cannot be reopened as a {backend_name} session."
                     )
                 client_obj = existing.get("client")
-                proc = getattr(client_obj, "_proc", None)
-                process_dead = proc is not None and proc.poll() is not None
-                is_dead = getattr(client_obj, "is_dead", None)
-                if callable(is_dead) and is_dead():
-                    process_dead = True
                 reopen = normalized == "resume" and (
                     existing.get("status") in {"closed", "error"}
                     or getattr(client_obj, "is_closed", False)
-                    or process_dead
+                    or _delegate_dead(client_obj)
                 )
                 if not reopen:
-                    return json.dumps({"success": True, "reused": True, **_summary(existing)}, ensure_ascii=False)
+                    return json.dumps(
+                        {"success": True, "reused": True, **_summary(existing)},
+                        ensure_ascii=False,
+                    )
                 _SESSIONS.pop(handle, None)
+                # Waiters hold the old record; wake them instead of letting
+                # them sleep out their window on a superseded session.
+                _transition_status_locked(existing, "closed")
         if existing is not None:
             try:
                 existing["client"].close()
             except Exception:
-                logger.debug("Could not close stale delegate client before resume", exc_info=True)
+                logger.debug(
+                    "Could not close stale delegate client before resume", exc_info=True
+                )
 
         saved_cwd = str((saved or {}).get("cwd") or "").strip()
         cwd_path = Path(saved_cwd).expanduser() if saved_cwd else resolve_agent_cwd()
@@ -543,16 +652,25 @@ def delegate_session(
                 f"Cannot resume delegate session because its workspace no longer exists: {_bounded(cwd_path, 1000)}"
             )
         cwd = str(cwd_path.resolve())
-        native_hint = str((saved or {}).get("native_session_id") or (saved or {}).get("pi_session_id") or "").strip()
+        native_hint = str(
+            (saved or {}).get("native_session_id")
+            or (saved or {}).get("pi_session_id")
+            or ""
+        ).strip()
         client_class = _backend_client_class(backend_name)
         answer_backend = backend_name
         if answer_backend == "pi":
+
             def _answer(method: str, title: str, options: list[str]) -> Optional[str]:
                 # Late-bound so tests can patch ds._auto_answer_pi_question.
                 return _auto_answer_pi_question(parent_agent, method, title, options)
+
         else:
+
             def _answer(method: str, title: str, options: list[str]) -> Optional[str]:
-                return _auto_answer_delegate_question(parent_agent, answer_backend, method, title, options)
+                return _auto_answer_delegate_question(
+                    parent_agent, answer_backend, method, title, options
+                )
 
         client = client_class(
             persistent_session=True,
@@ -569,8 +687,14 @@ def delegate_session(
             try:
                 client.close()
             except Exception:
-                logger.debug("Could not close failed %s delegate client", backend_name, exc_info=True)
-            return tool_error(f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}")
+                logger.debug(
+                    "Could not close failed %s delegate client",
+                    backend_name,
+                    exc_info=True,
+                )
+            return tool_error(
+                f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
+            )
         native_id = str(state.get("sessionId") or handle)
         now = time.time()
         record: Dict[str, Any] = {
@@ -586,19 +710,24 @@ def delegate_session(
             "last_result": None,
             "error": "",
             "thread": None,
+            "state_generation": 0,
         }
         with _SESSION_LOCK:
             _SESSIONS[handle] = record
         _persist_metadata(record)
         if goal and goal.strip():
             _dispatch_turn(record, _initial_prompt(goal, context), effective_timeout)
-        return json.dumps({"success": True, "created": True, **_summary(record)}, ensure_ascii=False)
+        return json.dumps(
+            {"success": True, "created": True, **_summary(record)}, ensure_ascii=False
+        )
 
     if not session_id or not session_id.strip():
         return tool_error(f"action='{normalized}' requires session_id.")
     record = _lookup(session_id.strip(), parent_agent)
     if record is None:
-        return tool_error("Delegate session not found for this conversation. Use action='resume' to reopen a native session.")
+        return tool_error(
+            "Delegate session not found for this conversation. Use action='resume' to reopen a native session."
+        )
     session_backend = record.get("backend") or "pi"
     if backend is not None and str(backend).strip().lower() != session_backend:
         return tool_error(
@@ -607,31 +736,69 @@ def delegate_session(
     client = record["client"]
 
     if normalized == "status":
-        proc = getattr(client, "_proc", None)
-        dead = proc is not None and proc.poll() is not None
-        is_dead = getattr(client, "is_dead", None)
-        if callable(is_dead) and is_dead():
-            dead = True
-        if record.get("status") not in {"closed", "error"} and dead:
-            exit_code = getattr(proc, "returncode", None) if proc is not None else None
-            with _SESSION_LOCK:
-                record["status"] = "error"
-                record["error"] = f"{session_backend} delegate process exited with code {exit_code}"
-                record["updated_at"] = time.time()
-            _persist_metadata(record)
+        _mark_dead_delegate(record)
         return json.dumps({"success": True, **_summary(record)}, ensure_ascii=False)
+
+    if normalized == "wait":
+        started = time.monotonic()
+        deadline = started + effective_wait
+        entry_status = record.get("status")
+        while True:
+            _mark_dead_delegate(record)
+            with _SESSION_CONDITION:
+                if record.get("status") != "running":
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "timed_out": False,
+                            "state_changed": record.get("status") != entry_status,
+                            "waited_s": round(time.monotonic() - started, 3),
+                            **_summary(record),
+                        },
+                        ensure_ascii=False,
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "timed_out": True,
+                            "state_changed": False,
+                            "waited_s": round(time.monotonic() - started, 3),
+                            "note": (
+                                "Wait window elapsed; the delegated turn is still running. "
+                                "Call wait again to keep waiting, or steer to redirect - "
+                                "the worker is unaffected."
+                            ),
+                            **_summary(record),
+                        },
+                        ensure_ascii=False,
+                    )
+                # The condition is shared across sessions, so a wake may be a
+                # broadcast for another session's transition; re-checking the
+                # status each wake filters those out cheaply.
+                _SESSION_CONDITION.wait(timeout=remaining)
 
     if normalized == "messages":
         try:
             messages = client.get_messages(timeout=min(30.0, effective_timeout))
         except Exception as exc:  # noqa: BLE001
-            return tool_error(f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}")
+            return tool_error(
+                f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}"
+            )
         # Keep the tool result bounded while preserving the newest conversational state.
         safe = messages[-40:]
         encoded = json.dumps(safe, ensure_ascii=False, default=str)
         if len(encoded) > 40_000:
             encoded = encoded[-40_000:]
-        return json.dumps({"success": True, "session_id": record["session_id"], "messages_json": encoded}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": True,
+                "session_id": record["session_id"],
+                "messages_json": encoded,
+            },
+            ensure_ascii=False,
+        )
 
     if normalized == "send":
         text = (message or goal or "").strip()
@@ -639,11 +806,22 @@ def delegate_session(
             return tool_error("action='send' requires message.")
         with _SESSION_LOCK:
             if record.get("status") == "running":
-                return tool_error("Delegate session is currently running. Use action='steer' to redirect it, or wait for idle.")
+                return tool_error(
+                    "Delegate session is currently running. Use action='steer' to redirect it, or wait for idle."
+                )
             if record.get("status") == "closed":
-                return tool_error("Delegate session is closed. Use action='resume' to reopen it.")
+                return tool_error(
+                    "Delegate session is closed. Use action='resume' to reopen it."
+                )
         _dispatch_turn(record, text, effective_timeout)
-        return json.dumps({"success": True, "accepted": True, **_summary(record, include_result=False)}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": True,
+                "accepted": True,
+                **_summary(record, include_result=False),
+            },
+            ensure_ascii=False,
+        )
 
     if normalized == "steer":
         text = (message or "").strip()
@@ -652,7 +830,9 @@ def delegate_session(
         with _SESSION_LOCK:
             status = record.get("status")
             if status == "closed":
-                return tool_error("Delegate session is closed. Use action='resume' to reopen it.")
+                return tool_error(
+                    "Delegate session is closed. Use action='resume' to reopen it."
+                )
             if status != "running":
                 # Auto-degrade: the turn already ended (or the backend has no
                 # live steer), so route the message through the send path so
@@ -670,8 +850,18 @@ def delegate_session(
         try:
             response = client.steer(text, timeout=min(30.0, effective_timeout))
         except Exception as exc:  # noqa: BLE001
-            return tool_error(f"Could not steer {session_backend} session: {_bounded(exc, 1000)}")
-        return json.dumps({"success": True, "response": response, **_summary(record, include_result=False)}, ensure_ascii=False, default=str)
+            return tool_error(
+                f"Could not steer {session_backend} session: {_bounded(exc, 1000)}"
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "response": response,
+                **_summary(record, include_result=False),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
 
     if normalized == "stop":
         try:
@@ -680,11 +870,12 @@ def delegate_session(
         except Exception:
             logger.debug("Delegate abort failed before close", exc_info=True)
         client.close()
-        with _SESSION_LOCK:
-            record["status"] = "closed"
-            record["updated_at"] = time.time()
+        with _SESSION_CONDITION:
+            _transition_status_locked(record, "closed")
         _persist_metadata(record)
-        return json.dumps({"success": True, "closed": True, **_summary(record)}, ensure_ascii=False)
+        return json.dumps(
+            {"success": True, "closed": True, **_summary(record)}, ensure_ascii=False
+        )
 
     return tool_error("Unhandled delegate_session action.")
 
@@ -700,14 +891,26 @@ DELEGATE_SESSION_SCHEMA = {
         "Backend questions are answered automatically by the supervising "
         "Hermes agent rather than forwarded to the user. Pi is the default "
         "backend; pass backend='opencode' to delegate to OpenCode via its "
-        "server API. delegate_task remains the Hermes child-agent primitive."
+        "server API. delegate_task remains the Hermes child-agent primitive. "
+        "Use action='wait' to block until the delegated turn finishes (or a "
+        "bounded wait elapses) instead of external sleeps."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "resume", "send", "steer", "status", "messages", "list", "stop"],
+                "enum": [
+                    "start",
+                    "resume",
+                    "send",
+                    "steer",
+                    "status",
+                    "wait",
+                    "messages",
+                    "list",
+                    "stop",
+                ],
                 "description": "Session lifecycle/control action. Omit for start.",
             },
             "session_id": {
@@ -731,6 +934,16 @@ DELEGATE_SESSION_SCHEMA = {
                 "minimum": 10,
                 "maximum": 3600,
                 "description": "Maximum seconds allowed for each delegate turn (default 900).",
+            },
+            "wait_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 3600,
+                "description": (
+                    "Seconds action='wait' may block for a state change (default 120). "
+                    "Independent of timeout: wait expiry returns the current state and "
+                    "never terminates the running turn."
+                ),
             },
             "backend": {
                 "type": "string",
@@ -777,6 +990,7 @@ registry.register(
         context=args.get("context"),
         message=args.get("message"),
         timeout=args.get("timeout"),
+        wait_seconds=args.get("wait_seconds"),
         backend=args.get("backend"),
         parent_agent=_resolve_parent_agent(kw.get("parent_agent")),
     ),
