@@ -31,6 +31,7 @@ from tools.registry import registry, tool_error
 logger = logging.getLogger(__name__)
 
 _SESSION_LOCK = threading.RLock()
+_SESSION_CONDITION = threading.Condition(_SESSION_LOCK)
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
@@ -539,18 +540,56 @@ def _lookup(session_id: str, parent_agent: Any) -> Dict[str, Any] | None:
         return record
 
 
+def _notify_state_locked(record: Dict[str, Any]) -> None:
+    record["state_generation"] = int(record.get("state_generation") or 0) + 1
+    _SESSION_CONDITION.notify_all()
+
+
+def _transition_status_locked(record: Dict[str, Any], new_status: str) -> bool:
+    if record.get("status") == new_status:
+        return False
+    record["status"] = new_status
+    record["updated_at"] = time.time()
+    _notify_state_locked(record)
+    return True
+
+
+def _delegate_dead(client: Any) -> bool:
+    proc = getattr(client, "_proc", None)
+    if proc is not None and proc.poll() is not None:
+        return True
+    is_dead = getattr(client, "is_dead", None)
+    return callable(is_dead) and bool(is_dead())
+
+
+def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
+    client = record.get("client")
+    if client is None or record.get("status") in {"closed", "error"}:
+        return False
+    if not _delegate_dead(client):
+        return False
+    proc = getattr(client, "_proc", None)
+    exit_code = getattr(proc, "returncode", None) if proc is not None else None
+    backend = record.get("backend") or "pi"
+    with _SESSION_CONDITION:
+        record["error"] = f"{backend} delegate process exited with code {exit_code}"
+        changed = _transition_status_locked(record, "error")
+    if changed:
+        _persist_metadata(record)
+    return changed
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
-    with _SESSION_LOCK:
+    with _SESSION_CONDITION:
         if record.get("status") == "closed":
             return
-        record["status"] = "running"
         record["error"] = ""
-        record["updated_at"] = time.time()
+        _transition_status_locked(record, "running")
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
         state = result.get("state") if isinstance(result, dict) else {}
-        with _SESSION_LOCK:
+        with _SESSION_CONDITION:
             record["last_result"] = result
             record["native_session_id"] = (
                 (state.get("sessionId") if isinstance(state, dict) else None)
@@ -558,16 +597,18 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 or record["session_id"]
             )
             if record.get("status") != "closed":
-                record["status"] = "idle"
-            record["updated_at"] = time.time()
+                _transition_status_locked(record, "idle")
+            else:
+                record["updated_at"] = time.time()
         _persist_metadata(record)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
-        with _SESSION_LOCK:
-            if record.get("status") != "closed":
-                record["status"] = "error"
+        with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
-            record["updated_at"] = time.time()
+            if record.get("status") != "closed":
+                _transition_status_locked(record, "error")
+            else:
+                record["updated_at"] = time.time()
         _persist_metadata(record)
 
 
@@ -578,10 +619,9 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
         name=f"delegate-{record['session_id'][:8]}",
         daemon=True,
     )
-    with _SESSION_LOCK:
+    with _SESSION_CONDITION:
         record["thread"] = thread
-        record["status"] = "running"
-        record["updated_at"] = time.time()
+        _transition_status_locked(record, "running")
     thread.start()
 
 
@@ -609,6 +649,7 @@ def delegate_session(
     context: Optional[str] = None,
     message: Optional[str] = None,
     timeout: Optional[int] = None,
+    wait_seconds: Optional[float] = None,
     backend: Optional[str] = None,
     parent_agent: Any = None,
 ) -> str:
@@ -623,16 +664,23 @@ def delegate_session(
         "send",
         "steer",
         "status",
+        "wait",
         "messages",
         "list",
         "stop",
     }:
         return tool_error(
-            "Unknown action. Use start, resume, send, steer, status, messages, list, or stop."
+            "Unknown action. Use start, resume, send, steer, status, wait, messages, list, or stop."
         )
     if backend is not None and str(backend).strip().lower() not in _KNOWN_BACKENDS:
         return tool_error(f"Unknown backend {backend!r}. Use 'pi' or 'opencode'.")
     effective_timeout = float(max(10, min(int(timeout or 900), 3600)))
+    try:
+        effective_wait = max(
+            0.0, min(float(120 if wait_seconds is None else wait_seconds), 3600.0)
+        )
+    except (TypeError, ValueError):
+        return tool_error("wait_seconds must be a number between 0 and 3600.")
     owner = _owner_key(parent_agent)
 
     if normalized == "list":
@@ -828,8 +876,40 @@ def delegate_session(
     client = record["client"]
 
     if normalized == "status":
-        _dead_client_error(record, session_backend)
+        _mark_dead_delegate(record)
         return json.dumps({"success": True, **_summary(record)}, ensure_ascii=False)
+
+    if normalized == "wait":
+        started = time.monotonic()
+        deadline = started + effective_wait
+        entry_status = record.get("status")
+        while True:
+            _mark_dead_delegate(record)
+            with _SESSION_CONDITION:
+                if record.get("status") != "running":
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "timed_out": False,
+                            "state_changed": record.get("status") != entry_status,
+                            "waited_s": round(time.monotonic() - started, 3),
+                            **_summary(record),
+                        },
+                        ensure_ascii=False,
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "timed_out": True,
+                            "state_changed": False,
+                            "waited_s": round(time.monotonic() - started, 3),
+                            **_summary(record),
+                        },
+                        ensure_ascii=False,
+                    )
+                _SESSION_CONDITION.wait(timeout=remaining)
 
     if normalized == "messages":
         dead_error = _dead_client_error(record, session_backend)
@@ -966,6 +1046,7 @@ DELEGATE_SESSION_SCHEMA = {
                     "send",
                     "steer",
                     "status",
+                    "wait",
                     "messages",
                     "list",
                     "stop",
@@ -993,6 +1074,12 @@ DELEGATE_SESSION_SCHEMA = {
                 "minimum": 10,
                 "maximum": 3600,
                 "description": "Maximum seconds allowed for each delegate turn (default 900).",
+            },
+            "wait_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 3600,
+                "description": "Maximum seconds action='wait' blocks for a meaningful state change. Expiry is nonfatal and does not stop the delegated worker (default 120).",
             },
             "backend": {
                 "type": "string",
@@ -1039,6 +1126,7 @@ registry.register(
         context=args.get("context"),
         message=args.get("message"),
         timeout=args.get("timeout"),
+        wait_seconds=args.get("wait_seconds"),
         backend=args.get("backend"),
         parent_agent=_resolve_parent_agent(kw.get("parent_agent")),
     ),
