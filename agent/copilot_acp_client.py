@@ -73,7 +73,7 @@ def _read_env_var(name: str) -> str | None:
         try:
             if not candidate.is_file():
                 continue
-            for line in candidate.read_text().splitlines():
+            for line in candidate.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line.startswith("export "):
                     line = line[len("export "):].strip()
