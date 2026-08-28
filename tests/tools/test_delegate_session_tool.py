@@ -863,6 +863,96 @@ def test_registry_handler_forwards_backend(monkeypatch):
     assert "unknown backend" in err.lower()
 
 
+def test_wait_returns_immediately_when_session_is_idle():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+
+    before = time.monotonic()
+    waited = payload(
+        ds.delegate_session(
+            action="wait",
+            session_id=started["session_id"],
+            wait_seconds=1,
+            parent_agent=parent,
+        )
+    )
+
+    assert waited["success"] is True
+    assert waited["status"] == "idle"
+    assert waited["timed_out"] is False
+    assert time.monotonic() - before < 0.25
+
+
+def test_wait_wakes_on_running_to_idle_transition():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    payload(ds.delegate_session(action="send", session_id=sid, message="long task", parent_agent=parent))
+    assert client.started_turn.wait(timeout=1)
+
+    def release():
+        time.sleep(0.05)
+        client.release_turn.set()
+
+    thread = threading.Thread(target=release)
+    thread.start()
+    waited = payload(ds.delegate_session(action="wait", session_id=sid, wait_seconds=1, parent_agent=parent))
+    thread.join(timeout=1)
+
+    assert waited["success"] is True
+    assert waited["status"] == "idle"
+    assert waited["timed_out"] is False
+    assert waited["state_changed"] is True
+
+
+def test_wait_timeout_is_nonfatal_and_does_not_stop_worker():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    payload(ds.delegate_session(action="send", session_id=sid, message="long task", parent_agent=parent))
+    assert client.started_turn.wait(timeout=1)
+
+    waited = payload(ds.delegate_session(action="wait", session_id=sid, wait_seconds=0.05, parent_agent=parent))
+
+    assert waited["success"] is True
+    assert waited["status"] == "running"
+    assert waited["timed_out"] is True
+    assert client.is_closed is False
+    assert client.release_turn.is_set() is False
+
+    client.release_turn.set()
+    assert payload(ds.delegate_session(action="wait", session_id=sid, wait_seconds=1, parent_agent=parent))["status"] == "idle"
+
+
+def test_wait_seconds_is_separate_from_turn_timeout(monkeypatch):
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    observed = {}
+    original = client.run_session_prompt
+
+    def capture(message, *, timeout_seconds=900.0):
+        observed["timeout_seconds"] = timeout_seconds
+        return original(message, timeout_seconds=timeout_seconds)
+
+    monkeypatch.setattr(client, "run_session_prompt", capture)
+    payload(ds.delegate_session(action="send", session_id=sid, message="task", timeout=777, parent_agent=parent))
+    assert client.started_turn.wait(timeout=1)
+
+    waited = payload(ds.delegate_session(action="wait", session_id=sid, wait_seconds=0.01, timeout=11, parent_agent=parent))
+    assert waited["timed_out"] is True
+    assert observed["timeout_seconds"] == 777
+
+    client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
 def test_check_requirements_accepts_opencode_only(monkeypatch, tmp_path):
     monkeypatch.setattr(ds.shutil, "which", lambda _name: None)
     monkeypatch.setattr(ds.Path, "home", lambda: tmp_path)  # no ~/.local/bin binaries
