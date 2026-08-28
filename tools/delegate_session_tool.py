@@ -37,6 +37,11 @@ _MAX_DURABLE_SESSIONS = 500
 
 _KNOWN_BACKENDS = ("pi", "opencode")
 
+# Owners without a conversation id fall back to a process-local handle. Such
+# handles are meaningless in a later process, so they must never authorize
+# durable metadata (an id() collision would otherwise grant access).
+_PROCESS_LOCAL_OWNER_PREFIX = "agent:"
+
 
 def _default_backend() -> str:
     raw = os.environ.get("HERMES_DELEGATE_SESSION_BACKEND", "").strip().lower()
@@ -79,12 +84,15 @@ def _metadata_path(session_id: str) -> Path:
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
-        "native_session_id": record.get("native_session_id") or record.get("session_id"),
-        "pi_session_id": record.get("native_session_id") or record.get("session_id"),  # v1 read-alias
+        "native_session_id": record.get("native_session_id")
+        or record.get("session_id"),
+        "pi_session_id": record.get("native_session_id")
+        or record.get("session_id"),  # v1 read-alias
         "owner": record.get("owner"),
+        "owner_scope": record.get("owner_scope"),
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
@@ -113,7 +121,11 @@ def _prune_durable_metadata(root: Path) -> None:
         try:
             stale.unlink()
         except OSError:
-            logger.debug("Could not prune stale delegate-session metadata %s", stale, exc_info=True)
+            logger.debug(
+                "Could not prune stale delegate-session metadata %s",
+                stale,
+                exc_info=True,
+            )
 
 
 def _persist_metadata(record: Dict[str, Any]) -> None:
@@ -129,7 +141,10 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         try:
             tmp.chmod(0o600)
         except OSError:
@@ -137,7 +152,11 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         tmp.replace(path)
         _prune_durable_metadata(path.parent)
     except OSError:
-        logger.debug("Could not persist delegate-session metadata for %s", session_id, exc_info=True)
+        logger.debug(
+            "Could not persist delegate-session metadata for %s",
+            session_id,
+            exc_info=True,
+        )
 
 
 def _load_metadata(session_id: str) -> dict[str, Any] | None:
@@ -150,7 +169,47 @@ def _load_metadata(session_id: str) -> dict[str, Any] | None:
     return data
 
 
-def _durable_rows_for_owner(owner: str) -> list[dict[str, Any]]:
+def _scope_for_workspace(cwd: str | Path | None = None) -> str | None:
+    """Stable profile+workspace authorization scope, independent of conversation id."""
+    try:
+        workspace = Path(cwd).expanduser() if cwd is not None else resolve_agent_cwd()
+        workspace = workspace.resolve()
+        if not workspace.is_dir():
+            return None
+        profile_root = _session_store_root().resolve().parent
+    except (OSError, RuntimeError, ValueError):
+        return None
+    raw = f"{profile_root}\0{workspace}".encode("utf-8", errors="surrogatepass")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _metadata_authorized(
+    data: dict[str, Any], parent_agent: Any, caller_scope: str | None = None
+) -> bool:
+    """Authorize durable metadata: conversation owner or profile/workspace scope."""
+    owner = str(data.get("owner") or "").strip()
+    if owner and not owner.startswith(_PROCESS_LOCAL_OWNER_PREFIX):
+        # The conversation that started the session keeps durable control even
+        # if its resolved cwd later moved. Process-local "agent:<id>" fallbacks
+        # are not stable across restarts and never authorize durable metadata.
+        if owner == _owner_key(parent_agent):
+            return True
+    if caller_scope is None:
+        caller_scope = _scope_for_workspace()
+    if not caller_scope:
+        return False
+    saved_scope = str(data.get("owner_scope") or "").strip()
+    if saved_scope:
+        return saved_scope == caller_scope
+    # v1/v2 metadata predates owner_scope. Migrate safely from its durable cwd;
+    # the legacy conversation owner alone is not enough to cross workspaces.
+    saved_cwd = str(data.get("cwd") or "").strip()
+    return bool(saved_cwd and _scope_for_workspace(saved_cwd) == caller_scope)
+
+
+def _durable_rows_for_caller(
+    parent_agent: Any, caller_scope: str | None = None
+) -> list[dict[str, Any]]:
     root = _session_store_root()
     if not root.is_dir():
         return []
@@ -160,14 +219,20 @@ def _durable_rows_for_owner(owner: str) -> list[dict[str, Any]]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(data, dict) or data.get("owner") != owner or not data.get("session_id"):
+        if (
+            not isinstance(data, dict)
+            or not data.get("session_id")
+            or not _metadata_authorized(data, parent_agent, caller_scope)
+        ):
             continue
         rows.append(data)
     return rows
 
 
 def check_delegate_session_requirements() -> bool:
-    pi_available = bool(shutil.which("pi") or Path.home().joinpath(".local", "bin", "pi").is_file())
+    pi_available = bool(
+        shutil.which("pi") or Path.home().joinpath(".local", "bin", "pi").is_file()
+    )
     opencode_available = bool(
         os.environ.get("HERMES_OPENCODE_SERVER_URL", "").strip()
         or shutil.which("opencode")
@@ -178,7 +243,7 @@ def check_delegate_session_requirements() -> bool:
 
 def _owner_key(parent_agent: Any) -> str:
     durable = str(getattr(parent_agent, "session_id", "") or "").strip()
-    return durable or f"agent:{id(parent_agent)}"
+    return durable or f"{_PROCESS_LOCAL_OWNER_PREFIX}{id(parent_agent)}"
 
 
 def _bounded(value: Any, maximum: int = _MAX_TEXT) -> str:
@@ -240,7 +305,9 @@ def _parent_main_runtime(parent_agent: Any) -> dict[str, Any] | None:
             if isinstance(runtime, dict):
                 return runtime
         except Exception:
-            logger.debug("Could not read parent runtime for Pi question answer", exc_info=True)
+            logger.debug(
+                "Could not read parent runtime for Pi question answer", exc_info=True
+            )
     runtime = {
         key: getattr(parent_agent, key, "") or ""
         for key in ("model", "provider", "base_url", "api_key", "api_mode", "auth_mode")
@@ -272,7 +339,9 @@ def _auto_answer_delegate_question(
     if method == "confirm":
         format_rule = "Answer exactly yes or no."
     elif method == "select" and options:
-        format_rule = "Answer with exactly one of the listed options, with no explanation."
+        format_rule = (
+            "Answer with exactly one of the listed options, with no explanation."
+        )
     else:
         format_rule = "Answer directly and concisely. Return only the answer the delegate should receive."
 
@@ -357,7 +426,8 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
         "native_session_id": record.get("native_session_id") or record["session_id"],
-        "pi_session_id": record.get("native_session_id") or record["session_id"],  # kept for model-callers
+        "pi_session_id": record.get("native_session_id")
+        or record["session_id"],  # kept for model-callers
         "status": record.get("status", "unknown"),
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
@@ -374,11 +444,97 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
     return out
 
 
+def _record_authorized(
+    record: Dict[str, Any], parent_agent: Any, caller_scope: str | None = None
+) -> bool:
+    """Authorize a live record: conversation owner or profile/workspace scope.
+
+    The conversation that started the session keeps control even if its
+    resolved workspace later moved (e.g. the caller cd'd elsewhere); otherwise a
+    matching stable scope lets a replacement supervisor in the same workspace
+    and profile recover the session.
+    """
+    if record.get("owner") == _owner_key(parent_agent):
+        return True
+    if caller_scope is None:
+        caller_scope = _scope_for_workspace()
+    saved_scope = str(record.get("owner_scope") or "").strip()
+    # Process-local legacy records may lack owner_scope before lazy migration;
+    # those fall back to the owner match above only.
+    return bool(caller_scope and saved_scope and saved_scope == caller_scope)
+
+
+# Returned with offline-durable payloads so the model knows how to recover.
+_OFFLINE_RESUME_NOTE = (
+    "Delegate session is offline: durable metadata exists but the native client "
+    "is not loaded in this process. Use action='resume' with this session_id to "
+    "reopen the native session and recover full control."
+)
+
+
+def _durable_summary(
+    meta: dict[str, Any], *, note: Optional[str] = None
+) -> dict[str, Any]:
+    """Offline summary rebuilt from durable metadata (no client loaded)."""
+    sid = str(meta.get("session_id") or "")
+    native = str(meta.get("native_session_id") or meta.get("pi_session_id") or sid)
+    out: dict[str, Any] = {
+        "session_id": sid,
+        "backend": meta.get("backend") or "pi",
+        "native_session_id": native,
+        "pi_session_id": native,  # kept for model-callers
+        "status": "offline",
+        "cwd": meta.get("cwd"),
+        "created_at": meta.get("created_at"),
+        "updated_at": meta.get("updated_at"),
+        "pending_question": None,
+        "error": None,
+    }
+    if note:
+        out["note"] = note
+    return out
+
+
+def _authorized_durable_meta(
+    session_id: str, parent_agent: Any, caller_scope: str | None = None
+) -> Optional[dict[str, Any]]:
+    """Load durable metadata for session_id when this supervisor may see it."""
+    data = _load_metadata(session_id)
+    if data is None or not _metadata_authorized(data, parent_agent, caller_scope):
+        return None
+    return data
+
+
+def _dead_client_error(record: Dict[str, Any], backend: str) -> Optional[str]:
+    """Mark a live record whose native process died; return an actionable error.
+
+    Without this, a supervisor reading a stale in-memory record gets either a
+    silent "running" state or a raw RPC failure instead of a resume hint.
+    """
+    client = record.get("client")
+    proc = getattr(client, "_proc", None)
+    dead = proc is not None and proc.poll() is not None
+    is_dead = getattr(client, "is_dead", None)
+    if callable(is_dead) and is_dead():
+        dead = True
+    if not dead or record.get("status") in {"closed", "error"}:
+        return None
+    exit_code = getattr(proc, "returncode", None) if proc is not None else None
+    with _SESSION_LOCK:
+        record["status"] = "error"
+        record["error"] = f"{backend} delegate process exited with code {exit_code}"
+        record["updated_at"] = time.time()
+    _persist_metadata(record)
+    return (
+        f"{backend} delegate process exited with code {exit_code}. "
+        "Use action='resume' to reopen the native session."
+    )
+
+
 def _lookup(session_id: str, parent_agent: Any) -> Dict[str, Any] | None:
-    owner = _owner_key(parent_agent)
     with _SESSION_LOCK:
         record = _SESSIONS.get(session_id)
-        if record is None or record.get("owner") != owner:
+        if record is None or not _record_authorized(record, parent_agent):
             return None
         return record
 
@@ -397,8 +553,10 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         with _SESSION_LOCK:
             record["last_result"] = result
             record["native_session_id"] = (
-                state.get("sessionId") if isinstance(state, dict) else None
-            ) or record.get("native_session_id") or record["session_id"]
+                (state.get("sessionId") if isinstance(state, dict) else None)
+                or record.get("native_session_id")
+                or record["session_id"]
+            )
             if record.get("status") != "closed":
                 record["status"] = "idle"
             record["updated_at"] = time.time()
@@ -459,7 +617,16 @@ def delegate_session(
         return tool_error("delegate_session requires a parent agent context.")
 
     normalized = (action or "start").strip().lower()
-    if normalized not in {"start", "resume", "send", "steer", "status", "messages", "list", "stop"}:
+    if normalized not in {
+        "start",
+        "resume",
+        "send",
+        "steer",
+        "status",
+        "messages",
+        "list",
+        "stop",
+    }:
         return tool_error(
             "Unknown action. Use start, resume, send, steer, status, messages, list, or stop."
         )
@@ -469,26 +636,20 @@ def delegate_session(
     owner = _owner_key(parent_agent)
 
     if normalized == "list":
+        caller_scope = _scope_for_workspace()
         with _SESSION_LOCK:
-            live_records = [record for record in _SESSIONS.values() if record.get("owner") == owner]
+            live_records = [
+                record
+                for record in _SESSIONS.values()
+                if _record_authorized(record, parent_agent, caller_scope)
+            ]
             live_ids = {str(record.get("session_id") or "") for record in live_records}
             rows = [_summary(record, include_result=False) for record in live_records]
-        for meta in _durable_rows_for_owner(owner):
+        for meta in _durable_rows_for_caller(parent_agent, caller_scope):
             sid = str(meta.get("session_id") or "")
             if not sid or sid in live_ids:
                 continue
-            rows.append({
-                "session_id": sid,
-                "backend": meta.get("backend") or "pi",
-                "native_session_id": meta.get("native_session_id") or meta.get("pi_session_id") or sid,
-                "pi_session_id": meta.get("pi_session_id") or meta.get("native_session_id") or sid,
-                "status": "offline",
-                "cwd": meta.get("cwd"),
-                "created_at": meta.get("created_at"),
-                "updated_at": meta.get("updated_at"),
-                "pending_question": None,
-                "error": None,
-            })
+            rows.append(_durable_summary(meta))
         rows.sort(key=lambda row: float(row.get("updated_at") or 0), reverse=True)
         return json.dumps({"success": True, "sessions": rows}, ensure_ascii=False)
 
@@ -498,8 +659,10 @@ def delegate_session(
             return tool_error("action=resume requires session_id.")
         handle = requested_id or str(uuid.uuid4())
         saved = _load_metadata(handle) if requested_id else None
-        if saved is not None and saved.get("owner") not in {None, owner}:
-            return tool_error("That delegate session belongs to another conversation.")
+        if saved is not None and not _metadata_authorized(saved, parent_agent):
+            return tool_error(
+                "That delegate session belongs to another profile or workspace."
+            )
 
         backend_name = _resolve_backend(backend, (saved or {}).get("backend"))
         if backend_name is None:
@@ -509,9 +672,14 @@ def delegate_session(
         with _SESSION_LOCK:
             existing = _SESSIONS.get(handle)
             if existing is not None:
-                if existing.get("owner") != owner:
-                    return tool_error("That delegate session belongs to another conversation.")
-                if backend is not None and (existing.get("backend") or "pi") != backend_name:
+                if not _record_authorized(existing, parent_agent):
+                    return tool_error(
+                        "That delegate session belongs to another profile or workspace."
+                    )
+                if (
+                    backend is not None
+                    and (existing.get("backend") or "pi") != backend_name
+                ):
                     return tool_error(
                         f"Session {handle} is a {existing.get('backend') or 'pi'} delegate session; "
                         f"it cannot be reopened as a {backend_name} session."
@@ -528,13 +696,18 @@ def delegate_session(
                     or process_dead
                 )
                 if not reopen:
-                    return json.dumps({"success": True, "reused": True, **_summary(existing)}, ensure_ascii=False)
+                    return json.dumps(
+                        {"success": True, "reused": True, **_summary(existing)},
+                        ensure_ascii=False,
+                    )
                 _SESSIONS.pop(handle, None)
         if existing is not None:
             try:
                 existing["client"].close()
             except Exception:
-                logger.debug("Could not close stale delegate client before resume", exc_info=True)
+                logger.debug(
+                    "Could not close stale delegate client before resume", exc_info=True
+                )
 
         saved_cwd = str((saved or {}).get("cwd") or "").strip()
         cwd_path = Path(saved_cwd).expanduser() if saved_cwd else resolve_agent_cwd()
@@ -543,16 +716,25 @@ def delegate_session(
                 f"Cannot resume delegate session because its workspace no longer exists: {_bounded(cwd_path, 1000)}"
             )
         cwd = str(cwd_path.resolve())
-        native_hint = str((saved or {}).get("native_session_id") or (saved or {}).get("pi_session_id") or "").strip()
+        native_hint = str(
+            (saved or {}).get("native_session_id")
+            or (saved or {}).get("pi_session_id")
+            or ""
+        ).strip()
         client_class = _backend_client_class(backend_name)
         answer_backend = backend_name
         if answer_backend == "pi":
+
             def _answer(method: str, title: str, options: list[str]) -> Optional[str]:
                 # Late-bound so tests can patch ds._auto_answer_pi_question.
                 return _auto_answer_pi_question(parent_agent, method, title, options)
+
         else:
+
             def _answer(method: str, title: str, options: list[str]) -> Optional[str]:
-                return _auto_answer_delegate_question(parent_agent, answer_backend, method, title, options)
+                return _auto_answer_delegate_question(
+                    parent_agent, answer_backend, method, title, options
+                )
 
         client = client_class(
             persistent_session=True,
@@ -569,8 +751,14 @@ def delegate_session(
             try:
                 client.close()
             except Exception:
-                logger.debug("Could not close failed %s delegate client", backend_name, exc_info=True)
-            return tool_error(f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}")
+                logger.debug(
+                    "Could not close failed %s delegate client",
+                    backend_name,
+                    exc_info=True,
+                )
+            return tool_error(
+                f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
+            )
         native_id = str(state.get("sessionId") or handle)
         now = time.time()
         record: Dict[str, Any] = {
@@ -578,6 +766,7 @@ def delegate_session(
             "backend": backend_name,
             "native_session_id": native_id,
             "owner": owner,
+            "owner_scope": _scope_for_workspace(cwd),
             "cwd": cwd,
             "client": client,
             "status": "idle",
@@ -592,13 +781,45 @@ def delegate_session(
         _persist_metadata(record)
         if goal and goal.strip():
             _dispatch_turn(record, _initial_prompt(goal, context), effective_timeout)
-        return json.dumps({"success": True, "created": True, **_summary(record)}, ensure_ascii=False)
+        return json.dumps(
+            {"success": True, "created": True, **_summary(record)}, ensure_ascii=False
+        )
 
     if not session_id or not session_id.strip():
         return tool_error(f"action='{normalized}' requires session_id.")
     record = _lookup(session_id.strip(), parent_agent)
     if record is None:
-        return tool_error("Delegate session not found for this conversation. Use action='resume' to reopen a native session.")
+        # Durable metadata may outlive the in-memory registry (gateway restart,
+        # supervisor replacement). Reads fall back to an offline summary;
+        # control actions fail closed until the session is resumed.
+        durable = _authorized_durable_meta(session_id.strip(), parent_agent)
+        if durable is None:
+            return tool_error(
+                "Delegate session not found for this conversation. Use action='resume' to reopen a native session."
+            )
+        if normalized == "status":
+            return json.dumps(
+                {
+                    "success": True,
+                    **_durable_summary(durable, note=_OFFLINE_RESUME_NOTE),
+                },
+                ensure_ascii=False,
+            )
+        if normalized == "messages":
+            # Durable metadata deliberately stores no prompt text; the native
+            # backend holds the history once the session is resumed.
+            return json.dumps(
+                {
+                    "success": True,
+                    **_durable_summary(durable, note=_OFFLINE_RESUME_NOTE),
+                    "messages_json": "[]",
+                },
+                ensure_ascii=False,
+            )
+        return tool_error(
+            f"Delegate session {session_id.strip()} is offline (durable). "
+            f"Use action='resume' to reopen it before action='{normalized}'."
+        )
     session_backend = record.get("backend") or "pi"
     if backend is not None and str(backend).strip().lower() != session_backend:
         return tool_error(
@@ -607,52 +828,72 @@ def delegate_session(
     client = record["client"]
 
     if normalized == "status":
-        proc = getattr(client, "_proc", None)
-        dead = proc is not None and proc.poll() is not None
-        is_dead = getattr(client, "is_dead", None)
-        if callable(is_dead) and is_dead():
-            dead = True
-        if record.get("status") not in {"closed", "error"} and dead:
-            exit_code = getattr(proc, "returncode", None) if proc is not None else None
-            with _SESSION_LOCK:
-                record["status"] = "error"
-                record["error"] = f"{session_backend} delegate process exited with code {exit_code}"
-                record["updated_at"] = time.time()
-            _persist_metadata(record)
+        _dead_client_error(record, session_backend)
         return json.dumps({"success": True, **_summary(record)}, ensure_ascii=False)
 
     if normalized == "messages":
+        dead_error = _dead_client_error(record, session_backend)
+        if dead_error:
+            return tool_error(dead_error)
         try:
             messages = client.get_messages(timeout=min(30.0, effective_timeout))
         except Exception as exc:  # noqa: BLE001
-            return tool_error(f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}")
+            return tool_error(
+                f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}"
+            )
         # Keep the tool result bounded while preserving the newest conversational state.
         safe = messages[-40:]
         encoded = json.dumps(safe, ensure_ascii=False, default=str)
         if len(encoded) > 40_000:
             encoded = encoded[-40_000:]
-        return json.dumps({"success": True, "session_id": record["session_id"], "messages_json": encoded}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": True,
+                "session_id": record["session_id"],
+                "messages_json": encoded,
+            },
+            ensure_ascii=False,
+        )
 
     if normalized == "send":
         text = (message or goal or "").strip()
         if not text:
             return tool_error("action='send' requires message.")
+        dead_error = _dead_client_error(record, session_backend)
+        if dead_error:
+            return tool_error(dead_error)
         with _SESSION_LOCK:
             if record.get("status") == "running":
-                return tool_error("Delegate session is currently running. Use action='steer' to redirect it, or wait for idle.")
+                return tool_error(
+                    "Delegate session is currently running. Use action='steer' to redirect it, or wait for idle."
+                )
             if record.get("status") == "closed":
-                return tool_error("Delegate session is closed. Use action='resume' to reopen it.")
+                return tool_error(
+                    "Delegate session is closed. Use action='resume' to reopen it."
+                )
         _dispatch_turn(record, text, effective_timeout)
-        return json.dumps({"success": True, "accepted": True, **_summary(record, include_result=False)}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": True,
+                "accepted": True,
+                **_summary(record, include_result=False),
+            },
+            ensure_ascii=False,
+        )
 
     if normalized == "steer":
         text = (message or "").strip()
         if not text:
             return tool_error("action='steer' requires message.")
+        dead_error = _dead_client_error(record, session_backend)
+        if dead_error:
+            return tool_error(dead_error)
         with _SESSION_LOCK:
             status = record.get("status")
             if status == "closed":
-                return tool_error("Delegate session is closed. Use action='resume' to reopen it.")
+                return tool_error(
+                    "Delegate session is closed. Use action='resume' to reopen it."
+                )
             if status != "running":
                 # Auto-degrade: the turn already ended (or the backend has no
                 # live steer), so route the message through the send path so
@@ -670,8 +911,18 @@ def delegate_session(
         try:
             response = client.steer(text, timeout=min(30.0, effective_timeout))
         except Exception as exc:  # noqa: BLE001
-            return tool_error(f"Could not steer {session_backend} session: {_bounded(exc, 1000)}")
-        return json.dumps({"success": True, "response": response, **_summary(record, include_result=False)}, ensure_ascii=False, default=str)
+            return tool_error(
+                f"Could not steer {session_backend} session: {_bounded(exc, 1000)}"
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "response": response,
+                **_summary(record, include_result=False),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
 
     if normalized == "stop":
         try:
@@ -684,7 +935,9 @@ def delegate_session(
             record["status"] = "closed"
             record["updated_at"] = time.time()
         _persist_metadata(record)
-        return json.dumps({"success": True, "closed": True, **_summary(record)}, ensure_ascii=False)
+        return json.dumps(
+            {"success": True, "closed": True, **_summary(record)}, ensure_ascii=False
+        )
 
     return tool_error("Unhandled delegate_session action.")
 
@@ -707,7 +960,16 @@ DELEGATE_SESSION_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "resume", "send", "steer", "status", "messages", "list", "stop"],
+                "enum": [
+                    "start",
+                    "resume",
+                    "send",
+                    "steer",
+                    "status",
+                    "messages",
+                    "list",
+                    "stop",
+                ],
                 "description": "Session lifecycle/control action. Omit for start.",
             },
             "session_id": {

@@ -20,7 +20,16 @@ class Parent:
 class FakePiClient:
     instances = []
 
-    def __init__(self, *, persistent_session=False, session_id=None, session_name=None, acp_cwd=None, question_answerer=None, **_kwargs):
+    def __init__(
+        self,
+        *,
+        persistent_session=False,
+        session_id=None,
+        session_name=None,
+        acp_cwd=None,
+        question_answerer=None,
+        **_kwargs,
+    ):
         self.persistent_session = persistent_session
         self.session_id = session_id
         self.session_name = session_name
@@ -88,7 +97,9 @@ def clean_sessions(monkeypatch, tmp_path):
     FakePiClient.instances.clear()
     monkeypatch.setattr(ds, "PiRPCClient", FakePiClient)
     monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: tmp_path)
-    monkeypatch.setattr(ds, "_session_store_root", lambda: tmp_path / "delegate-session-store")
+    monkeypatch.setattr(
+        ds, "_session_store_root", lambda: tmp_path / "delegate-session-store"
+    )
     monkeypatch.setattr(ds, "pending_question_for_owner", lambda _client: None)
     yield
     with ds._SESSION_LOCK:
@@ -104,11 +115,15 @@ def payload(raw: str) -> dict:
     return json.loads(raw)
 
 
-def wait_for_status(parent: Parent, sid: str, wanted: str, timeout: float = 2.0) -> dict:
+def wait_for_status(
+    parent: Parent, sid: str, wanted: str, timeout: float = 2.0
+) -> dict:
     deadline = time.time() + timeout
     latest = {}
     while time.time() < deadline:
-        latest = payload(ds.delegate_session(action="status", session_id=sid, parent_agent=parent))
+        latest = payload(
+            ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+        )
         if latest.get("status") == wanted:
             return latest
         time.sleep(0.01)
@@ -143,7 +158,10 @@ def test_start_installs_hermes_auto_question_answerer(monkeypatch):
 
     assert result["success"] is True
     assert callable(client.question_answerer)
-    assert client.question_answerer("input", "Which path?", ["A", "B"]) == "Hermes chose this"
+    assert (
+        client.question_answerer("input", "Which path?", ["A", "B"])
+        == "Hermes chose this"
+    )
     assert seen == [(parent, "input", "Which path?", ["A", "B"])]
 
 
@@ -179,19 +197,34 @@ def test_auto_answer_uses_supervising_context_and_main_runtime(monkeypatch):
 
 def test_auto_answer_normalizes_confirm_and_select(monkeypatch):
     parent = Parent()
-    answers = iter(["Proceed, yes.", "use grpc", "2", "not one of the options", "maybe"])
+    answers = iter([
+        "Proceed, yes.",
+        "use grpc",
+        "2",
+        "not one of the options",
+        "maybe",
+    ])
     monkeypatch.setattr("agent.oneshot.run_oneshot", lambda **_kwargs: next(answers))
 
     assert ds._auto_answer_pi_question(parent, "confirm", "Continue?", []) == "yes"
-    assert ds._auto_answer_pi_question(
-        parent, "select", "Transport?", ["Use REST", "Use gRPC"]
-    ) == "Use gRPC"
-    assert ds._auto_answer_pi_question(
-        parent, "select", "Transport?", ["Use REST", "Use gRPC"]
-    ) == "Use gRPC"
-    assert ds._auto_answer_pi_question(
-        parent, "select", "Transport?", ["Use REST", "Use gRPC"]
-    ) is None
+    assert (
+        ds._auto_answer_pi_question(
+            parent, "select", "Transport?", ["Use REST", "Use gRPC"]
+        )
+        == "Use gRPC"
+    )
+    assert (
+        ds._auto_answer_pi_question(
+            parent, "select", "Transport?", ["Use REST", "Use gRPC"]
+        )
+        == "Use gRPC"
+    )
+    assert (
+        ds._auto_answer_pi_question(
+            parent, "select", "Transport?", ["Use REST", "Use gRPC"]
+        )
+        is None
+    )
     assert ds._auto_answer_pi_question(parent, "confirm", "Continue?", []) is None
 
 
@@ -201,11 +234,19 @@ def test_send_reuses_same_client_and_preserves_followup_history():
     sid = started["session_id"]
     client = FakePiClient.instances[-1]
 
-    first = payload(ds.delegate_session(action="send", session_id=sid, message="first", parent_agent=parent))
+    first = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="first", parent_agent=parent
+        )
+    )
     assert first["accepted"] is True
     wait_for_status(parent, sid, "idle")
 
-    second = payload(ds.delegate_session(action="send", session_id=sid, message="second", parent_agent=parent))
+    second = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="second", parent_agent=parent
+        )
+    )
     assert second["accepted"] is True
     final = wait_for_status(parent, sid, "idle")
 
@@ -220,11 +261,22 @@ def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
     sid = started["session_id"]
     client = FakePiClient.instances[-1]
 
-    payload(ds.delegate_session(action="send", session_id=sid, message="first", parent_agent=parent))
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="first", parent_agent=parent
+        )
+    )
     wait_for_status(parent, sid, "idle")
 
     # Race window: turn already ended, but the caller tries to steer.
-    steered = payload(ds.delegate_session(action="steer", session_id=sid, message="focus on tests", parent_agent=parent))
+    steered = payload(
+        ds.delegate_session(
+            action="steer",
+            session_id=sid,
+            message="focus on tests",
+            parent_agent=parent,
+        )
+    )
     assert steered["success"] is True
     assert steered["degraded_to_send"] is True
     assert "follow-up" in steered["note"]
@@ -242,7 +294,11 @@ def test_steer_on_closed_session_still_errors_with_resume_hint():
 
     payload(ds.delegate_session(action="stop", session_id=sid, parent_agent=parent))
 
-    result = payload(ds.delegate_session(action="steer", session_id=sid, message="hello", parent_agent=parent))
+    result = payload(
+        ds.delegate_session(
+            action="steer", session_id=sid, message="hello", parent_agent=parent
+        )
+    )
     assert result.get("error") or result.get("success") is not True
 
 
@@ -253,10 +309,21 @@ def test_steer_targets_live_session_instead_of_spawning_child_agent():
     client = FakePiClient.instances[-1]
     client.block_turns = True
 
-    payload(ds.delegate_session(action="send", session_id=sid, message="long task", parent_agent=parent))
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="long task", parent_agent=parent
+        )
+    )
     assert client.started_turn.wait(timeout=1)
 
-    steered = payload(ds.delegate_session(action="steer", session_id=sid, message="focus on tests", parent_agent=parent))
+    steered = payload(
+        ds.delegate_session(
+            action="steer",
+            session_id=sid,
+            message="focus on tests",
+            parent_agent=parent,
+        )
+    )
     assert steered["success"] is True
     assert client.steers == ["focus on tests"]
 
@@ -264,19 +331,22 @@ def test_steer_targets_live_session_instead_of_spawning_child_agent():
     wait_for_status(parent, sid, "idle")
 
 
-def test_sessions_are_scoped_to_owning_hermes_conversation():
+def test_sessions_are_recoverable_by_new_supervisor_in_same_workspace():
     owner = Parent("owner")
-    stranger = Parent("stranger")
+    replacement = Parent("replacement")
     started = payload(ds.delegate_session(action="start", parent_agent=owner))
     sid = started["session_id"]
 
-    denied = ds.delegate_session(action="status", session_id=sid, parent_agent=stranger)
-    assert "not found for this conversation" in denied.lower()
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=replacement)
+    )
+    assert status["success"] is True
+    assert status["session_id"] == sid
 
-    owner_list = payload(ds.delegate_session(action="list", parent_agent=owner))
-    stranger_list = payload(ds.delegate_session(action="list", parent_agent=stranger))
-    assert [row["session_id"] for row in owner_list["sessions"]] == [sid]
-    assert stranger_list["sessions"] == []
+    replacement_list = payload(
+        ds.delegate_session(action="list", parent_agent=replacement)
+    )
+    assert [row["session_id"] for row in replacement_list["sessions"]] == [sid]
 
 
 def test_stop_closes_client_but_native_id_can_be_resumed():
@@ -285,7 +355,9 @@ def test_stop_closes_client_but_native_id_can_be_resumed():
     sid = started["session_id"]
     first_client = FakePiClient.instances[-1]
 
-    stopped = payload(ds.delegate_session(action="stop", session_id=sid, parent_agent=parent))
+    stopped = payload(
+        ds.delegate_session(action="stop", session_id=sid, parent_agent=parent)
+    )
     assert stopped["closed"] is True
     assert first_client.is_closed is True
 
@@ -293,7 +365,9 @@ def test_stop_closes_client_but_native_id_can_be_resumed():
     # session remains durable on disk, then reopen the same native session id.
     with ds._SESSION_LOCK:
         ds._SESSIONS.pop(sid, None)
-    resumed = payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
     assert resumed["created"] is True
     assert resumed["session_id"] == sid
     assert resumed["pi_session_id"] == sid
@@ -308,7 +382,9 @@ def test_stop_then_resume_reopens_in_same_gateway_process():
     first_client = FakePiClient.instances[-1]
 
     payload(ds.delegate_session(action="stop", session_id=sid, parent_agent=parent))
-    resumed = payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
 
     assert resumed["success"] is True
     assert resumed["created"] is True
@@ -318,7 +394,7 @@ def test_stop_then_resume_reopens_in_same_gateway_process():
     assert callable(FakePiClient.instances[-1].question_answerer)
 
 
-def test_resume_after_registry_loss_uses_durable_original_workspace(monkeypatch, tmp_path):
+def test_resume_after_registry_loss_requires_same_workspace(monkeypatch, tmp_path):
     parent = Parent()
     original = tmp_path / "original"
     elsewhere = tmp_path / "elsewhere"
@@ -335,7 +411,17 @@ def test_resume_after_registry_loss_uses_durable_original_workspace(monkeypatch,
     stale["client"].close()
     monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: elsewhere)
 
-    resumed = payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    denied = ds.delegate_session(
+        action="resume", session_id=sid, parent_agent=Parent("replacement")
+    )
+    assert "another profile or workspace" in denied.lower()
+
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: original)
+    resumed = payload(
+        ds.delegate_session(
+            action="resume", session_id=sid, parent_agent=Parent("replacement")
+        )
+    )
     assert resumed["cwd"] == str(original.resolve())
     assert FakePiClient.instances[-1].cwd == str(original.resolve())
 
@@ -376,17 +462,166 @@ def test_durable_metadata_cache_prunes_oldest_files(monkeypatch, tmp_path):
     assert not created[1].exists()
 
 
-def test_durable_resume_metadata_enforces_conversation_owner():
+def test_durable_resume_metadata_allows_replacement_supervisor_in_same_workspace():
     owner = Parent("owner")
-    stranger = Parent("stranger")
+    replacement = Parent("replacement")
     started = payload(ds.delegate_session(action="start", parent_agent=owner))
     sid = started["session_id"]
     with ds._SESSION_LOCK:
         stale = ds._SESSIONS.pop(sid)
     stale["client"].close()
 
-    denied = ds.delegate_session(action="resume", session_id=sid, parent_agent=stranger)
-    assert "belongs to another conversation" in denied.lower()
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=replacement)
+    )
+    assert resumed["success"] is True
+    assert resumed["session_id"] == sid
+
+
+def _write_metadata(sid: str, **fields) -> None:
+    """Craft durable metadata directly (as written by an older Hermes)."""
+    data = {
+        "version": 2,
+        "backend": "pi",
+        "session_id": sid,
+        "native_session_id": sid,
+        "pi_session_id": sid,
+        "owner": "legacy-supervisor",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    data.update(fields)
+    path = ds._metadata_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_legacy_v2_metadata_migrates_on_same_workspace_resume(tmp_path, monkeypatch):
+    workspace = tmp_path / "legacy"
+    workspace.mkdir()
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: workspace)
+    sid = "legacy-v2-session"
+    _write_metadata(sid, cwd=str(workspace.resolve()))
+
+    resumed = payload(
+        ds.delegate_session(
+            action="resume", session_id=sid, parent_agent=Parent("new-supervisor")
+        )
+    )
+
+    assert resumed["success"] is True
+    assert resumed["session_id"] == sid
+    assert FakePiClient.instances[-1].session_id == sid
+    upgraded = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
+    assert upgraded["version"] == 3
+    assert upgraded["owner_scope"] == ds._scope_for_workspace(workspace)
+
+
+def test_legacy_v2_metadata_denied_across_workspaces(tmp_path, monkeypatch):
+    here = tmp_path / "here"
+    elsewhere = tmp_path / "elsewhere"
+    here.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: here)
+    sid = "legacy-v2-foreign"
+    _write_metadata(sid, cwd=str(elsewhere.resolve()))
+
+    denied = ds.delegate_session(
+        action="resume", session_id=sid, parent_agent=Parent("new-supervisor")
+    )
+
+    assert "another profile or workspace" in denied.lower()
+    assert not FakePiClient.instances
+
+
+def test_offline_control_actions_fail_closed_until_resumed():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    for action, extra in (
+        ("send", {"message": "hello"}),
+        ("steer", {"message": "hello"}),
+        ("stop", {}),
+    ):
+        result = payload(
+            ds.delegate_session(
+                action=action, session_id=sid, parent_agent=parent, **extra
+            )
+        )
+        assert result.get("error"), action
+        assert "offline" in result["error"].lower()
+        assert "resume" in result["error"].lower()
+
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert status["success"] is True
+    assert status["status"] == "offline"
+    assert "resume" in (status.get("note") or "").lower()
+
+    messages = payload(
+        ds.delegate_session(action="messages", session_id=sid, parent_agent=parent)
+    )
+    assert messages["success"] is True
+    assert messages["messages_json"] == "[]"
+    assert "resume" in (messages.get("note") or "").lower()
+
+
+def test_owner_grant_survives_workspace_move(tmp_path, monkeypatch):
+    original = tmp_path / "original"
+    moved = tmp_path / "moved"
+    original.mkdir()
+    moved.mkdir()
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: original)
+    owner = Parent("owner")
+    started = payload(ds.delegate_session(action="start", parent_agent=owner))
+    sid = started["session_id"]
+
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: moved)
+
+    # The conversation that owns the session keeps control after its cwd moves.
+    sent = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="still mine", parent_agent=owner
+        )
+    )
+    assert sent["accepted"] is True
+    wait_for_status(owner, sid, "idle")
+
+    # The scope grant does not extend to a replacement supervisor in the moved-to workspace.
+    denied = payload(
+        ds.delegate_session(
+            action="send",
+            session_id=sid,
+            message="mine now",
+            parent_agent=Parent("replacement"),
+        )
+    )
+    assert denied.get("error")
+    assert not denied.get("success")
+
+
+def test_process_local_owner_never_authorizes_durable_metadata(tmp_path, monkeypatch):
+    here = tmp_path / "here"
+    elsewhere = tmp_path / "elsewhere"
+    here.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: here)
+    parent = Parent("")  # no conversation id -> process-local owner key
+    owner_key = ds._owner_key(parent)
+    assert owner_key.startswith("agent:")
+    sid = "proc-local-owner"
+    # Foreign workspace, but the owner string matches the caller exactly.
+    _write_metadata(sid, owner=owner_key, cwd=str(elsewhere.resolve()))
+
+    denied = ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+
+    assert "another profile or workspace" in denied.lower()
+    assert not FakePiClient.instances
 
 
 def test_runtime_dispatch_passes_parent_agent(monkeypatch):
@@ -447,6 +682,7 @@ def test_registry_dispatch_resolves_bound_parent(monkeypatch):
 # Backend-configurable sessions (Pi default + OpenCode)
 # ---------------------------------------------------------------------------
 
+
 class FakeOpenCodeClient(FakePiClient):
     """Fake OpenCode backend client mirroring agent.opencode_client surface."""
 
@@ -467,7 +703,9 @@ def test_default_backend_is_pi():
     parent = Parent()
     result = payload(ds.delegate_session(action="start", parent_agent=parent))
     assert result["backend"] == "pi"
-    assert result["pi_session_id"] == result["native_session_id"] == result["session_id"]
+    assert (
+        result["pi_session_id"] == result["native_session_id"] == result["session_id"]
+    )
     assert isinstance(FakePiClient.instances[-1], FakePiClient)
 
 
@@ -484,13 +722,19 @@ def test_backend_env_var_selects_opencode(monkeypatch):
 def test_backend_arg_routes_to_opencode_client(monkeypatch):
     monkeypatch.setattr(ds, "OpenCodeClient", FakeOpenCodeClient)
     parent = Parent()
-    result = payload(ds.delegate_session(action="start", backend="opencode", parent_agent=parent))
+    result = payload(
+        ds.delegate_session(action="start", backend="opencode", parent_agent=parent)
+    )
     assert result["backend"] == "opencode"
     client = FakeOpenCodeClient.instances[-1]
     assert client.cwd  # opened in resolved cwd
     # follow-up send reaches the same client
     sid = result["session_id"]
-    accepted = payload(ds.delegate_session(action="send", session_id=sid, message="go", parent_agent=parent))
+    accepted = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
     assert accepted["accepted"] is True
     done = wait_for_status(parent, sid, "idle")
     assert done["last_result"]["text"].startswith("done:")
@@ -505,9 +749,13 @@ def test_unknown_backend_is_bounded_error():
 def test_control_action_with_mismatched_backend_errors(monkeypatch):
     monkeypatch.setattr(ds, "OpenCodeClient", FakeOpenCodeClient)
     parent = Parent()
-    started = payload(ds.delegate_session(action="start", backend="opencode", parent_agent=parent))
+    started = payload(
+        ds.delegate_session(action="start", backend="opencode", parent_agent=parent)
+    )
     sid = started["session_id"]
-    err = ds.delegate_session(action="send", session_id=sid, message="x", backend="pi", parent_agent=parent)
+    err = ds.delegate_session(
+        action="send", session_id=sid, message="x", backend="pi", parent_agent=parent
+    )
     assert "is a opencode delegate session" in err.lower()
 
 
@@ -516,14 +764,18 @@ def test_resume_of_live_session_with_other_backend_errors(monkeypatch):
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))  # pi
     sid = started["session_id"]
-    err = ds.delegate_session(action="resume", session_id=sid, backend="opencode", parent_agent=parent)
+    err = ds.delegate_session(
+        action="resume", session_id=sid, backend="opencode", parent_agent=parent
+    )
     assert "cannot be reopened as a opencode session" in err.lower()
 
 
 def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(ds, "OpenCodeClient", FakeOpenCodeClient)
     parent = Parent()
-    started = payload(ds.delegate_session(action="start", backend="opencode", parent_agent=parent))
+    started = payload(
+        ds.delegate_session(action="start", backend="opencode", parent_agent=parent)
+    )
     sid = started["session_id"]
     native = started["native_session_id"]
     with ds._SESSION_LOCK:
@@ -531,7 +783,7 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     stale["client"].close()
 
     meta = ds._load_metadata(sid)
-    assert meta["version"] == 2
+    assert meta["version"] == 3
     assert meta["backend"] == "opencode"
     assert meta["native_session_id"] == native
 
@@ -539,7 +791,9 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     assert meta["pi_session_id"] == native
 
     # resume without an explicit backend reopens the stored backend
-    resumed = payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
     assert resumed["backend"] == "opencode"
     client = FakeOpenCodeClient.instances[-1]
     assert client.native_session_id == native
@@ -561,19 +815,23 @@ def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     }
     ds._metadata_path(sid).write_text(json.dumps(legacy))
 
-    resumed = payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
     assert resumed["backend"] == "pi"
     # pi session id is reused as the native session on resume
     assert resumed["native_session_id"] == "pi_native_123"
-    # re-persisted as v2
-    assert ds._load_metadata(sid)["version"] == 2
+    # re-persisted using the current metadata schema
+    assert ds._load_metadata(sid)["version"] == 3
 
 
 def test_list_includes_backend_field(monkeypatch):
     monkeypatch.setattr(ds, "OpenCodeClient", FakeOpenCodeClient)
     parent = Parent()
     pi_row = payload(ds.delegate_session(action="start", parent_agent=parent))
-    oc_row = payload(ds.delegate_session(action="start", backend="opencode", parent_agent=parent))
+    oc_row = payload(
+        ds.delegate_session(action="start", backend="opencode", parent_agent=parent)
+    )
 
     listed = payload(ds.delegate_session(action="list", parent_agent=parent))
     by_id = {row["session_id"]: row for row in listed["sessions"]}
