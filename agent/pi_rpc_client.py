@@ -263,6 +263,7 @@ class PiRPCClient:
         self._text_parts: list[str] = []
         self._reasoning_parts: list[str] = []
         self._settled = threading.Event()
+        self._process_exited_error: str | None = None
         self.text_streamed = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -431,6 +432,7 @@ class PiRPCClient:
             proc.kill()
             raise RuntimeError("pi rpc process did not expose stdin/stdout pipes.")
         self._proc = proc
+        self._process_exited_error = None
         threading.Thread(target=self._reader, daemon=True).start()
         threading.Thread(target=self._stderr_reader, daemon=True).start()
         return proc
@@ -451,6 +453,17 @@ class PiRPCClient:
                 self._dispatch(msg)
         except Exception:
             pass
+        finally:
+            code = proc.poll()
+            error = f"pi rpc process exited with code {code}"
+            self._process_exited_error = error
+            with self._pending_lock:
+                pending = list(self._pending.values())
+                self._pending.clear()
+            for waiter, slot in pending:
+                slot[0] = {"success": False, "error": error}
+                waiter.set()
+            self._settled.set()
 
     def _stderr_reader(self) -> None:
         proc = self._proc
@@ -732,6 +745,8 @@ class PiRPCClient:
                     pass
                 self._settled.wait(10)
                 raise TimeoutError(f"pi session turn timed out after {timeout_seconds:.0f}s")
+            if self._process_exited_error:
+                raise RuntimeError(self._process_exited_error)
             if not self.text_streamed:
                 try:
                     last = self._request_pi({"type": "get_last_assistant_text"})

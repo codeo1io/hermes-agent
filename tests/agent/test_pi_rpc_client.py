@@ -96,6 +96,28 @@ def create(client, content, timeout=120):
     )
 
 
+def test_run_session_prompt_fails_fast_when_pi_exits_before_settled(tmp_path):
+    script = tmp_path / "fake-pi-exit"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    if msg.get('type') == 'prompt':\n"
+        + "        print(json.dumps({'type':'response','id':msg['id'],'success':True}), flush=True)\n"
+        + "        raise SystemExit(7)\n"
+        + "    if msg.get('type') == 'get_state':\n"
+        + "        print(json.dumps({'type':'response','id':msg['id'],'success':True,'data':{}}), flush=True)\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(acp_command=str(script), base_url="pi://exit-test", persistent_session=True)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="pi rpc process exited with code 7"):
+        client.run_session_prompt("boom", timeout_seconds=30)
+    assert time.monotonic() - started < 2.0
+    client.close()
+
+
 # ------------------------------------------------- answer text mapping
 
 @pytest.mark.parametrize(
