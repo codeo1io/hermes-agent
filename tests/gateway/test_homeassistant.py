@@ -250,6 +250,28 @@ class TestConfigIntegration:
         assert ha.token == "env-token"
         assert ha.extra["url"] == "http://10.0.0.5:8123"
 
+    def test_env_token_respects_explicit_disable(self, monkeypatch):
+        """A secondary multiplex profile can keep HA tools without a duplicate gateway adapter."""
+        monkeypatch.setenv("HASS_TOKEN", "shared-token")
+        monkeypatch.setenv("HASS_URL", "http://10.0.0.5:8123")
+
+        from gateway.config import _apply_env_overrides
+
+        config = GatewayConfig(
+            platforms={
+                Platform.HOMEASSISTANT: PlatformConfig(
+                    enabled=False,
+                    extra={"_enabled_explicit": True},
+                )
+            }
+        )
+        _apply_env_overrides(config)
+
+        ha = config.platforms[Platform.HOMEASSISTANT]
+        assert ha.enabled is False
+        assert ha.token == "shared-token"
+        assert ha.extra["url"] == "http://10.0.0.5:8123"
+
 
 # ---------------------------------------------------------------------------
 # send() via REST API

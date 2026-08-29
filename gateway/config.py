@@ -2152,22 +2152,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # Home Assistant
     hass_token = getenv("HASS_TOKEN")
     if hass_token:
-        if Platform.HOMEASSISTANT not in config.platforms:
-            config.platforms[Platform.HOMEASSISTANT] = PlatformConfig()
-        # Explicit disable wins over env presence: in multiplex mode a
-        # secondary profile pins ``homeassistant.enabled: false`` (it shares
-        # the default profile's HA connection) but still inherits the
-        # process-level HASS_TOKEN. Unconditionally re-enabling here made the
-        # secondary claim the same credential and trip the duplicate-
-        # credential fatal at startup. Same contract as api_server (#41112).
-        # A secondary profile may still need HASS_TOKEN for the built-in
-        # Home Assistant toolset, so env presence wires the token through
-        # regardless; only the enabled flag is gated.
-        hass_config = config.platforms[Platform.HOMEASSISTANT]
-        if not hass_config.enabled and not hass_config.extra.get(
-            "_enabled_explicit", False
-        ):
-            hass_config.enabled = True
+        # Use the common env-enablement path so an explicit YAML
+        # ``enabled: false`` is preserved. This is important for multiplexed
+        # profiles that share a Home Assistant credential: the secondary
+        # profile can retain HASS_TOKEN for HA tools without opening a second
+        # gateway WebSocket with the same credential.
+        hass_config = _enable_from_env(Platform.HOMEASSISTANT)
         hass_config.token = hass_token
         hass_url = getenv("HASS_URL")
         if hass_url:
