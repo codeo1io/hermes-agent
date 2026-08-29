@@ -1391,3 +1391,50 @@ class TestApiServerEnvOverride:
         assert config.platforms[Platform.API_SERVER].enabled is False
         # The key is still wired through for the shared listener.
         assert config.platforms[Platform.API_SERVER].extra.get("key") == api_server_key
+
+    def test_hass_env_token_does_not_reenable_explicitly_disabled_platform(self):
+        """HASS_TOKEN must not re-enable a platform the config disabled.
+
+        Regression: _apply_env_overrides() force-set homeassistant.enabled =
+        True whenever HASS_TOKEN was present. In multiplex mode a secondary
+        profile pins ``homeassistant.enabled: false`` (the default profile
+        owns the HA connection) but still inherits the process-level
+        HASS_TOKEN. The unconditional re-enable made the secondary claim the
+        same credential and the gateway refused to start it with a fatal
+        ``duplicate_credential`` (``voice:homeassistant`` stuck fatal).
+
+        The fix honors the explicit disable, flagged by ``_enabled_explicit``
+        in the platform's extra (set when the config.yaml pins enabled).
+        """
+        config = GatewayConfig(
+            platforms={
+                Platform.HOMEASSISTANT: PlatformConfig(
+                    enabled=False,
+                    extra={"_enabled_explicit": True},
+                ),
+            },
+        )
+
+        hass_token = "hass-token-value"
+        with patch.dict(os.environ, {"HASS_TOKEN": hass_token}, clear=True):
+            _apply_env_overrides(config)
+
+        # Explicit disable wins over the env-var presence.
+        assert config.platforms[Platform.HOMEASSISTANT].enabled is False
+
+    def test_hass_env_token_still_enables_default_off_platform(self):
+        """Without an explicit pin, HASS_TOKEN keeps enabling HA.
+
+        Guards the other side of the contract: a profile that has no
+        ``platforms.homeassistant`` entry at all (fresh install, setup wizard
+        wrote HASS_TOKEN into .env) must still get HA enabled by env
+        presence. Only the *explicit* ``enabled: false`` pin suppresses it.
+        """
+        config = GatewayConfig(platforms={})
+
+        with patch.dict(os.environ, {"HASS_TOKEN": "hass-token-value"}, clear=True):
+            _apply_env_overrides(config)
+
+        assert Platform.HOMEASSISTANT in config.platforms
+        assert config.platforms[Platform.HOMEASSISTANT].enabled is True
+        assert config.platforms[Platform.HOMEASSISTANT].token == "hass-token-value"
