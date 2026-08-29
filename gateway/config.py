@@ -2235,11 +2235,21 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     if hass_token:
         if Platform.HOMEASSISTANT not in config.platforms:
             config.platforms[Platform.HOMEASSISTANT] = PlatformConfig()
-        config.platforms[Platform.HOMEASSISTANT].enabled = True
-        config.platforms[Platform.HOMEASSISTANT].token = hass_token
+        # Explicit disable wins over env presence: in multiplex mode a
+        # secondary profile pins ``homeassistant.enabled: false`` (it shares
+        # the default profile's HA connection) but still inherits the
+        # process-level HASS_TOKEN. Unconditionally re-enabling here made the
+        # secondary claim the same credential and trip the duplicate-
+        # credential fatal at startup. Same contract as api_server (#41112).
+        hass_config = config.platforms[Platform.HOMEASSISTANT]
+        if not hass_config.enabled and not hass_config.extra.get(
+            "_enabled_explicit", False
+        ):
+            hass_config.enabled = True
+        hass_config.token = hass_token
         hass_url = getenv("HASS_URL")
         if hass_url:
-            config.platforms[Platform.HOMEASSISTANT].extra["url"] = hass_url
+            hass_config.extra["url"] = hass_url
 
     # Email
     email_addr = getenv("EMAIL_ADDRESS")
