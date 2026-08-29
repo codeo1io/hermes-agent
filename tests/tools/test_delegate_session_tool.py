@@ -959,3 +959,23 @@ def test_check_requirements_accepts_opencode_only(monkeypatch, tmp_path):
     assert ds.check_delegate_session_requirements() is False
     monkeypatch.setenv("HERMES_OPENCODE_SERVER_URL", "http://127.0.0.1:1")
     assert ds.check_delegate_session_requirements() is True
+
+
+def test_dispatch_turn_uses_non_daemon_thread(monkeypatch):
+    captured = {}
+
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            captured.update(target=target, args=args, name=name, daemon=daemon)
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(ds.threading, "Thread", FakeThread)
+    record = {"session_id": "session-1234", "status": "idle"}
+
+    ds._dispatch_turn(record, "work", 30.0)
+
+    assert captured["started"] is True
+    assert captured["daemon"] is False
+    assert record["status"] == "running"

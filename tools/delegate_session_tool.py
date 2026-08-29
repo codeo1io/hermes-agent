@@ -617,7 +617,11 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
         target=_run_turn,
         args=(record, message, timeout),
         name=f"delegate-{record['session_id'][:8]}",
-        daemon=True,
+        # Keep the interpreter alive until the active delegated turn reaches a
+        # terminal state.  A daemon thread can be torn down as soon as the
+        # supervising Hermes/cron process returns, which abandons the live Pi
+        # or OpenCode turn even though durable metadata remains recoverable.
+        daemon=False,
     )
     with _SESSION_CONDITION:
         record["thread"] = thread
