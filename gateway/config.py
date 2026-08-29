@@ -2160,6 +2160,9 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         # process-level HASS_TOKEN. Unconditionally re-enabling here made the
         # secondary claim the same credential and trip the duplicate-
         # credential fatal at startup. Same contract as api_server (#41112).
+        # A secondary profile may still need HASS_TOKEN for the built-in
+        # Home Assistant toolset, so env presence wires the token through
+        # regardless; only the enabled flag is gated.
         hass_config = config.platforms[Platform.HOMEASSISTANT]
         if not hass_config.enabled and not hass_config.extra.get(
             "_enabled_explicit", False

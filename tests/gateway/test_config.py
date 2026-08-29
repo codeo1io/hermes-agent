@@ -1403,8 +1403,9 @@ class TestApiServerEnvOverride:
         same credential and the gateway refused to start it with a fatal
         ``duplicate_credential`` (``voice:homeassistant`` stuck fatal).
 
-        The fix honors the explicit disable, flagged by ``_enabled_explicit``
-        in the platform's extra (set when the config.yaml pins enabled).
+        A secondary profile may still keep HASS_TOKEN for the built-in HA
+        toolset; the fix honors the explicit disable, flagged by
+        ``_enabled_explicit`` in the platform's extra.
         """
         config = GatewayConfig(
             platforms={
@@ -1415,12 +1416,16 @@ class TestApiServerEnvOverride:
             },
         )
 
-        hass_token = "hass-token-value"
-        with patch.dict(os.environ, {"HASS_TOKEN": hass_token}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"HASS_TOKEN": "ha-token", "HASS_URL": "http://homeassistant:8123"},
+            clear=True,
+        ):
             _apply_env_overrides(config)
 
-        # Explicit disable wins over the env-var presence.
         assert config.platforms[Platform.HOMEASSISTANT].enabled is False
+        assert config.platforms[Platform.HOMEASSISTANT].token == "ha-token"
+        assert config.platforms[Platform.HOMEASSISTANT].extra.get("url") == "http://homeassistant:8123"
 
     def test_hass_env_token_still_enables_default_off_platform(self):
         """Without an explicit pin, HASS_TOKEN keeps enabling HA.
