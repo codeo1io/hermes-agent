@@ -316,6 +316,26 @@ def _parent_main_runtime(parent_agent: Any) -> dict[str, Any] | None:
     return runtime if any(runtime.values()) else None
 
 
+
+def _pi_model_for_parent(parent_agent: Any) -> str:
+    """Best-effort pi ``--model`` argument derived from the parent runtime.
+
+    Returns "" when nothing can be derived (pi keeps its own default).  The
+    mapping is advisory: an unknown provider simply yields no argument.
+    """
+    runtime = _parent_main_runtime(parent_agent) or {}
+    model = str(runtime.get("model") or "").strip()
+    provider = str(runtime.get("provider") or "").strip()
+    if not model:
+        return ""
+    # pi provider ids strip the "custom:" prefix Hermes uses for custom
+    # providers; the models.json provider key is the bare name.
+    provider_id = provider.split(":", 1)[-1] if provider else ""
+    if provider_id and provider_id.lower() not in {"anthropic", "openai"}:
+        return f"{provider_id}/{model}"
+    return model
+
+
 def _auto_answer_pi_question(
     parent_agent: Any,
     method: str,
@@ -788,12 +808,23 @@ def delegate_session(
                     parent_agent, answer_backend, method, title, options
                 )
 
+        client_kwargs: dict[str, Any] = {}
+        if backend_name == "pi":
+            # Without an explicit model pi falls back to its built-in
+            # Anthropic model and dies with 401 on keyless installs.
+            # Resolve, in order: explicit env override, then the parent
+            # runtime's provider/model pair mapped onto a pi provider id.
+            explicit_model = os.getenv("HERMES_PI_MODEL", "").strip()
+            model_arg = explicit_model or _pi_model_for_parent(parent_agent)
+            if model_arg:
+                client_kwargs["args"] = ["--model", model_arg]
         client = client_class(
             persistent_session=True,
             session_id=native_hint or handle,
             session_name=f"Hermes {handle[:8]}",
             acp_cwd=cwd,
             question_answerer=_answer,
+            **client_kwargs,
         )
         if native_hint and hasattr(client, "native_session_id"):
             client.native_session_id = native_hint

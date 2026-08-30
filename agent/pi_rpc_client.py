@@ -388,6 +388,23 @@ class PiRPCClient:
         else:
             argv.append("--no-session")
         model = os.getenv("HERMES_PI_MODEL", "").strip()
+        if not model:
+            # Fall back to an explicit --model passed by the caller (credential
+            # resolution and tests pass argv through ``args``/``acp_args``).
+            # Without a model, pi defaults to its built-in Anthropic model and
+            # dies with 401 "Invalid bearer token" on keyless installs.
+            model = next(
+                (
+                    self._extra_args[i + 1]
+                    for i, a in enumerate(self._extra_args[:-1])
+                    if a == "--model"
+                ),
+                "",
+            )
+            if model:
+                self._extra_args = [
+                    a for a in self._extra_args if a not in ("--model", model)
+                ]
         if model:
             argv += ["--model", model]
         tools = os.getenv("HERMES_PI_TOOLS", "").strip()
