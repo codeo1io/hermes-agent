@@ -87,6 +87,7 @@ def test_keepalive_failure_logs_root_cause(monkeypatch, tmp_path, caplog):
     task = _Task("pipey")
     task._config = {"keepalive_interval": 0.01}
     task.session = object()
+    task._ready.set()
 
     monkeypatch.setattr(mcp_tool, "_MIN_KEEPALIVE_INTERVAL", 0.01)
 
@@ -94,6 +95,7 @@ def test_keepalive_failure_logs_root_cause(monkeypatch, tmp_path, caplog):
         with caplog.at_level(logging.WARNING, logger="tools.mcp_tool"):
             reason = await task._wait_for_lifecycle_event()
         assert reason == "reconnect"
+        assert task._ready.is_set() is False
 
     asyncio.run(_scenario())
 

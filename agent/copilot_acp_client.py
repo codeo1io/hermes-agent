@@ -21,11 +21,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from openai.types.chat.chat_completion_message_tool_call import (
-    ChatCompletionMessageToolCall,
-    Function,
+from agent.acp_openai_bridge import (
+    completion_to_stream_chunks as _completion_to_stream_chunks,
+    extract_tool_calls_from_text as _extract_tool_calls_from_text,
+    render_tool_bridge_sections as _render_tool_bridge_sections,
 )
-
 from agent.file_safety import get_read_block_error, get_write_denied_error, is_write_approval_required
 from agent.redact import redact_sensitive_text
 from tools.environments.local import hermes_subprocess_env
@@ -35,6 +35,78 @@ _DEFAULT_TIMEOUT_SECONDS = 900.0
 
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 _TOOL_CALL_JSON_RE = re.compile(r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL)
+
+# Markers the pi-acp bridge emits as agent_thought_chunk updates for tool
+# activity executed INSIDE the delegate's own runtime. pi runs its tools
+# natively, so these are the only in-band trace of that work hermes receives.
+# Formats: "[pi-tool] name {json-args}" (start) and
+# "[pi-tool:ok|FAILED] name -> result N bytes" (end).
+_PI_TOOL_MARKER_RE = re.compile(
+    r"\[pi-tool(?::(?P<status>ok|FAILED))?\]\s+(?P<name>\S+)(?:\s+(?P<rest>.+))?"
+)
+_PI_TOOL_RESULT_BYTES_RE = re.compile(r"result (\d+) bytes")
+
+
+def parse_pi_tool_markers(text):
+    """Parse ``[pi-tool]`` markers from a reasoning/thought string.
+
+    Start markers contribute name + raw args; end markers fill in the
+    status and result size for the oldest unmatched start of the same tool
+    name (the bridge emits start/end pairs sequentially per execution).
+    Returns a list of ``{"name", "args", "status", "result_bytes"}`` dicts
+    in occurrence order. Text without markers yields an empty list.
+    """
+    events = []
+    open_by_name = {}
+    for m in _PI_TOOL_MARKER_RE.finditer(text or ""):
+        name = m.group("name")
+        status = m.group("status")
+        rest = m.group("rest") or ""
+        if status is None:
+            entry = {"name": name, "args": rest, "status": "", "result_bytes": None}
+            events.append(entry)
+            open_by_name.setdefault(name, []).append(entry)
+        else:
+            size_m = _PI_TOOL_RESULT_BYTES_RE.search(rest)
+            size = int(size_m.group(1)) if size_m else None
+            pending = open_by_name.get(name)
+            if pending:
+                entry = pending.pop(0)
+                entry["status"] = status
+                entry["result_bytes"] = size
+            else:
+                events.append(
+                    {"name": name, "args": "", "status": status, "result_bytes": size}
+                )
+    return events
+
+
+# The pi-acp bridge appends a fenced JSON footer to the delegate's final
+# response text after every run. It carries the objective outcome of the
+# run: status, duration, and touched_files derived from git snapshots
+# taken before and after the pi process did its work.
+_PI_RESULT_FOOTER_RE = re.compile(
+    r"```pi-delegation-result\s*\n(\{.*?\})\s*\n```", re.DOTALL
+)
+
+
+def parse_pi_result_footer(text):
+    """Parse the last ``pi-delegation-result`` fenced JSON block.
+
+    Returns the parsed dict, or ``None`` when no well-formed footer is
+    present. When several blocks appear (multi-prompt session), the last
+    one wins — it reflects the final state of the delegate's work.
+    """
+    last_match = None
+    for match in _PI_RESULT_FOOTER_RE.finditer(text or ""):
+        last_match = match
+    if last_match is None:
+        return None
+    try:
+        payload = json.loads(last_match.group(1))
+    except (ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 # Stderr fingerprint of the deprecated `gh copilot` CLI extension
 # (https://github.blog/changelog/2025-09-25-upcoming-deprecation-of-gh-copilot-cli-extension).
@@ -59,9 +131,43 @@ def _is_gh_copilot_deprecation_message(stderr_text: str) -> bool:
     return any(marker in lower for marker in _DEPRECATION_MARKERS)
 
 
+def _read_env_var(name: str) -> str | None:
+    """Look up ``name`` from the process env first, then the .env files in
+    their documented load order. Tolerates ``export`` prefixes, surrounding
+    spaces, and single/double quoting. Returns ``None`` when unset."""
+    env_val = os.getenv(name, "").strip()
+    if env_val:
+        return env_val
+    for candidate in (
+        Path(os.path.expanduser("~/.hermes/.env")),
+        Path(os.path.expanduser("~/.hermes/hermes-agent/.env")),
+    ):
+        try:
+            if not candidate.is_file():
+                continue
+            for line in candidate.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[len("export "):].strip()
+                if not line.startswith(f"{name} ") and not line.startswith(f"{name}="):
+                    continue
+                key, sep, value = line.partition("=")
+                if not sep or key.strip() != name:
+                    continue
+                value = value.strip().strip("'\"")
+                if value:
+                    return value
+        except OSError:
+            continue
+    return None
+
+
 def _resolve_command() -> str:
+    # Re-read .env at call time so changing HERMES_COPILOT_ACP_COMMAND
+    # applies to the next delegation without a gateway restart.
+    env_val = _read_env_var("HERMES_COPILOT_ACP_COMMAND")
     return (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
+        env_val
         or os.getenv("COPILOT_CLI_PATH", "").strip()
         or "copilot"
     )
@@ -203,34 +309,9 @@ def _format_messages_as_prompt(
     if model:
         sections.append(f"Hermes requested model hint: {model}")
 
-    if isinstance(tools, list) and tools:
-        tool_specs: list[dict[str, Any]] = []
-        for t in tools:
-            if not isinstance(t, dict):
-                continue
-            fn = t.get("function") or {}
-            if not isinstance(fn, dict):
-                continue
-            name = fn.get("name")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            tool_specs.append(
-                {
-                    "name": name.strip(),
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                }
-            )
-        if tool_specs:
-            sections.append(
-                "Available tools (OpenAI function schema). "
-                "When using a tool, emit ONLY <tool_call>{...}</tool_call> with one JSON object "
-                "containing id/type/function{name,arguments}. arguments must be a JSON string.\n"
-                + json.dumps(tool_specs, ensure_ascii=False)
-            )
-
-    if tool_choice is not None:
-        sections.append(f"Tool choice hint: {json.dumps(tool_choice, ensure_ascii=False)}")
+    # Copilot has no tools of its own that would collide with Hermes', so it
+    # forwards the whole toolset (no allowlist).
+    sections.extend(_render_tool_bridge_sections(tools, tool_choice))
 
     transcript: list[str] = []
     for message in messages:
@@ -285,140 +366,6 @@ def _render_message_content(content: Any) -> str:
                     parts.append(text.strip())
         return "\n".join(parts).strip()
     return str(content).strip()
-
-
-def _build_openai_tool_call(
-    *,
-    call_id: str,
-    name: str,
-    arguments: str,
-) -> ChatCompletionMessageToolCall:
-    """Build an OpenAI-compatible tool-call object for downstream handling."""
-    return ChatCompletionMessageToolCall(
-        id=call_id,
-        call_id=call_id,
-        response_item_id=None,
-        type="function",
-        function=Function(name=name, arguments=arguments),
-    )
-
-
-def _completion_to_stream_chunks(completion: SimpleNamespace) -> list[SimpleNamespace]:
-    """Convert a one-shot ACP response into OpenAI-style stream chunks."""
-    choice = completion.choices[0]
-    message = choice.message
-    tool_call_deltas = None
-    if message.tool_calls:
-        tool_call_deltas = []
-        for index, tool_call in enumerate(message.tool_calls):
-            tool_call_deltas.append(
-                SimpleNamespace(
-                    index=index,
-                    id=getattr(tool_call, "id", None),
-                    type=getattr(tool_call, "type", "function"),
-                    function=SimpleNamespace(
-                        name=getattr(tool_call.function, "name", None),
-                        arguments=getattr(tool_call.function, "arguments", None),
-                    ),
-                )
-            )
-
-    delta = SimpleNamespace(
-        role="assistant",
-        content=message.content or None,
-        tool_calls=tool_call_deltas,
-        reasoning_content=message.reasoning_content,
-        reasoning=message.reasoning,
-    )
-    data_chunk = SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                index=0,
-                delta=delta,
-                finish_reason=choice.finish_reason,
-            )
-        ],
-        model=completion.model,
-        usage=None,
-    )
-    usage_chunk = SimpleNamespace(
-        choices=[],
-        model=completion.model,
-        usage=completion.usage,
-    )
-    return [data_chunk, usage_chunk]
-
-
-def _extract_tool_calls_from_text(text: str) -> tuple[list[ChatCompletionMessageToolCall], str]:
-    if not isinstance(text, str) or not text.strip():
-        return [], ""
-
-    extracted: list[ChatCompletionMessageToolCall] = []
-    consumed_spans: list[tuple[int, int]] = []
-
-    def _try_add_tool_call(raw_json: str) -> None:
-        try:
-            obj = json.loads(raw_json)
-        except Exception:
-            return
-        if not isinstance(obj, dict):
-            return
-        fn = obj.get("function")
-        if not isinstance(fn, dict):
-            return
-        fn_name = fn.get("name")
-        if not isinstance(fn_name, str) or not fn_name.strip():
-            return
-        fn_args = fn.get("arguments", "{}")
-        if not isinstance(fn_args, str):
-            fn_args = json.dumps(fn_args, ensure_ascii=False)
-        call_id = obj.get("id")
-        if not isinstance(call_id, str) or not call_id.strip():
-            call_id = f"acp_call_{len(extracted)+1}"
-
-        extracted.append(
-            _build_openai_tool_call(
-                call_id=call_id,
-                name=fn_name.strip(),
-                arguments=fn_args,
-            )
-        )
-
-    for m in _TOOL_CALL_BLOCK_RE.finditer(text):
-        raw = m.group(1)
-        _try_add_tool_call(raw)
-        consumed_spans.append((m.start(), m.end()))
-
-    # Only try bare-JSON fallback when no XML blocks were found.
-    if not extracted:
-        for m in _TOOL_CALL_JSON_RE.finditer(text):
-            raw = m.group(0)
-            _try_add_tool_call(raw)
-            consumed_spans.append((m.start(), m.end()))
-
-    if not consumed_spans:
-        return extracted, text.strip()
-
-    consumed_spans.sort()
-    merged: list[tuple[int, int]] = []
-    for start, end in consumed_spans:
-        if not merged or start > merged[-1][1]:
-            merged.append((start, end))
-        else:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-
-    parts: list[str] = []
-    cursor = 0
-    for start, end in merged:
-        if cursor < start:
-            parts.append(text[cursor:start])
-        cursor = max(cursor, end)
-    if cursor < len(text):
-        parts.append(text[cursor:])
-
-    cleaned = "\n".join(p.strip() for p in parts if p and p.strip()).strip()
-    return extracted, cleaned
-
 
 
 def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:

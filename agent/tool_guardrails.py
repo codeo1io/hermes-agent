@@ -68,7 +68,6 @@ MUTATING_TOOL_NAMES = frozenset(
 STALL_GUARD_REPEATABLE_TOOLS = frozenset(
     {
         "process",
-        "bfl_flux3_get_result",
     }
 )
 
@@ -719,7 +718,12 @@ class ToolCallGuardrailController:
                 )
                 self._halt_decision = decision
                 return decision
-            self._turn_subagent_count += spawn_count
+            # delegate_task itself rejects any batch larger than
+            # delegation.max_concurrent_children with "Too many tasks", so an
+            # oversized spawn_count spawns nothing. Count it as one failed
+            # attempt (mirroring the tool-failure loop counter) instead of
+            # len(tasks), which would permanently poison the turn's budget.
+            self._turn_subagent_count += 1 if spawn_count > cap else spawn_count
             return None
 
         return None
