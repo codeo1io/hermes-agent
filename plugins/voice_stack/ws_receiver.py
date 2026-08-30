@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Awaitable
@@ -215,7 +216,10 @@ async def handle_assist_query(payload: dict[str, Any]) -> dict[str, Any]:
     failed messages.
     """
     text = str(payload.get("text") or "").strip()
-    if not text:
+    # Punctuation-only transcripts (".", "?", ambient noise) must not reach the LLM:
+    # 2026-08-30 a "." reply produced zero piper audio (wave.Error "# channels not
+    # specified") and froze the satellite in "responding" for 46 minutes.
+    if not text or not re.search(r"[\w]", text):
         return _assist_response(
             payload,
             ok=False,
