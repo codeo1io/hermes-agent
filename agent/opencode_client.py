@@ -19,6 +19,7 @@ import atexit
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -411,17 +412,24 @@ class OpenCodeClient:
             logger.debug("opencode event stream failed; polling decides completion", exc_info=True)
 
     def _final_reply_text(self, baseline_ids: set) -> str:
-        """Fetch the transcript and join fresh assistant text parts."""
+        """Fetch the transcript and join fresh assistant text parts.
+
+        ``<system-reminder>`` blocks are injected scaffolding, not a model
+        reply (e.g. the systematic-workflow guard's permission jail): a turn
+        whose only text is a reminder has NOT been answered, so strip them
+        before deciding whether a reply exists.
+        """
         _status, data = self._request("GET", f"/session/{self.native_session_id}/message{self._qdir()}")
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         messages = sorted(messages, key=self._message_sort_key)
         fresh = [m for m in messages if m.get("info", {}).get("id") not in baseline_ids]
-        return "\n".join(
+        text = "\n".join(
             self._assistant_text(m)
             for m in fresh
             if (m.get("info") or {}).get("role") == "assistant"
             and self._assistant_text(m)
         ).strip()
+        return re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL).strip()
 
     def run_session_prompt(
         self,
@@ -480,8 +488,23 @@ class OpenCodeClient:
                     for m in fresh
                     for part in (m.get("parts") or [])
                 )
+                # A fresh assistant message with no info.time.completed yet is
+                # still streaming: the model may sit in reasoning for tens of
+                # seconds before its first visible part (text/tool) lands, so
+                # the transcript LOOKS stable (bare step-start row, nothing
+                # running) while generation is actually in flight. Waiting for
+                # completion on every fresh assistant message closes that gap;
+                # without it the poll loop declares the turn empty mid-stream.
+                generating = any(
+                    (m.get("info") or {}).get("role") == "assistant"
+                    and not ((m.get("info") or {}).get("time") or {}).get("completed")
+                    for m in fresh
+                )
+                # Only content-bearing parts (text/tool) count as a reply; a
+                # bare step-start/step-finish row is protocol scaffolding.
                 has_assistant = any(
-                    (m.get("info") or {}).get("role") == "assistant" and (m.get("parts") or [])
+                    (m.get("info") or {}).get("role") == "assistant"
+                    and any((p or {}).get("type") in ("text", "tool") for p in (m.get("parts") or []))
                     for m in fresh
                 )
                 # Idle events can be observed before the transcript fetch
@@ -496,6 +519,7 @@ class OpenCodeClient:
                     and fresh
                     and has_assistant
                     and not tools_running
+                    and not generating
                     and not self._pending_questions()
                 ):
                     if idle_flag.is_set() and tools_running:
