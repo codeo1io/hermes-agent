@@ -327,7 +327,14 @@ def _pi_model_for_parent(parent_agent: Any) -> str:
     model = str(runtime.get("model") or "").strip()
     provider = str(runtime.get("provider") or "").strip()
     if not model:
-        return ""
+        # Last-resort: the deployment-wide auxiliary model (same provider the
+        # delegate-question answerer uses), so a bare parent object still gets
+        # a working model instead of pi's unauthorized default.
+        model = os.getenv("HERMES_ASSIST_MODEL", "").strip()
+        if not model:
+            return ""
+        if not provider:
+            provider = os.getenv("HERMES_ASSIST_PROVIDER", "").strip()
     # pi provider ids strip the "custom:" prefix Hermes uses for custom
     # providers; the models.json provider key is the bare name.
     provider_id = provider.split(":", 1)[-1] if provider else ""
