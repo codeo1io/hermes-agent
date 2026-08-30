@@ -338,9 +338,46 @@ def _pi_model_for_parent(parent_agent: Any) -> str:
     # pi provider ids strip the "custom:" prefix Hermes uses for custom
     # providers; the models.json provider key is the bare name.
     provider_id = provider.split(":", 1)[-1] if provider else ""
+    if not provider_id:
+        # The runtime said nothing about the provider.  Resolve the model id
+        # against pi's own provider registry so a bare model name (which pi
+        # cannot route) still lands on the one provider that serves it.
+        provider_id = _pi_provider_serving_model(model)
     if provider_id and provider_id.lower() not in {"anthropic", "openai"}:
         return f"{provider_id}/{model}"
     return model
+
+
+def _pi_provider_serving_model(model: str) -> str:
+    """Find the pi provider whose catalog contains ``model`` ("" if none/many)."""
+    import json as _json
+
+    for candidates in (
+        Path.home() / ".pi" / "agent" / "models.json",
+        Path.home() / ".pi" / "agent" / "models-store.json",
+    ):
+        try:
+            data = _json.loads(candidates.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        providers = data.get("providers") if isinstance(data, dict) else None
+        if not isinstance(providers, dict):
+            continue
+        serving = [
+            pid
+            for pid, cfg in providers.items()
+            if any(
+                str(m.get("id")) == model
+                for m in (cfg.get("models") or [])
+                if isinstance(m, dict)
+            )
+        ]
+        if len(serving) == 1:
+            return str(serving[0])
+        if serving:  # ambiguous: prefer a non-first-party provider
+            external = [pid for pid in serving if pid not in ("anthropic", "openai")]
+            return str(external[0]) if len(external) == 1 else ""
+    return ""
 
 
 def _auto_answer_pi_question(
