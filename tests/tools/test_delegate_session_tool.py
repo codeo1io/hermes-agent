@@ -255,6 +255,29 @@ def test_send_reuses_same_client_and_preserves_followup_history():
     assert final["last_result"]["text"] == "done:second"
 
 
+def test_start_on_live_session_with_goal_dispatches_followup_turn():
+    """Re-start on a live session must run the goal, not drop it (conductor v5/v6)."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    wait_for_status(parent, sid, "idle")
+
+    reused = payload(
+        ds.delegate_session(
+            action="start",
+            session_id=sid,
+            goal="phase two goal",
+            parent_agent=parent,
+        )
+    )
+
+    assert reused["reused"] is True
+    assert reused.get("turn_dispatched") is True
+    wait_for_status(parent, sid, "idle")
+    assert any("phase two goal" in m for m in client.messages), client.messages
+
+
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))

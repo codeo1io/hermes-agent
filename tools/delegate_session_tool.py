@@ -812,6 +812,18 @@ def delegate_session(
                     or process_dead
                 )
                 if not reopen:
+                    if goal and goal.strip():
+                        # Re-start on a live session is a FOLLOW-UP, not a
+                        # no-op: silently dropping the goal made every later
+                        # phase of a multi-turn delegation appear to succeed
+                        # while no work ran (conductor v5/v6 cycles).
+                        _dispatch_turn(
+                            existing, _initial_prompt(goal, context), effective_timeout
+                        )
+                        return json.dumps(
+                            {"success": True, "reused": True, "turn_dispatched": True, **_summary(existing)},
+                            ensure_ascii=False,
+                        )
                     return json.dumps(
                         {"success": True, "reused": True, **_summary(existing)},
                         ensure_ascii=False,
