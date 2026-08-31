@@ -578,13 +578,25 @@ class OpenCodeClient:
                 completed = idle_flag.is_set() and (
                     not tools_running or time.monotonic() - started > timeout_seconds
                 )
-                if completed or (
+                # The stable window is itself evidence the turn ended: a
+                # transcript that has not changed for stable_window with a
+                # content-bearing assistant message and nothing running is
+                # finished even when the server never stamps
+                # info.time.completed (some transports omit it). `generating`
+                # only vetoes the exit while the transcript is still moving;
+                # once stability has held for the full window the completed
+                # stamp can no longer arrive, so waiting longer can only burn
+                # the caller's timeout.
+                stable = (
                     stable_since is not None
                     and time.monotonic() - stable_since >= stable_window
+                )
+                if completed or (
+                    stable
                     and fresh
                     and has_assistant
                     and not tools_running
-                    and not generating
+                    and not (generating and not stable)
                     and not self._pending_questions()
                 ):
                     if idle_flag.is_set() and tools_running:
