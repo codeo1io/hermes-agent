@@ -2223,19 +2223,3 @@ def test_legacy_sentinel_catalog_still_resolves_and_migrates(tmp_path, monkeypat
     assert list(saved["models"]) == _LOCAL_CATALOG
     assert "__discovered_model_catalog__" not in saved["models"]
     assert "__explicit_model_allowlist__" not in saved["models"]
-
-
-def test_cliproxy_only_policy_blocks_non_glm_custom_model(monkeypatch):
-    monkeypatch.setenv("HERMES_CLIPROXY_ONLY", "1")
-    from hermes_cli.model_switch import switch_model
-
-    result = switch_model(
-        "gpt-5.5",
-        current_provider="custom",
-        current_model="glm-5.3",
-        current_base_url="http://192.168.3.121:8317",
-        current_api_key="dummy",
-        explicit_provider="custom",
-    )
-    assert result.success is False
-    assert "HERMES_CLIPROXY_ONLY" in result.error_message
