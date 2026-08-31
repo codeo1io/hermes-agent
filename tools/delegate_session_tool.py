@@ -252,6 +252,23 @@ def _bounded(value: Any, maximum: int = _MAX_TEXT) -> str:
     return text if len(text) <= maximum else text[: maximum - 3] + "..."
 
 
+def _bounded_edges(value: Any, maximum: int = _MAX_TEXT) -> str:
+    """Bound text while preserving structured trailers at the end.
+
+    Delegate turns commonly put machine-readable completion envelopes after a
+    human-readable explanation. Prefix-only truncation can therefore erase the
+    only phase_result even though the delegate emitted it correctly.
+    """
+    text = str(value or "")
+    if len(text) <= maximum:
+        return text
+    marker = "\n...[middle truncated]...\n"
+    available = max(0, maximum - len(marker))
+    head = available // 3
+    tail = available - head
+    return text[:head] + marker + text[-tail:]
+
+
 def _message_text(value: Any) -> str:
     """Best-effort text extraction for recent supervising-agent context."""
     if isinstance(value, str):
@@ -503,7 +520,7 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
     if include_result and record.get("last_result"):
         result = record["last_result"]
         out["last_result"] = {
-            "text": _bounded(result.get("text")),
+            "text": _bounded_edges(result.get("text")),
             "duration_s": result.get("duration_s"),
         }
     return out
@@ -1012,11 +1029,23 @@ def delegate_session(
             return tool_error(
                 f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}"
             )
-        # Keep the tool result bounded while preserving the newest conversational state.
-        safe = messages[-40:]
+        # Keep the tool result bounded while preserving the newest conversational
+        # state AND valid JSON. Never slice the serialized array mid-document:
+        # consumers such as Conductor need to parse the result to recover a
+        # structured phase_result from the newest assistant message.
+        safe = list(messages[-40:])
         encoded = json.dumps(safe, ensure_ascii=False, default=str)
-        if len(encoded) > 40_000:
-            encoded = encoded[-40_000:]
+        while len(encoded) > 40_000 and len(safe) > 1:
+            safe.pop(0)
+            encoded = json.dumps(safe, ensure_ascii=False, default=str)
+        if len(encoded) > 40_000 and safe:
+            newest = safe[-1]
+            row = newest.get("message") if isinstance(newest, dict) and isinstance(newest.get("message"), dict) else newest
+            role = str(row.get("role") or "assistant") if isinstance(row, dict) else "assistant"
+            content = row.get("content") if isinstance(row, dict) else row
+            text = _bounded_edges(_message_text(content), 30_000)
+            safe = [{"role": role, "content": [{"text": text}]}]
+            encoded = json.dumps(safe, ensure_ascii=False, default=str)
         return json.dumps(
             {
                 "success": True,

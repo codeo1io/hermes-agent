@@ -594,6 +594,39 @@ def test_offline_control_actions_fail_closed_until_resumed():
     assert "resume" in (messages.get("note") or "").lower()
 
 
+def test_summary_preserves_structured_trailer_from_long_last_result():
+    trailer = '{"phase_result":{"run_id":"r","phase_id":"p","action_id":"a","attempt_id":"x","status":"succeeded"}}'
+    record = {
+        "session_id": "s",
+        "backend": "pi",
+        "status": "idle",
+        "client": FakePiClient(session_id="s"),
+        "last_result": {"text": ("prefix-" * 2200) + trailer, "duration_s": 1.0},
+    }
+
+    summary = ds._summary(record)
+
+    assert len(summary["last_result"]["text"]) <= ds._MAX_TEXT
+    assert trailer in summary["last_result"]["text"]
+
+
+def test_messages_remain_valid_json_when_history_exceeds_bound():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.messages = [(f"message-{i}-" + ("x" * 2500)) for i in range(40)]
+
+    result = payload(
+        ds.delegate_session(action="messages", session_id=sid, parent_agent=parent)
+    )
+    parsed = json.loads(result["messages_json"])
+
+    assert len(result["messages_json"]) <= 40_000
+    assert parsed
+    assert parsed[-1]["content"].startswith("message-39-")
+
+
 def test_owner_grant_survives_workspace_move(tmp_path, monkeypatch):
     original = tmp_path / "original"
     moved = tmp_path / "moved"
