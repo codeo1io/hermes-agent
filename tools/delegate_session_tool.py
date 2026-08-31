@@ -316,6 +316,70 @@ def _parent_main_runtime(parent_agent: Any) -> dict[str, Any] | None:
     return runtime if any(runtime.values()) else None
 
 
+
+def _pi_model_for_parent(parent_agent: Any) -> str:
+    """Best-effort pi ``--model`` argument derived from the parent runtime.
+
+    Returns "" when nothing can be derived (pi keeps its own default).  The
+    mapping is advisory: an unknown provider simply yields no argument.
+    """
+    runtime = _parent_main_runtime(parent_agent) or {}
+    model = str(runtime.get("model") or "").strip()
+    provider = str(runtime.get("provider") or "").strip()
+    if not model:
+        # Last-resort: the deployment-wide auxiliary model (same provider the
+        # delegate-question answerer uses), so a bare parent object still gets
+        # a working model instead of pi's unauthorized default.
+        model = os.getenv("HERMES_ASSIST_MODEL", "").strip()
+        if not model:
+            return ""
+        if not provider:
+            provider = os.getenv("HERMES_ASSIST_PROVIDER", "").strip()
+    # pi provider ids strip the "custom:" prefix Hermes uses for custom
+    # providers; the models.json provider key is the bare name.
+    provider_id = provider.split(":", 1)[-1] if provider else ""
+    if not provider_id:
+        # The runtime said nothing about the provider.  Resolve the model id
+        # against pi's own provider registry so a bare model name (which pi
+        # cannot route) still lands on the one provider that serves it.
+        provider_id = _pi_provider_serving_model(model)
+    if provider_id and provider_id.lower() not in {"anthropic", "openai"}:
+        return f"{provider_id}/{model}"
+    return model
+
+
+def _pi_provider_serving_model(model: str) -> str:
+    """Find the pi provider whose catalog contains ``model`` ("" if none/many)."""
+    import json as _json
+
+    for candidates in (
+        Path.home() / ".pi" / "agent" / "models.json",
+        Path.home() / ".pi" / "agent" / "models-store.json",
+    ):
+        try:
+            data = _json.loads(candidates.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        providers = data.get("providers") if isinstance(data, dict) else None
+        if not isinstance(providers, dict):
+            continue
+        serving = [
+            pid
+            for pid, cfg in providers.items()
+            if any(
+                str(m.get("id")) == model
+                for m in (cfg.get("models") or [])
+                if isinstance(m, dict)
+            )
+        ]
+        if len(serving) == 1:
+            return str(serving[0])
+        if serving:  # ambiguous: prefer a non-first-party provider
+            external = [pid for pid in serving if pid not in ("anthropic", "openai")]
+            return str(external[0]) if len(external) == 1 else ""
+    return ""
+
+
 def _auto_answer_pi_question(
     parent_agent: Any,
     method: str,
@@ -788,12 +852,23 @@ def delegate_session(
                     parent_agent, answer_backend, method, title, options
                 )
 
+        client_kwargs: dict[str, Any] = {}
+        if backend_name == "pi":
+            # Without an explicit model pi falls back to its built-in
+            # Anthropic model and dies with 401 on keyless installs.
+            # Resolve, in order: explicit env override, then the parent
+            # runtime's provider/model pair mapped onto a pi provider id.
+            explicit_model = os.getenv("HERMES_PI_MODEL", "").strip()
+            model_arg = explicit_model or _pi_model_for_parent(parent_agent)
+            if model_arg:
+                client_kwargs["args"] = ["--model", model_arg]
         client = client_class(
             persistent_session=True,
             session_id=native_hint or handle,
             session_name=f"Hermes {handle[:8]}",
             acp_cwd=cwd,
             question_answerer=_answer,
+            **client_kwargs,
         )
         if native_hint and hasattr(client, "native_session_id"):
             client.native_session_id = native_hint
