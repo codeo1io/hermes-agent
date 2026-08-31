@@ -764,18 +764,25 @@ class PiRPCClient:
                 raise TimeoutError(f"pi session turn timed out after {timeout_seconds:.0f}s")
             if self._process_exited_error:
                 raise RuntimeError(self._process_exited_error)
-            if not self.text_streamed:
-                try:
-                    last = self._request_pi({"type": "get_last_assistant_text"})
-                    text = (last.get("data") or {}).get("text")
-                    if isinstance(text, str) and text:
-                        self._text_parts.append(text)
-                except Exception:
-                    pass
+            # Pi can emit an early text_delta (setting text_streamed=True) and
+            # later settle with a more complete final assistant message that is
+            # available only through get_last_assistant_text.  Always reconcile
+            # that canonical final text after settle; otherwise callers can lose
+            # structured trailers such as Conductor's phase_result JSON.
+            captured_text = "".join(self._text_parts)
+            try:
+                last = self._request_pi({"type": "get_last_assistant_text"})
+                text = (last.get("data") or {}).get("text")
+                if isinstance(text, str) and text:
+                    if not captured_text.strip() or len(text) > len(captured_text):
+                        self._text_parts = [text]
+                        captured_text = text
+            except Exception:
+                pass
             state = self.get_state(timeout=min(30.0, timeout_seconds))
             return {
                 "success": True,
-                "text": "".join(self._text_parts),
+                "text": captured_text,
                 "reasoning": "".join(self._reasoning_parts),
                 "duration_s": round(time.monotonic() - started, 1),
                 "state": state,
