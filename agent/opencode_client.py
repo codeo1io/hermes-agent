@@ -16,6 +16,7 @@ the ``?directory=`` query parameter.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import logging
 import os
@@ -74,15 +75,18 @@ _server_lock = threading.Lock()
 # spawned once, kept running for the life of the Hermes process, and each
 # delegate_session client creates its own session inside it.
 _servers: Dict[str, "_ServerHandle"] = {}
+_retired_servers: List["_ServerHandle"] = []
 
 _SINGLETON_KEY = "__opencode_singleton__"
 
 
 class _ServerHandle:
-    def __init__(self, base_url: str, proc: Optional[subprocess.Popen]):
+    def __init__(self, base_url: str, proc: Optional[subprocess.Popen], config_fingerprint: Optional[tuple] = None):
         self.base_url = base_url
         self.proc = proc
         self.refcount = 0
+        self.config_fingerprint = config_fingerprint
+        self.retired = False
 
 
 def _server_state() -> Dict[str, "_ServerHandle"]:
@@ -93,6 +97,7 @@ def _reset_server_singleton() -> None:
     """Test hook: forget all servers without killing anything."""
     with _server_lock:
         _servers.clear()
+        _retired_servers.clear()
 
 
 def _free_port() -> int:
@@ -111,6 +116,58 @@ def _opencode_command() -> List[str]:
 
 def Path_home() -> str:
     return os.path.expanduser("~")
+
+
+def _hash_file(path: str) -> tuple:
+    try:
+        with open(path, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        return (path, digest)
+    except OSError:
+        return (path, None)
+
+
+def _opencode_config_fingerprint() -> tuple:
+    # Content fingerprint for config loaded by opencode serve.
+    config_home = os.getenv("XDG_CONFIG_HOME", "").strip()
+    if not config_home:
+        config_home = os.path.join(Path_home(), ".config")
+    root = os.path.join(config_home, "opencode")
+    signatures: List[tuple] = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        if name.endswith((".json", ".jsonc", ".yaml", ".yml", ".toml", ".lock")) or name == "bun.lockb":
+            signatures.append(_hash_file(path))
+
+    explicit = os.environ.get("OPENCODE_CONFIG", "").strip()
+    if explicit:
+        explicit_path = os.path.abspath(os.path.expanduser(explicit))
+        signatures.append(("OPENCODE_CONFIG",) + _hash_file(explicit_path))
+
+    inline = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
+    if inline:
+        signatures.append(
+            ("OPENCODE_CONFIG_CONTENT", hashlib.sha256(inline.encode("utf-8")).hexdigest())
+        )
+    return (root, tuple(signatures))
+
+
+def _terminate_server_process(handle: _ServerHandle) -> None:
+    proc = handle.proc
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 def _wait_ready(base_url: str, timeout: float) -> None:
@@ -142,10 +199,22 @@ def acquire_opencode_server(
         handle = _servers.get(_SINGLETON_KEY)
         if handle is not None:
             proc = handle.proc
-            if proc is None or proc.poll() is None:
+            if proc is None:
                 handle.refcount += 1
                 return handle
-            _servers.pop(_SINGLETON_KEY, None)  # dead process: respawn below
+            if proc.poll() is None:
+                if handle.config_fingerprint == _opencode_config_fingerprint():
+                    handle.refcount += 1
+                    return handle
+                logger.info("OpenCode config changed; rolling over shared server")
+                _servers.pop(_SINGLETON_KEY, None)
+                if handle.refcount > 0:
+                    handle.retired = True
+                    _retired_servers.append(handle)
+                else:
+                    _terminate_server_process(handle)
+            else:
+                _servers.pop(_SINGLETON_KEY, None)
 
         external = os.environ.get("HERMES_OPENCODE_SERVER_URL", "").strip()
         if external:
@@ -167,7 +236,7 @@ def acquire_opencode_server(
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            handle = _ServerHandle(f"http://127.0.0.1:{port}", proc)
+            handle = _ServerHandle(f"http://127.0.0.1:{port}", proc, _opencode_config_fingerprint())
         # Readiness-gate only servers we spawned; an externally managed URL
         # (HERMES_OPENCODE_SERVER_URL) is trusted as-is so a temporarily
         # unreachable remote does not break startup — real calls surface
@@ -177,7 +246,7 @@ def acquire_opencode_server(
                 _wait_ready(handle.base_url, ready_timeout)
         except Exception:
             if handle.proc is not None:
-                handle.proc.terminate()
+                _terminate_server_process(handle)
             raise
         handle.refcount = 1
         _servers[_SINGLETON_KEY] = handle
@@ -186,33 +255,29 @@ def acquire_opencode_server(
 
 
 def release_opencode_server(handle: _ServerHandle) -> None:
-    """Release a client's reference.
-
-    The shared server deliberately STAYS RUNNING: other delegate sessions (or
-    future ones) reuse it, and a warm server avoids the multi-second plugin
-    load on every delegation. It is terminated only by
-    ``shutdown_opencode_server`` (process exit).
-    """
+    """Release a client reference and reap retired stale servers."""
+    terminate = False
     with _server_lock:
         handle.refcount -= 1
         if handle.refcount < 0:
             handle.refcount = 0
+        if handle.retired and handle.refcount == 0:
+            if handle in _retired_servers:
+                _retired_servers.remove(handle)
+            terminate = True
+    if terminate:
+        _terminate_server_process(handle)
 
 
 def shutdown_opencode_server() -> None:
     """Terminate the shared server (called at Hermes process exit)."""
     global _shutdown_registered
     with _server_lock:
-        handles = list(_servers.values())
+        handles = list(_servers.values()) + list(_retired_servers)
         _servers.clear()
+        _retired_servers.clear()
     for handle in handles:
-        proc = handle.proc
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        _terminate_server_process(handle)
 
 
 _shutdown_registered = False

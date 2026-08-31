@@ -291,6 +291,40 @@ def test_server_singleton_spawn_readiness_and_release(tmp_path, monkeypatch):
         oc._reset_server_singleton()
 
 
+def _write_opencode_stub(path):
+    path.write_text(
+        "import sys\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "port = int(sys.argv[sys.argv.index('--port') + 1])\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200); self.end_headers(); self.wfile.write(b'[]')\n"
+        "    def log_message(self, *a): pass\n"
+        "HTTPServer(('127.0.0.1', port), H).serve_forever()\n"
+    )
+
+
+def test_config_fingerprint_tracks_xdg_and_inline_content(tmp_path, monkeypatch):
+    xdg = tmp_path / "xdg"
+    config_dir = xdg / "opencode"
+    config_dir.mkdir(parents=True)
+    config = config_dir / "opencode.jsonc"
+    config.write_text('{"default_agent":"build"}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+
+    first = oc._opencode_config_fingerprint()
+    config.write_text('{"default_agent":"plan"}')
+    second = oc._opencode_config_fingerprint()
+    assert first != second
+
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"model":"one"}')
+    third = oc._opencode_config_fingerprint()
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"model":"two"}')
+    fourth = oc._opencode_config_fingerprint()
+    assert third != fourth
+
+
 def test_external_server_url_env_short_circuits_spawn(monkeypatch):
     monkeypatch.setenv("HERMES_OPENCODE_SERVER_URL", "http://127.0.0.1:9999")
     oc._reset_server_singleton()
@@ -318,3 +352,159 @@ def test_is_dead_tracks_server_process(monkeypatch):
     assert client.is_dead()
     client._server_handle = None
     assert not client.is_dead()
+
+
+def test_server_recycles_idle_process_on_config_change(monkeypatch):
+    class FakeProc:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    procs = []
+
+    def fake_popen(*args, **kwargs):
+        proc = FakeProc()
+        procs.append(proc)
+        return proc
+
+    fingerprints = iter([("old",), ("new",), ("new",)])
+    monkeypatch.setattr(oc, "_opencode_config_fingerprint", lambda: next(fingerprints))
+    monkeypatch.setattr(oc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(oc, "_free_port", iter([41000, 41001]).__next__)
+    monkeypatch.setattr(oc, "_wait_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oc, "_opencode_command", lambda: ["opencode"])
+    monkeypatch.delenv("HERMES_OPENCODE_SERVER_URL", raising=False)
+    oc._reset_server_singleton()
+    try:
+        first = oc.acquire_opencode_server()
+        oc.release_opencode_server(first)
+        second = oc.acquire_opencode_server()
+        assert second is not first
+        assert procs[0].terminated is True
+        assert first not in oc._retired_servers
+        oc.release_opencode_server(second)
+    finally:
+        oc.shutdown_opencode_server()
+        oc._reset_server_singleton()
+
+
+def test_server_rolls_over_on_config_change_without_interrupting_active_clients(monkeypatch):
+    class FakeProc:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    procs = []
+
+    def fake_popen(*args, **kwargs):
+        proc = FakeProc()
+        procs.append(proc)
+        return proc
+
+    fingerprints = iter([("old",), ("new",), ("new",)])
+    monkeypatch.setattr(oc, "_opencode_config_fingerprint", lambda: next(fingerprints))
+    monkeypatch.setattr(oc.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(oc, "_free_port", iter([41001, 41002]).__next__)
+    monkeypatch.setattr(oc, "_wait_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oc, "_opencode_command", lambda: ["opencode"])
+    monkeypatch.delenv("HERMES_OPENCODE_SERVER_URL", raising=False)
+    oc._reset_server_singleton()
+    try:
+        first = oc.acquire_opencode_server()
+        assert first.refcount == 1
+
+        second = oc.acquire_opencode_server()
+        assert second is not first
+        assert second.base_url != first.base_url
+        assert first.retired is True
+        assert first in oc._retired_servers
+        assert procs[0].terminated is False
+
+        oc.release_opencode_server(first)
+        assert procs[0].terminated is True
+        assert first not in oc._retired_servers
+
+        oc.release_opencode_server(second)
+        assert procs[1].terminated is False
+    finally:
+        oc.shutdown_opencode_server()
+        oc._reset_server_singleton()
+
+
+def test_server_reuses_warm_process_when_config_unchanged(monkeypatch):
+    class FakeProc:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    proc = FakeProc()
+    monkeypatch.setattr(oc, "_opencode_config_fingerprint", lambda: ("same",))
+    monkeypatch.setattr(oc.subprocess, "Popen", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(oc, "_free_port", lambda: 41003)
+    monkeypatch.setattr(oc, "_wait_ready", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oc, "_opencode_command", lambda: ["opencode"])
+    monkeypatch.delenv("HERMES_OPENCODE_SERVER_URL", raising=False)
+    oc._reset_server_singleton()
+    try:
+        first = oc.acquire_opencode_server()
+        second = oc.acquire_opencode_server()
+        assert second is first
+        assert first.refcount == 2
+        assert not oc._retired_servers
+        oc.release_opencode_server(first)
+        oc.release_opencode_server(second)
+    finally:
+        oc.shutdown_opencode_server()
+        oc._reset_server_singleton()
+
+
+def test_config_fingerprint_tracks_xdg_opencode_files(tmp_path, monkeypatch):
+    config_home = tmp_path / "xdg"
+    config_dir = config_home / "opencode"
+    config_dir.mkdir(parents=True)
+    config_file = config_dir / "opencode.jsonc"
+    config_file.write_text("{\"default_agent\":\"build\"}")
+    monkeypatch.setattr(oc.os, "getenv", lambda name, default="": str(config_home) if name == "XDG_CONFIG_HOME" else default)
+
+    first = oc._opencode_config_fingerprint()
+    config_file.write_text("{\"default_agent\":\"plan\",\"plugin\":[\"systematic\"]}")
+    second = oc._opencode_config_fingerprint()
+
+    assert first != second
+    assert first[0] == str(config_dir)
