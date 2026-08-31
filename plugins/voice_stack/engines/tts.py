@@ -216,7 +216,7 @@ class CommandTTSEngine(TTSEngine):
     def synthesize(self, text: str, voice: Optional[str] = None) -> str:
         output_path = str(_TTS_CACHE_DIR / f"tts_cmd_{hash(text) & 0x7FFFFFFF}.wav")
         cmd = [part.replace("{text}", text).replace("{output}", output_path) for part in self._command]
-        result = subprocess.run(cmd, capture_output=True, timeout=30, text=True)
+        result = subprocess.run(cmd, capture_output=True, timeout=30, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
             raise RuntimeError(f"TTS command failed (exit {result.returncode}): {result.stderr.strip()}")
         return output_path
