@@ -118,6 +118,33 @@ def test_run_session_prompt_fails_fast_when_pi_exits_before_settled(tmp_path):
     client.close()
 
 
+def test_run_session_prompt_reconciles_more_complete_final_assistant_text(tmp_path):
+    script = tmp_path / "fake-pi-final-text"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'prefix only'}})\n"
+        + "        send({'type':'prompt_done','id':msg['id']})\n"
+        + "        send({'type':'agent_settled'})\n"
+        + "    elif typ == 'get_last_assistant_text':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'text':'prefix only plus canonical phase_result'}})\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(acp_command=str(script), base_url="pi://final-text", persistent_session=True)
+    result = client.run_session_prompt("go", timeout_seconds=5)
+    assert result["text"] == "prefix only plus canonical phase_result"
+    client.close()
+
+
 # ------------------------------------------------- answer text mapping
 
 @pytest.mark.parametrize(

@@ -144,7 +144,7 @@ def main() -> int:
         log("FAIL", "delegate did not write answer.txt")
         ok = False
     else:
-        contents = answer_file.read_text().strip()
+        contents = answer_file.read_text(encoding="utf-8").strip()
         log("answer.txt", contents)
         if secret not in contents:
             log("FAIL", "answer.txt does not contain the Hermes-provided answer")
