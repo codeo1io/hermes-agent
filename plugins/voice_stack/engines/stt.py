@@ -142,7 +142,7 @@ class WhisperCPPEngine(STTEngine):
         cmd = [exe, "-m", self._model_path, "-f", audio_path, "--no-timestamps"]
         if language:
             cmd += ["-l", language]
-        result = subprocess.run(cmd, capture_output=True, timeout=60, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(cmd, capture_output=True, timeout=60, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"whisper.cpp failed: {result.stderr.strip()}")
         # Output format: "[00:00:00.000 --> 00:00:03.120]  Transcribed text here"
@@ -182,7 +182,7 @@ class CommandSTTEngine(STTEngine):
             part.replace("{audio}", audio_path).replace("{output}", output_txt).replace("{language}", language or "en")
             for part in self._command
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=60, text=True, encoding="utf-8", errors="replace")
+        result = subprocess.run(cmd, capture_output=True, timeout=60, text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"STT command failed: {result.stderr.strip()}")
         if os.path.exists(output_txt):

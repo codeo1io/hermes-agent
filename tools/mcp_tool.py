@@ -3116,11 +3116,13 @@ class MCPServerTask:
                     ):
                         continue
                     try:
-                        async def _probe_under_lock():
-                            async with self._rpc_lock:
-                                await self._keepalive_probe()
-
-                        await _probe_under_lock()
+                        # ``_keepalive_probe`` takes ``_rpc_lock`` itself
+                        # (and skips the cycle when it is already held), so
+                        # do NOT wrap the call in the lock here: acquiring
+                        # it first made the probe's own ``locked()`` guard
+                        # fire and turned every keepalive into a silent
+                        # no-op (#keepalive-deadlock).
+                        await self._keepalive_probe()
                     except Exception as exc:
                         root = _unwrap_exception_group(exc)
                         logger.warning(
@@ -3131,6 +3133,13 @@ class MCPServerTask:
                         self.mark_suspect(
                             f"keepalive failed: {type(root).__name__}: {root}"
                         )
+                        # Mark the current session unusable before requesting
+                        # the reconnect. Without this, callers can observe
+                        # ``_ready`` still set and enter the stale session
+                        # during the transport teardown window, producing
+                        # another ClosedResourceError before the replacement
+                        # session is published (3fdf12c920).
+                        self._ready.clear()
                         self._reconnect_event.set()
                         break
                     # Keepalive succeeded — the session survived a full
