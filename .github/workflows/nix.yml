@@ -91,7 +91,14 @@ jobs:
         run: |
           if [ -d /nix/var/nix/db ]; then
             sudo chmod 1777 /nix/var/nix/db
-            sudo chmod 666 /nix/var/nix/db/db.sqlite* 2>/dev/null || true
+            # Pre-delete the OLD nix db as root. cache-nix-action removes the
+            # existing db before restoring its cached one, but it rm's the
+            # files as the job user — and on a persistent runner the previous
+            # run's chown state can leave them unremovable, failing the step
+            # after a successful restore. Removing them here (root) makes the
+            # action's own `rm -f` a no-op on nonexistent files. The installer
+            # recreates the db from scratch.
+            sudo rm -f /nix/var/nix/db/db.sqlite /nix/var/nix/db/db.sqlite-wal /nix/var/nix/db/db.sqlite-shm
           fi
 
       - name: Install Nix
