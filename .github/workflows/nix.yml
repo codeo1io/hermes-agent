@@ -79,6 +79,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # The workspace is bind-mounted from the host and owned by the host
+      # job user; inside the container the job runs as root. Nix's embedded
+      # libgit2 refuses a repo owned by another uid (git's safe.directory
+      # does not apply to it), so make the ownership genuinely match.
+      - name: Own the workspace inside the container
+        run: chown -R root:root /__w/hermes-agent/hermes-agent
+
       # cache-nix-action assumes the job user is "runner" (it chowns
       # /nix/var/nix/db to runner:runner and later rm's the db files as the
       # job user). Inside the container the job user IS root and the db starts
@@ -94,11 +101,6 @@ jobs:
             # Each source archive is fetched one time in a run, and not one
             # time for each evaluation.
             tarball-ttl = 3600
-            # The flake input is the Actions workspace, owned by a different
-            # uid than the container user; nix's embedded libgit2 (not the
-            # git CLI) checks ownership, so git's safe.directory does not
-            # apply. This is the nix-side equivalent.
-            safe-dirs = /__w/hermes-agent/hermes-agent
 
       # Restores /nix/store from the GitHub Actions cache. The store holds the
       # whole dependency closure, so a hit turns a build of several minutes
@@ -154,9 +156,6 @@ jobs:
         run: |
           export PATH="/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
           command -v nix || { echo "nix not found after install"; exit 1; }
-          # The container's uid differs from the workspace owner, so libgit2
-          # refuses the checkout ("path is not owned by current user").
-          git config --global --add safe.directory /__w/hermes-agent/hermes-agent
           # Unprivileged container: no user namespaces for the nix sandbox.
           # Without it nix demands HOME=/homeless-shelter not exist; point
           # HOME at a real dir and disable the sandbox instead. Purity is
