@@ -21,7 +21,13 @@ const electronNative: TestProjectConfiguration = {
     name: 'electron',
     environment: 'node',
     include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}'],
-    exclude: ['scripts/run-short-session-hang-repro.test.mjs']
+    exclude: ['scripts/run-short-session-hang-repro.test.mjs'],
+    // Real git subprocesses, several per test. On a shared self-hosted
+    // runner under concurrent load a test can exceed vitest's 5000ms
+    // default while doing exactly its normal work (observed 3.1-3.5s
+    // quiet, >5s under load). The ui project raised its timeout for the
+    // same reason; keep these tests' real-per-work margin too.
+    testTimeout: 15_000
   }
 }
 

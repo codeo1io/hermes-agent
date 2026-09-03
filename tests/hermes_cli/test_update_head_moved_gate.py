@@ -92,7 +92,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     # restart phase re-imports hermes_cli.gateway fresh after purging it,
     # which would drop these stubs and probe the REAL host gateways (see
     # test_update_fleet_restart_pending._patch_update_deps for the full note).
-    monkeypatch.setattr(update_cmd, "_purge_stale_hermes_modules", lambda: None)
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None

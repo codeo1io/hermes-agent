@@ -54,53 +54,30 @@ jobs:
     # takes minutes and not seconds when the cache misses. `nix flake check`
     # builds 21 checks, and --max-jobs defaults to the core count. It uses the
     # wider runner with no more configuration.
+    #
+    # Containerized on the self-hosted runner. A persistent host's /nix state
+    # (daemon socket-activation, the installer's chowns, leftover databases)
+    # breaks both install-nix-action and cache-nix-action, which are written
+    # for an ephemeral filesystem. A clean container gives every run the
+    # disposable /nix both actions expect. The docker tests already run
+    # containers on this runner, so Docker is present and permitted here.
     runs-on: self-hosted
+    container: ubuntu:noble
     timeout-minutes: 60
     steps:
+      # git is not in the stock ubuntu:noble image and nix flake check shells
+      # out to it for flake metadata.
+      - name: Install git in the container
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq git >/dev/null
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      # The nix installer backs up shell profiles before modifying them and
-      # aborts if its own backup already exists. On an ephemeral GitHub-hosted
-      # runner that never matters; on a persistent self-hosted one a previous
-      # run's backups persist and every rerun dies here. Remove them first —
-      # they are installer artifacts, not system state.
-      - name: Clear stale nix installer backups
-        run: sudo rm -f /etc/bashrc.backup-before-nix /etc/bash.bashrc.backup-before-nix /etc/zshrc.backup-before-nix /etc/profile.backup-before-nix /etc/profile.d/nix.sh.backup-before-nix
-
-      # On a persistent self-hosted runner the nix-daemon from a previous
-      # install holds /nix/store/...-nix-*/bin/nix open (socket-activated,
-      # respawned on demand). The installer then fails overwriting it with
-      # "cp: Text file busy". Stop both units first; the installer restarts
-      # the daemon itself. On ephemeral GitHub-hosted runners this step is a
-      # no-op (no units exist).
-      - name: Stop lingering nix-daemon (self-hosted persistence)
-        run: |
-          sudo systemctl stop nix-daemon.service nix-daemon.socket 2>/dev/null || true
-          sudo pkill -x nix-daemon 2>/dev/null || true
-
       # cache-nix-action assumes the job user is "runner" (it chowns
       # /nix/var/nix/db to runner:runner and later rm's the db files as the
-      # job user). This runner executes jobs as a different user, so the
-      # chowned db dir is not writable by the job and the action's cleanup
-      # dies with "rm: cannot remove '/nix/var/nix/db/db.sqlite*':
-      # Permission denied" after the restore itself succeeded. Open the dir
-      # to the job user before the action runs; the nix-daemon re-tightens
-      # ownership itself.
-      - name: Make nix db dir writable by the job user (self-hosted)
-        run: |
-          if [ -d /nix/var/nix/db ]; then
-            sudo chmod 1777 /nix/var/nix/db
-            # Pre-delete the OLD nix db as root. cache-nix-action removes the
-            # existing db before restoring its cached one, but it rm's the
-            # files as the job user — and on a persistent runner the previous
-            # run's chown state can leave them unremovable, failing the step
-            # after a successful restore. Removing them here (root) makes the
-            # action's own `rm -f` a no-op on nonexistent files. The installer
-            # recreates the db from scratch.
-            sudo rm -f /nix/var/nix/db/db.sqlite /nix/var/nix/db/db.sqlite-wal /nix/var/nix/db/db.sqlite-shm
-          fi
-
+      # job user). Inside the container the job user IS root and the db starts
+      # empty, so the action's assumptions hold unchanged. Nothing to prepare.
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
         with:

@@ -50,6 +50,12 @@ def _make_run_side_effect(
 class TestUpdateYesConfigMigration:
     """--yes auto-answers the config-migration prompt and skips API-key prompts."""
 
+    # cmd_update() purges cached hermes_cli modules before the gateway-restart
+    # block re-imports hermes_cli.gateway fresh; the re-import would run REAL
+    # gateway discovery against the host (non-empty on a machine running
+    # Hermes gateways), tripping the live-system guard and exiting 1.
+    # Disable the purge so discovery never leaves the test sandbox.
+    @patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None)
     @patch("hermes_cli.update_cmd._reload_config_modules")
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))
@@ -91,6 +97,7 @@ class TestUpdateYesConfigMigration:
         # The "Would you like to configure them now?" prompt text never appears.
         assert "Would you like to configure them now?" not in out
 
+    @patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None)
     @patch("hermes_cli.update_cmd._reload_config_modules")
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))
@@ -151,6 +158,7 @@ class TestUnicodeDecodeErrorInUpdatePrompts:
     the exception escape and crash `hermes update` mid-flight.
     """
 
+    @patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None)
     @patch("hermes_cli.update_cmd._reload_config_modules")
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))

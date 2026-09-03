@@ -92,7 +92,7 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     # Hermes gateways), flipping the fleet-restart verdict to "incomplete"
     # and exiting 1. GitHub-hosted runners pass only because they run no
     # gateways; a self-hosted runner on a Hermes box fails 6 tests here.
-    monkeypatch.setattr(update_cmd, "_purge_stale_hermes_modules", lambda: None)
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None
