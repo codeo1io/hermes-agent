@@ -66,11 +66,15 @@ jobs:
     timeout-minutes: 60
     steps:
       # git is not in the stock ubuntu:noble image and nix flake check shells
-      # out to it for flake metadata.
-      - name: Install git in the container
+      # out to it for flake metadata. sudo is likewise absent, and
+      # cachix/install-nix-action's script calls `sudo` unconditionally (KVM
+      # rules + /etc/nix setup) even when the job user is already root inside
+      # the container — it died with exit 127 "sudo: command not found"
+      # (run 33810264706). Install both here.
+      - name: Install git and sudo in the container
         run: |
           apt-get update -qq
-          apt-get install -y -qq git >/dev/null
+          apt-get install -y -qq git sudo >/dev/null
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
