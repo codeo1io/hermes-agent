@@ -139,4 +139,11 @@ jobs:
       - name: nix flake check
         # --print-build-logs: a check that fails then prints the assertion
         # that failed, and not only the derivation that failed to build.
-        run: nix flake check --print-build-logs
+        #
+        # In the container each step runs a fresh non-login sh that never
+        # sources /etc/profile.d/nix.sh, so the installer's nix is not on
+        # PATH. Source it explicitly.
+        shell: bash
+        run: |
+          . /etc/profile.d/nix.sh
+          nix flake check --print-build-logs
