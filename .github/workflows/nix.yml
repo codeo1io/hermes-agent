@@ -94,6 +94,11 @@ jobs:
             # Each source archive is fetched one time in a run, and not one
             # time for each evaluation.
             tarball-ttl = 3600
+            # The flake input is the Actions workspace, owned by a different
+            # uid than the container user; nix's embedded libgit2 (not the
+            # git CLI) checks ownership, so git's safe.directory does not
+            # apply. This is the nix-side equivalent.
+            safe-dirs = /__w/hermes-agent/hermes-agent
 
       # Restores /nix/store from the GitHub Actions cache. The store holds the
       # whole dependency closure, so a hit turns a build of several minutes
