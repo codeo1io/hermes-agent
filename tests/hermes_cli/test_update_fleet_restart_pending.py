@@ -83,9 +83,16 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
         lambda *a, **k: "https://github.com/NousResearch/hermes-agent.git",
     )
     monkeypatch.setattr(hermes_main, "_is_fork", lambda *a, **k: False)
-    monkeypatch.setattr(
-        hermes_main, "_stash_local_changes_if_needed", lambda *a, **k: None
-    )
+    monkeypatch.setattr(hermes_main, "_stash_local_changes_if_needed", lambda *a, **k: None)
+    # Keep the monkeypatched gateway stubs alive across the restart phase.
+    # cmd_update() purges every cached ``hermes_cli`` module before the
+    # gateway-restart block re-imports ``hermes_cli.gateway`` fresh — the
+    # re-import would silently drop these stubs and run the REAL gateway
+    # discovery against the host (non-empty on any machine actually running
+    # Hermes gateways), flipping the fleet-restart verdict to "incomplete"
+    # and exiting 1. GitHub-hosted runners pass only because they run no
+    # gateways; a self-hosted runner on a Hermes box fails 6 tests here.
+    monkeypatch.setattr(update_cmd, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None
