@@ -76,6 +76,10 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -y -qq git sudo curl xz-utils >/dev/null
+          # Nix build users force HOME=/homeless-shelter to detect impurity;
+          # the ubuntu:noble image ships that directory, so every unsandboxed
+          # build dies on "please remove it to assure purity". Remove it.
+          rm -rf /homeless-shelter
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
