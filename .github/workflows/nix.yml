@@ -149,4 +149,7 @@ jobs:
         run: |
           export PATH="/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
           command -v nix || { echo "nix not found after install"; exit 1; }
+          # The container's uid differs from the workspace owner, so libgit2
+          # refuses the checkout ("path is not owned by current user").
+          git config --global --add safe.directory /__w/hermes-agent/hermes-agent
           nix flake check --print-build-logs
