@@ -140,10 +140,13 @@ jobs:
         # --print-build-logs: a check that fails then prints the assertion
         # that failed, and not only the derivation that failed to build.
         #
-        # In the container each step runs a fresh non-login sh that never
-        # sources /etc/profile.d/nix.sh, so the installer's nix is not on
-        # PATH. Source it explicitly.
+        # In the container each step runs a fresh shell that never sources
+        # the installer's profile setup, and the installer's layout differs
+        # by mode: single-user puts nix in /root/.nix-profile, daemon mode
+        # in /nix/var/nix/profiles/default. Put both bin dirs on PATH,
+        # whichever exist.
         shell: bash
         run: |
-          . /etc/profile.d/nix.sh
+          export PATH="/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
+          command -v nix || { echo "nix not found after install"; exit 1; }
           nix flake check --print-build-logs
