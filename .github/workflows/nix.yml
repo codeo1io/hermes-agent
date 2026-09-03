@@ -152,4 +152,9 @@ jobs:
           # The container's uid differs from the workspace owner, so libgit2
           # refuses the checkout ("path is not owned by current user").
           git config --global --add safe.directory /__w/hermes-agent/hermes-agent
-          nix flake check --print-build-logs
+          # Unprivileged container: no user namespaces for the nix sandbox.
+          # Without it nix demands HOME=/homeless-shelter not exist; point
+          # HOME at a real dir and disable the sandbox instead. Purity is
+          # already reduced inside a container either way.
+          export HOME=/root
+          nix flake check --print-build-logs --option sandbox false
