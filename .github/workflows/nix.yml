@@ -79,6 +79,21 @@ jobs:
           sudo systemctl stop nix-daemon.service nix-daemon.socket 2>/dev/null || true
           sudo pkill -x nix-daemon 2>/dev/null || true
 
+      # cache-nix-action assumes the job user is "runner" (it chowns
+      # /nix/var/nix/db to runner:runner and later rm's the db files as the
+      # job user). This runner executes jobs as a different user, so the
+      # chowned db dir is not writable by the job and the action's cleanup
+      # dies with "rm: cannot remove '/nix/var/nix/db/db.sqlite*':
+      # Permission denied" after the restore itself succeeded. Open the dir
+      # to the job user before the action runs; the nix-daemon re-tightens
+      # ownership itself.
+      - name: Make nix db dir writable by the job user (self-hosted)
+        run: |
+          if [ -d /nix/var/nix/db ]; then
+            sudo chmod 1777 /nix/var/nix/db
+            sudo chmod 666 /nix/var/nix/db/db.sqlite* 2>/dev/null || true
+          fi
+
       - name: Install Nix
         uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
         with:
