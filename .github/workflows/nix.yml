@@ -79,14 +79,17 @@ jobs:
       # the container — it died with exit 127 "sudo: command not found"
       # (run 33810264706). The installer also needs curl + xz to fetch its
       # tarball (run 33813356912: "curl: command not found"). Install all four.
+      # apt needs root; the job itself runs as uid 1000 to match the
+      # bind-mounted workspace's owner. The runner mounts no sudoers config
+      # here, so elevate exactly this one step.
       - name: Install git, sudo, curl, xz in the container
         run: |
-          apt-get update -qq
-          apt-get install -y -qq git sudo curl xz-utils >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git sudo curl xz-utils >/dev/null
           # Nix build users force HOME=/homeless-shelter to detect impurity;
           # the ubuntu:noble image ships that directory, so every unsandboxed
           # build dies on "please remove it to assure purity". Remove it.
-          rm -rf /homeless-shelter
+          sudo rm -rf /homeless-shelter
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
