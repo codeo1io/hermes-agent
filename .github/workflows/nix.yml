@@ -88,6 +88,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # The workspace is bind-mounted from the host and owned by the host
+      # job user; inside the container the job runs as root. Nix's embedded
+      # libgit2 refuses a repo owned by another uid (git's safe.directory
+      # does not apply to it), so match ownership for the build. The
+      # always-run step after the check hands ownership back so host-side
+      # jobs keep working.
+      - name: Own the workspace inside the container
+        run: chown -R root:root /__w/hermes-agent/hermes-agent
+
       # cache-nix-action assumes the job user is "runner" (it chowns
       # /nix/var/nix/db to runner:runner and later rm's the db files as the
       # job user). Inside the container the job user IS root and the db starts
