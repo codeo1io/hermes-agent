@@ -759,7 +759,7 @@ def delegate_session(
         )
     if backend is not None and str(backend).strip().lower() not in _KNOWN_BACKENDS:
         return tool_error(f"Unknown backend {backend!r}. Use 'pi' or 'opencode'.")
-    effective_timeout = float(max(10, min(int(timeout or 900), 3600)))
+    effective_timeout = float(max(10, min(int(timeout or 900), 7200)))
     try:
         effective_wait = max(
             0.0, min(float(120 if wait_seconds is None else wait_seconds), 3600.0)
@@ -1192,7 +1192,7 @@ DELEGATE_SESSION_SCHEMA = {
             "timeout": {
                 "type": "integer",
                 "minimum": 10,
-                "maximum": 3600,
+                "maximum": 7200,
                 "description": "Maximum seconds allowed for each delegate turn (default 900).",
             },
             "wait_seconds": {
