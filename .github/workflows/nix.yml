@@ -172,6 +172,10 @@ jobs:
           # HOME at a real dir and disable the sandbox instead. Purity is
           # already reduced inside a container either way.
           export HOME=/root
+          # /homeless-shelter reappears (image packages recreate it), and a
+          # build that hits it dies on the impurity check. Remove it at the
+          # last moment before any build runs.
+          rm -rf /homeless-shelter
           nix flake check --print-build-logs --option sandbox false
 
       # The chown above leaked root ownership onto the host workspace; the
