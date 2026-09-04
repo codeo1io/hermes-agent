@@ -112,6 +112,12 @@ jobs:
             # Each source archive is fetched one time in a run, and not one
             # time for each evaluation.
             tarball-ttl = 3600
+            # In a container there are no nixbld build users and no real
+            # multi-user setup; builds run as root. An empty build-users-group
+            # tells nix this is single-user mode, which also skips the
+            # HOME=/homeless-shelter impurity check that otherwise kills any
+            # build after the image recreates that directory.
+            build-users-group =
 
       # Restores /nix/store from the GitHub Actions cache. The store holds the
       # whole dependency closure, so a hit turns a build of several minutes
