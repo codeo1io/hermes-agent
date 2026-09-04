@@ -59,6 +59,14 @@ def _make_mock_server(name, session=None, tools=None):
     server = MCPServerTask(name)
     server.session = session
     server._tools = tools or []
+    # A mock server with a session handed to it represents a server whose
+    # connect lifecycle already completed: the gate added in 3fdf12c920
+    # treats an unset ``_ready`` as an in-progress reconnect and blocks
+    # callers for the full 5s window before returning "not connected".
+    # Real servers set ``_ready`` once the transport is live, so mirror
+    # that here whenever a session is provided.
+    if session is not None:
+        server._ready.set()
     return server
 
 
@@ -594,6 +602,11 @@ class TestToolHandler:
             assert srv is server
             srv.session = mock_session
             srv._recycled_reason = None
+            # A real lazy reconnect completes the transport lifecycle, which
+            # publishes readiness before the session becomes callable — the
+            # pre-call gate added in 3fdf12c920 blocks callers on an unset
+            # ``_ready`` until it is.
+            srv._ready.set()
             return True
 
         try:

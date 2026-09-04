@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import main as hermes_main
+from hermes_cli import update_cmd
 
 
 def _make_head_moved_side_effect(pre_sha="abc123", post_sha="def456"):
@@ -87,6 +88,11 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(
         hermes_main, "_stash_local_changes_if_needed", lambda *a, **k: None
     )
+    # Keep the gateway stubs alive across cmd_update's module purge — the
+    # restart phase re-imports hermes_cli.gateway fresh after purging it,
+    # which would drop these stubs and probe the REAL host gateways (see
+    # test_update_fleet_restart_pending._patch_update_deps for the full note).
+    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
     monkeypatch.setattr(hermes_main, "_clear_bytecode_cache", lambda *a, **k: 0)
     monkeypatch.setattr(
         hermes_main, "_record_bytecode_fingerprint", lambda *a, **k: None

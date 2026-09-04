@@ -125,7 +125,7 @@ def play_audio_local(audio_path: str, device_id: Optional[int] = None) -> bool:
                     cmd += ["-audio_device", str(device_id)]
             cmd.append(audio_path)
             try:
-                subprocess.run(cmd, capture_output=True, timeout=30, check=True)
+                subprocess.run(cmd, capture_output=True, timeout=30, check=True, stdin=subprocess.DEVNULL)
                 return True
             except Exception as exc:
                 logger.error("%s playback failed: %s", player, exc)
