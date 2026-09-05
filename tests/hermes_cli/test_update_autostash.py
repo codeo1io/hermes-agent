@@ -263,6 +263,14 @@ def _setup_keep_stash_test(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "hermes_cli.gateway.find_gateway_pids", lambda **kw: [], raising=False
     )
+    # cmd_update() purges cached hermes_cli modules before the gateway-restart
+    # block re-imports hermes_cli.gateway fresh; the re-import would drop the
+    # stub above and run REAL gateway discovery against the host. Disable the
+    # purge so the stubs survive the restart phase (hermes_main binding —
+    # cmd_update reads it via _m()).
+    monkeypatch.setattr(
+        hermes_main, "_purge_stale_hermes_modules", lambda: None
+    )
     return restore_calls, discard_calls, park_calls
 
 

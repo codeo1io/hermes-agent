@@ -820,18 +820,30 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="after")
 
         statements = []
-        read_conn = db._get_read_conn() or db._conn
+        # Trace every connection the read path can actually use: the writer
+        # AND whatever _read_ctx borrows. Since reads were pooled
+        # (87aedbe7b6), _read_ctx serves statements from the pool, which is
+        # a different connection from the one a direct _get_read_conn()
+        # opens — tracing only the latter saw nothing.
+        orig_checkout = db._checkout_read_conn
+
+        def _traced_checkout():
+            conn = orig_checkout()
+            if conn is not None:
+                conn.set_trace_callback(statements.append)
+            return conn
+
+        db._checkout_read_conn = _traced_checkout
         traced_connections = [db._conn]
-        if read_conn is not db._conn:
-            traced_connections.append(read_conn)
-        for conn in traced_connections:
-            conn.set_trace_callback(statements.append)
 
         def context_query_count():
             normalized = (" ".join(sql.upper().split()) for sql in statements)
             return sum("WITH TARGET AS (" in sql for sql in normalized)
 
         try:
+            for conn in traced_connections:
+                conn.set_trace_callback(statements.append)
+
             projected = db.search_messages(
                 "projectionneedle", fields=("session_id", "snippet")
             )
@@ -850,6 +862,7 @@ class TestFTS5Search:
             assert default[0]["context"]
             assert context_query_count() == 2
         finally:
+            db._checkout_read_conn = orig_checkout
             for conn in traced_connections:
                 conn.set_trace_callback(None)
 

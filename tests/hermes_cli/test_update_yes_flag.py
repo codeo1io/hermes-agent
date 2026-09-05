@@ -12,7 +12,31 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture
+def no_gateway_fleet(monkeypatch):
+    """Keep the update flow away from the real gateway fleet on this machine.
+
+    The self-hosted CI runner is a systemd service (not a gateway descendant),
+    so ``cmd_update``'s restart-phase ``find_gateway_pids(all_profiles=True)``
+    scan sees the REAL production gateway PID, reaches ``terminate_pid`` /
+    ``os.kill`` on it, and trips the conftest live-system guard — exit 1,
+    ``gateway_fleet_restart_incomplete`` (seen live: run 33829979829, job
+    100890793318, blocked os.kill(1619589, 15)). Same treatment as
+    test_update_autostash.py: stub discovery to return nothing.
+    """
+    import hermes_cli.gateway as hermes_gateway
+
+    monkeypatch.setattr(
+        hermes_gateway, "find_gateway_pids", lambda **kw: []
+    )
+    monkeypatch.setattr(
+        "hermes_cli.gateway.find_gateway_pids", lambda **kw: [], raising=False
+    )
 
 
 def _make_run_side_effect(
@@ -50,6 +74,12 @@ def _make_run_side_effect(
 class TestUpdateYesConfigMigration:
     """--yes auto-answers the config-migration prompt and skips API-key prompts."""
 
+    # cmd_update() purges cached hermes_cli modules before the gateway-restart
+    # block re-imports hermes_cli.gateway fresh; the re-import would run REAL
+    # gateway discovery against the host (non-empty on a machine running
+    # Hermes gateways), tripping the live-system guard and exiting 1.
+    # Disable the purge so discovery never leaves the test sandbox.
+    @patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None)
     @patch("hermes_cli.update_cmd._reload_config_modules")
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))
@@ -66,6 +96,7 @@ class TestUpdateYesConfigMigration:
         _mock_version,
         mock_migrate,
         _mock_reload,
+        no_gateway_fleet,
         capsys,
     ):
         mock_run.side_effect = _make_run_side_effect(
@@ -91,6 +122,7 @@ class TestUpdateYesConfigMigration:
         # The "Would you like to configure them now?" prompt text never appears.
         assert "Would you like to configure them now?" not in out
 
+    @patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None)
     @patch("hermes_cli.update_cmd._reload_config_modules")
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))
@@ -107,6 +139,7 @@ class TestUpdateYesConfigMigration:
         _mock_version,
         mock_migrate,
         _mock_reload,
+        no_gateway_fleet,
         capsys,
     ):
         """Regression guard: without --yes, the TTY prompt path still fires."""
@@ -151,6 +184,7 @@ class TestUnicodeDecodeErrorInUpdatePrompts:
     the exception escape and crash `hermes update` mid-flight.
     """
 
+    @patch("hermes_cli.main._purge_stale_hermes_modules", lambda: None)
     @patch("hermes_cli.update_cmd._reload_config_modules")
     @patch("hermes_cli.update_cmd._run_migrate_config_fresh")
     @patch("hermes_cli.update_cmd._run_config_check_fresh", return_value=(1, 2))
@@ -167,6 +201,7 @@ class TestUnicodeDecodeErrorInUpdatePrompts:
         _mock_version,
         mock_migrate,
         _mock_reload,
+        no_gateway_fleet,
         capsys,
     ):
         mock_run.side_effect = _make_run_side_effect(

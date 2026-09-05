@@ -1,6 +1,8 @@
 """Behavior tests for config-driven browser snapshot thresholds."""
 
 import json
+import os
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -24,10 +26,25 @@ def isolated_snapshot_threshold(tmp_path, monkeypatch):
 
 
 def _write_threshold(hermes_home, value):
-    (hermes_home / "config.yaml").write_text(
+    config_file = hermes_home / "config.yaml"
+    config_file.write_text(
         f"browser:\n  snapshot_threshold: {value}\n",
         encoding="utf-8",
     )
+    # Bump the mtime strictly into the future: coarse-mtime filesystems
+    # (overlayfs, some tmpfs) report identical (mtime_ns, size) for rapid
+    # same-size rewrites, which would defeat read_raw_config()'s stat-based
+    # cache and make config-reload assertions flaky by host. A monotonically
+    # increasing future mtime always differs from any previously observed
+    # value (a fixed offset would collide when both writes land in the same
+    # coarse tick).
+    global _CONFIG_TEST_MTIME
+    try:
+        _CONFIG_TEST_MTIME += 1_000_000_000
+    except NameError:
+        _CONFIG_TEST_MTIME = time.time_ns() + 1_000_000_000
+    atime = config_file.stat().st_atime_ns
+    os.utime(config_file, ns=(atime, _CONFIG_TEST_MTIME))
 
 
 def _long_snapshot(chars: int) -> str:
