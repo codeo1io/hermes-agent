@@ -130,7 +130,7 @@ async def test_run_agent_binds_api_session_context_for_tool_env(adapter, monkeyp
         def __init__(self, session_id: str):
             self.session_id = session_id
 
-        def run_conversation(self, user_message, conversation_history, task_id):
+        def run_conversation(self, user_message, conversation_history, task_id, lease_wait_seconds=None):
             from gateway.session_context import get_session_env
             from tools.environments.local import _make_run_env
 
@@ -183,7 +183,7 @@ async def test_run_agent_registers_active_run_id_for_steering(adapter, monkeypat
             observed["steer_text"] = text
             return True
 
-        def run_conversation(self, user_message, conversation_history, task_id):
+        def run_conversation(self, user_message, conversation_history, task_id, lease_wait_seconds=None):
             observed["registered"] = adapter._active_run_agents.get("run_steer_test") is self
             observed["task_id"] = task_id
             return {"final_response": "ok"}
@@ -229,7 +229,7 @@ async def test_session_chat_stream_disconnect_keeps_control_refs_until_executor_
         def interrupt(self, _message=None):
             interrupt_called.set()
 
-        def run_conversation(self, user_message, conversation_history, task_id):
+        def run_conversation(self, user_message, conversation_history, task_id, lease_wait_seconds=None):
             del user_message, conversation_history, task_id
             run_started.set()
             self._stream_delta_callback("hello")
@@ -554,7 +554,7 @@ async def test_session_model_lock_endpoint_then_chat_reuses_persisted_lock_and_p
             self.provider = kwargs.get("provider") or ""
             self.model = kwargs.get("model") or ""
 
-        def run_conversation(self, user_message, conversation_history, task_id):
+        def run_conversation(self, user_message, conversation_history, task_id, lease_wait_seconds=None):
             return {"final_response": "locked", "session_id": self.session_id}
 
     _patch_api_server_runtime(monkeypatch)
@@ -687,7 +687,7 @@ async def test_run_agent_reports_actual_agent_runtime_not_requested_metadata(ada
                 "route_source": "raw_request",
             }
 
-        def run_conversation(self, user_message, conversation_history, task_id):
+        def run_conversation(self, user_message, conversation_history, task_id, lease_wait_seconds=None):
             return {"final_response": "ok", "session_id": self.session_id}
 
     monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: FakeAgent())
@@ -724,7 +724,7 @@ async def test_confirmed_runtime_lock_rejects_actual_runtime_mismatch(adapter, m
         provider = "fallback-provider"
         model = "fallback-model"
 
-        def run_conversation(self, user_message, conversation_history, task_id):
+        def run_conversation(self, user_message, conversation_history, task_id, lease_wait_seconds=None):
             return {"final_response": "wrong runtime", "session_id": self.session_id}
 
     monkeypatch.setattr(adapter, "_create_agent", lambda **kwargs: FakeAgent())

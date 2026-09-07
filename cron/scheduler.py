@@ -2631,6 +2631,78 @@ def _get_bot_chat_delivery_timeout() -> int:
         return 600
 
 
+def _deliver_to_api_server_transcript(
+    job: dict, chat_id: str, content: str
+) -> Optional[str]:
+    """Deliver job output into an api_server session's transcript.
+
+    The API server is a stateless request/response surface: there is no push
+    lane and ``send()`` is a permanent stub. The one delivery primitive that
+    works is the transcript itself — the same visibility model the kanban
+    wake path uses for this platform (``gateway/wake.py`` module docstring:
+    the output is "visible the next time the client polls/reopens the
+    conversation").
+
+    The delivery is written as a user-role message with a ``[Cron delivery]``
+    prefix (role parity with ``_maybe_mirror_cron_delivery`` — an
+    assistant-role splice after the agent's last turn breaks strict
+    alternation on replay, issue #2221).
+
+    Returns None on success, or an error string for ``last_delivery_error``
+    that names the ACTUAL failure (missing session) instead of the dead
+    send() stub's message.
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+    job_label = job.get("name") or job.get("id") or "cron"
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+    except Exception as e:
+        return f"api_server transcript delivery failed (session db): {e}"
+    try:
+        try:
+            session_row = db.get_session(chat_id)
+        except Exception as e:
+            return f"api_server transcript delivery failed (session lookup): {e}"
+        if session_row is None:
+            # Resolve compression lineage: an origin chat_id may be a rotated
+            # parent whose live tip moved on. The mirror helper's scan is
+            # unnecessary here — state.db's own resolve handles it.
+            try:
+                latest = db.resolve_resume_session_id(chat_id)
+            except Exception:
+                latest = None
+            if latest and latest != chat_id:
+                chat_id = latest
+            else:
+                return (
+                    f"api_server target session {chat_id} does not exist; "
+                    "deliver to an explicit platform, or re-create the job "
+                    "from a live session"
+                )
+        try:
+            db.append_message(
+                session_id=chat_id,
+                role="user",
+                content=f"[Cron delivery: {job_label}]\n{text}",
+            )
+        except Exception as e:
+            return f"api_server transcript delivery failed (append): {e}"
+        logger.info(
+            "Job '%s': delivered to api_server session %s transcript",
+            job.get("id", "?"), chat_id,
+        )
+        return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]:
     """Deliver job output into a profile's canonical Bot Chat as an inbound turn.
 
@@ -3213,6 +3285,28 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 "Job '%s': delivering to %s:%s thread_id=%s",
                 job["id"], platform_name, chat_id, thread_id,
             )
+
+        # api_server targets are transcript conversations, not push channels:
+        # the adapter's send() is a permanent stub ("API server uses HTTP
+        # request/response, not send()") and the standalone fallback repeats
+        # the same dead end — a deliver=origin job created from a WebUI/API
+        # session could NEVER deliver (live failure 2026-09-07 01:34, job
+        # cd69dbd4c2b8). The correct lane is the one the kanban wake path
+        # documents for this platform: write into the target session's
+        # transcript — the output becomes visible when the client next
+        # polls/reopens the conversation, and a later turn in that session
+        # sees it in history. The target chat_id for an api_server origin IS
+        # the raw session id (verified: jobs.json origins resolve to real
+        # sessions table rows).
+        if platform_name == "api_server":
+            _as_err = _deliver_to_api_server_transcript(
+                job, str(chat_id), mirror_text or cleaned_delivery_content,
+            )
+            if _as_err:
+                delivery_errors.append(_as_err)
+            else:
+                delivered = True
+            continue
 
         # Mirror scope: the origin conversation, the home-channel FALLBACK for
         # an origin-less deliver=origin job (a script-provisioned managed cron
@@ -7688,6 +7782,13 @@ def create_job_with_scheduler_registration(**kwargs) -> dict:
 # than run on every idle 60s cycle. Tests may reset _last_dead_owner_reap_at
 # to None to force a reap on the next tick.
 _DEAD_OWNER_REAP_INTERVAL_SECONDS = 300.0
+
+# Stale session-turn-lease sweep cadence (seconds). Leases held by provably
+# dead PIDs linger forever without a next acquirer on that conversation
+# (lazy reclamation) — a 7-day-old dead-pid lease was observed live. Swept
+# from the cron tick, which already runs every 60s in the gateway.
+_STALE_LEASE_SWEEP_INTERVAL_SECONDS = 300.0
+_last_stale_lease_sweep_at: float | None = None
 _last_dead_owner_reap_at: Optional[float] = None
 
 
@@ -7807,6 +7908,34 @@ def tick(
                     )
             except Exception as _reap_exc:
                 logger.debug("Dead-owner execution reclaim failed: %s", _reap_exc)
+
+        # Stale session-turn-lease sweep: dead-holder leases are otherwise
+        # only reclaimed lazily (by the next acquirer of that same
+        # conversation). A conversation whose holder died mid-turn has no
+        # next acquirer until a user returns — sweeps keep the table clean
+        # without waiting for organic traffic. Throttled like the dead-owner
+        # reclaim above; failures never break the tick.
+        global _last_stale_lease_sweep_at
+        if (
+            _last_stale_lease_sweep_at is None
+            or _reap_now - _last_stale_lease_sweep_at
+            >= _STALE_LEASE_SWEEP_INTERVAL_SECONDS
+        ):
+            _last_stale_lease_sweep_at = _reap_now
+            try:
+                from hermes_state import SessionDB
+
+                _swept = SessionDB().sweep_session_turn_leases()
+                if _swept:
+                    logger.warning(
+                        "Swept %d stale session turn lease(s) "
+                        "(expired or dead holder)",
+                        _swept,
+                    )
+            except Exception as _sweep_exc:
+                logger.debug(
+                    "Stale session turn lease sweep failed: %s", _sweep_exc
+                )
 
         due_jobs = get_due_jobs()
 

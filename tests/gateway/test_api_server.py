@@ -390,6 +390,9 @@ class TestAgentExecution:
             user_message="hello",
             conversation_history=[],
             task_id="session-123",
+            # lease_wait_seconds threads the background-turn lease-wait
+            # bound (X-Hermes-Lease-Wait-Seconds); None = default 1800s.
+            lease_wait_seconds=None,
         )
 
     @pytest.mark.asyncio

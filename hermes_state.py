@@ -8108,6 +8108,58 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         self._execute_write(_do)
 
+    def sweep_session_turn_leases(self) -> int:
+        """Reap expired/dead-holder session turn leases across ALL conversations.
+
+        Normal reclamation is lazy — it only fires when the NEXT acquirer of
+        that same conversation walks into ``try_acquire_session_turn_lease``.
+        A conversation whose last holder died (gateway crash, SIGKILL during
+        shutdown) has no next acquirer until a user returns to it, so a
+        dead-holder lease sat in the table for 7 days on a live host (pid
+        2522725, 2026-08-31 → 2026-09-07) — meanwhile every diagnostic and
+        lease-listing tool reported it as held. This sweep reclaims exactly
+        the rows the lazy path would reclaim (expired by TTL, or structured
+        holder whose local PID is provably gone), under one write
+        transaction, and returns how many rows were deleted. Same-process
+        holders and any PID-liveness doubt stay TTL-protected (see
+        ``_compression_lock_holder_process_is_dead``).
+        """
+        now = time.time()
+        rows = self._conn.execute(
+            "SELECT conversation_id, holder, expires_at "
+            "FROM session_turn_leases"
+        ).fetchall()
+        doomed: list = []
+        for row in rows:
+            holder = row["holder"] if isinstance(row, sqlite3.Row) else row[1]
+            conv = row["conversation_id"] if isinstance(row, sqlite3.Row) else row[0]
+            expires_at = float(
+                row["expires_at"] if isinstance(row, sqlite3.Row) else row[2]
+            )
+            if expires_at <= now or _compression_lock_holder_process_is_dead(holder):
+                doomed.append((conv, holder))
+        if not doomed:
+            return 0
+
+        def _do(conn):
+            deleted = 0
+            for conv, holder in doomed:
+                cursor = conn.execute(
+                    "DELETE FROM session_turn_leases "
+                    "WHERE conversation_id = ? AND holder = ?",
+                    (conv, holder),
+                )
+                deleted += cursor.rowcount
+            return deleted
+
+        try:
+            return int(self._execute_write(_do) or 0)
+        except sqlite3.Error:
+            logger.warning(
+                "session turn lease sweep write failed", exc_info=True
+            )
+            return 0
+
     def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
         """Return the current (non-expired) holder for ``session_id``, or None.
 

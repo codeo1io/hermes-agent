@@ -5164,6 +5164,28 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id = _derive_chat_session_id(system_prompt, first_user)
             # history already set from request body above
 
+        # Bounded lease wait for background/synthetic turns (kanban wake
+        # self-posts, cron continuation pings). X-Hermes-Lease-Wait-Seconds
+        # bounds how long this turn waits for the session's cross-process
+        # turn lease when another (typically foreground) turn holds it.
+        # Default: unbounded-ish 1800s for interactive clients. Background
+        # callers set a small value (e.g. 2) so a busy session fails fast
+        # with a retryable error instead of stacking a 30-minute waiter —
+        # the concurrent-waiter pile-up observed 2026-09-07.
+        lease_wait_seconds: Optional[float] = None
+        raw_lw = request.headers.get("X-Hermes-Lease-Wait-Seconds", "").strip()
+        if raw_lw:
+            try:
+                lease_wait_seconds = max(0.0, min(float(raw_lw), 1800.0))
+            except ValueError:
+                return web.json_response(
+                    _openai_error(
+                        "X-Hermes-Lease-Wait-Seconds must be a number of "
+                        "seconds (0-1800).",
+                    ),
+                    status=400,
+                )
+
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
@@ -5270,6 +5292,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                lease_wait_seconds=lease_wait_seconds,
                 **agent_overrides,
                 route=route,
             ))
@@ -5291,6 +5314,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                lease_wait_seconds=lease_wait_seconds,
                 **agent_overrides,
                 route=route,
             )
@@ -5346,6 +5370,10 @@ class APIServerAdapter(BasePlatformAdapter):
         # with OpenAI-style error envelope so SDK clients raise instead of
         # silently rendering the internal failure string as message.content.
         if not final_response and (is_failed or is_partial):
+            # A bounded background wait that expired because the session
+            # lease is held is transient-busy, not a gateway fault: 503 so
+            # machine callers (wake self-post lane) retry on backoff.
+            _lease_busy = bool(err_msg and "session_turn_lease_busy" in str(err_msg))
             err_body = _openai_error(
                 err_msg or "Agent run did not produce a response.",
                 err_type="server_error",
@@ -5358,6 +5386,11 @@ class APIServerAdapter(BasePlatformAdapter):
             }
             response_headers["X-Hermes-Completed"] = "false"
             response_headers["X-Hermes-Partial"] = "true" if is_partial else "false"
+            if _lease_busy:
+                response_headers["Retry-After"] = "5"
+                return web.json_response(
+                    err_body, status=503, headers=response_headers
+                )
             return web.json_response(err_body, status=502, headers=response_headers)
 
         # Soft-partial path: we have *some* text but the run did not complete
@@ -7240,6 +7273,7 @@ class APIServerAdapter(BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None,
         route_source: str = "global",
         confirmed_runtime_lock: bool = False,
+        lease_wait_seconds: Optional[float] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -7334,6 +7368,7 @@ class APIServerAdapter(BasePlatformAdapter):
                         user_message=user_message,
                         conversation_history=conversation_history,
                         task_id=effective_task_id,
+                        lease_wait_seconds=lease_wait_seconds,
                     )
                     usage = {
                         "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,

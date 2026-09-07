@@ -8624,6 +8624,7 @@ class AIAgent:
         persist_user_display_kind: Optional[str] = None,
         persist_user_display_metadata: Optional[Dict[str, Any]] = None,
         moa_config: Optional[dict[str, Any]] = None,
+        lease_wait_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         # A review deliberately shares this agent's session_id for prompt-cache
@@ -8760,6 +8761,18 @@ class AIAgent:
                 )
                 _lease_ttl = 300.0
                 _lease_waited = False
+                # Background/synthetic turns (kanban wake self-posts, cron
+                # continuation pings) pass a small bounded wait so a busy
+                # foreground turn produces a FAST retryable failure instead
+                # of stacking a 1800s waiter thread — the repeat-message
+                # pile-up observed 2026-09-07 (N concurrent waiters, each
+                # timing out after 30 minutes and re-rendering the last
+                # completed message). The caller's rewind/retry handles the
+                # retry on its own cadence. None keeps the 1800s default
+                # (interactive foreground turns).
+                _lease_wait = 1800.0
+                if lease_wait_seconds is not None:
+                    _lease_wait = max(0.0, min(float(lease_wait_seconds), 1800.0))
 
                 def _on_session_turn_lease_wait(elapsed: float) -> None:
                     nonlocal _lease_waited
@@ -8779,7 +8792,7 @@ class AIAgent:
                     session_id,
                     _durable_holder,
                     ttl_seconds=_lease_ttl,
-                    wait_seconds=1800.0,
+                    wait_seconds=_lease_wait,
                     on_wait=_on_session_turn_lease_wait,
                     should_abort=lambda: getattr(self, "_interrupt_requested", False),
                 ):
@@ -8818,7 +8831,25 @@ class AIAgent:
                         return interrupt_result
                     # Fail closed like gateway TurnLeaseTimeoutError: do not
                     # enter load/run/flush, and surface a resend notice instead
-                    # of a bare TimeoutError that looks like a hang.
+                    # of a bare TimeoutError that looks like a hang. A bounded
+                    # background wait (lease_wait_seconds set) returns the
+                    # machine-checkable marker instead of a user-facing
+                    # sentence — the caller (wake self-post, cron ping) wants
+                    # a retryable error status, not prose.
+                    if lease_wait_seconds is not None:
+                        logger.info(
+                            "session turn lease fast-wait (%.1fs) exceeded for "
+                            "background turn on %s",
+                            _lease_wait, session_id,
+                        )
+                        return {
+                            "final_response": "",
+                            "messages": list(conversation_history or []),
+                            "api_calls": 0,
+                            "completed": False,
+                            "failed": True,
+                            "error": f"session_turn_lease_busy:{session_id}",
+                        }
                     timeout_msg = (
                         "⏳ Another Hermes process kept this session busy too "
                         "long. Your message was not processed - wait for the "
