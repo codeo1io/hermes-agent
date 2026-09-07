@@ -608,6 +608,11 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
     "qqbot", "yuanbao",
+    # Stateful transcript surface, not a push channel: delivers by appending
+    # to the target session's transcript (_deliver_to_api_server_transcript),
+    # like the kanban wake lane. Needs no gateway credentials (same-process
+    # SQLite), so the credential gate below must not block it.
+    "api_server",
 })
 
 # Platforms that support a configured cron/notification home target, mapped to
@@ -5290,7 +5295,14 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
                     "delivery credential check", exc_info=True,
                 )
                 return None  # fail-open
-        if platform_name.lower() not in connected:
+        if (
+            platform_name.lower() not in connected
+            # api_server delivers via same-process SQLite transcript appends
+            # (no adapter, no credentials — see
+            # _deliver_to_api_server_transcript); get_connected_platforms()
+            # legitimately omits it.
+            and platform_name.lower() != "api_server"
+        ):
             return (
                 f"delivery platform '{platform_name}' has no gateway "
                 "credentials configured (not connected). Configure it via "
