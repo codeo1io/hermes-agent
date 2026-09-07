@@ -150,6 +150,34 @@ class TestDeliverResultApiServerBranch:
         assert calls, "api_server origin target must route to transcript lane"
 
 
+class TestPreflightAllowsApiServer:
+    """api_server is a known, credential-free delivery platform."""
+
+    def test_explicit_apiserver_target_passes_preflight(self):
+        from cron.scheduler import _preflight_check_delivery
+
+        assert _preflight_check_delivery(
+            {"id": "t", "deliver": "api_server:6f377642a7f0"}
+        ) is None
+
+    def test_apiserver_origin_target_passes_preflight(self):
+        from cron.scheduler import _preflight_check_delivery
+
+        assert _preflight_check_delivery(
+            {
+                "id": "t",
+                "deliver": "origin",
+                "origin": {"platform": "api_server", "chat_id": "x"},
+            }
+        ) is None
+
+    def test_unknown_platform_still_blocked(self):
+        from cron.scheduler import _preflight_check_delivery
+
+        err = _preflight_check_delivery({"id": "t", "deliver": "nope:1"})
+        assert err is not None and "not a known cron delivery target" in err
+
+
 class TestWakeSelfPostBoundedLeaseWait:
     def test_wake_header_present(self):
         import inspect
