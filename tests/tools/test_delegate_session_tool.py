@@ -855,6 +855,36 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     assert client.native_session_id == native
 
 
+def test_resume_rebinds_when_saved_workspace_was_removed(monkeypatch, tmp_path):
+    parent = Parent("stale-workspace-parent")
+    old_workspace = tmp_path / "old-worktree"
+    replacement_workspace = tmp_path / "replacement-worktree"
+    old_workspace.mkdir()
+    replacement_workspace.mkdir()
+
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: old_workspace)
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    native = started["native_session_id"]
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+    old_workspace.rmdir()
+
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: replacement_workspace)
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+
+    assert resumed["success"] is True
+    assert resumed["native_session_id"] == native
+    assert resumed["cwd"] == str(replacement_workspace.resolve())
+    client = FakePiClient.instances[-1]
+    assert client.cwd == str(replacement_workspace.resolve())
+    assert client.session_id == native
+    assert ds._load_metadata(sid)["cwd"] == str(replacement_workspace.resolve())
+
+
 def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     parent = Parent()
     sid = "legacy-v1-session"

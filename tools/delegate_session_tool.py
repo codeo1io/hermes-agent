@@ -823,11 +823,22 @@ def delegate_session(
                 is_dead = getattr(client_obj, "is_dead", None)
                 if callable(is_dead) and is_dead():
                     process_dead = True
-                reopen = normalized == "resume" and (
+                client_closed = (
                     existing.get("status") in {"closed", "error"}
                     or getattr(client_obj, "is_closed", False)
                     or process_dead
                 )
+                reopen = client_closed
+                # R20 (conductor b0ac final_validation, 2026-09-05): reopen
+                # used to require action="resume", but the spool server's
+                # budget reaper stops a timed-out turn (client.close()), and
+                # every LATER "start" on the same binding dispatched a turn
+                # onto the closed client -> instant "pi rpc client is closed"
+                # failures burning the whole retry budget. A closed/dead
+                # client must reopen on ANY dispatch action: starting work on
+                # a dead transport is never the caller's intent, and the
+                # resume path (fresh client, native session hint preserved)
+                # is the only correct continuation.
                 if not reopen:
                     if goal and goal.strip():
                         # Re-start on a live session is a FOLLOW-UP, not a
@@ -855,10 +866,29 @@ def delegate_session(
                 )
 
         saved_cwd = str((saved or {}).get("cwd") or "").strip()
-        cwd_path = Path(saved_cwd).expanduser() if saved_cwd else resolve_agent_cwd()
-        if not cwd_path.is_dir():
+        current_cwd = Path(resolve_agent_cwd()).expanduser()
+        saved_path = Path(saved_cwd).expanduser() if saved_cwd else None
+        if saved_path is not None and saved_path.is_dir():
+            cwd_path = saved_path
+        elif current_cwd.is_dir():
+            # Durable session identity must not be coupled to an ephemeral
+            # managed worktree. Conductor legitimately removes completed
+            # worktrees while retaining the run/role delegate binding for
+            # later retries/review turns. If that saved workspace is gone,
+            # reopen the same native session in the caller's current valid
+            # workspace instead of retrying an impossible resume forever.
+            cwd_path = current_cwd
+            if saved_path is not None:
+                logger.info(
+                    "Delegate session %s saved workspace disappeared; rebinding cwd %s -> %s",
+                    handle,
+                    saved_path,
+                    current_cwd,
+                )
+        else:
+            missing = saved_path or current_cwd
             return tool_error(
-                f"Cannot resume delegate session because its workspace no longer exists: {_bounded(cwd_path, 1000)}"
+                f"Cannot resume delegate session because its workspace no longer exists: {_bounded(missing, 1000)}"
             )
         cwd = str(cwd_path.resolve())
         native_hint = str(
