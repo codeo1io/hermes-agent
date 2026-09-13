@@ -17,26 +17,15 @@ import pytest
 from hermes_cli.main import cmd_update
 
 
-@pytest.fixture
-def no_gateway_fleet(monkeypatch):
-    """Keep the update flow away from the real gateway fleet on this machine.
+@pytest.fixture(autouse=True)
+def _isolate_update(isolated_update_runtime, monkeypatch):
+    import shutil
+    from hermes_cli import managed_uv, update_cmd
 
-    The self-hosted CI runner is a systemd service (not a gateway descendant),
-    so ``cmd_update``'s restart-phase ``find_gateway_pids(all_profiles=True)``
-    scan sees the REAL production gateway PID, reaches ``terminate_pid`` /
-    ``os.kill`` on it, and trips the conftest live-system guard — exit 1,
-    ``gateway_fleet_restart_incomplete`` (seen live: run 33829979829, job
-    100890793318, blocked os.kill(1619589, 15)). Same treatment as
-    test_update_autostash.py: stub discovery to return nothing.
-    """
-    import hermes_cli.gateway as hermes_gateway
-
-    monkeypatch.setattr(
-        hermes_gateway, "find_gateway_pids", lambda **kw: []
-    )
-    monkeypatch.setattr(
-        "hermes_cli.gateway.find_gateway_pids", lambda **kw: [], raising=False
-    )
+    monkeypatch.setattr(managed_uv, "resolve_uv", lambda **kw: shutil.which("uv"))
+    monkeypatch.setattr(managed_uv, "ensure_uv", lambda **kw: shutil.which("uv"))
+    monkeypatch.setattr(managed_uv, "update_managed_uv", lambda **kw: None)
+    monkeypatch.setattr(update_cmd, "_post_update_sqlite_runtime_status", lambda: (True, None))
 
 
 def _make_run_side_effect(
