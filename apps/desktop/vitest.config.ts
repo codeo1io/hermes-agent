@@ -27,14 +27,12 @@ const electronNative: TestProjectConfiguration = {
   test: {
     name: 'electron',
     environment: 'node',
-    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}'],
-    exclude: ['scripts/run-short-session-hang-repro.test.mjs'],
-    // Real git subprocesses, several per test. On a shared self-hosted
-    // runner under concurrent load a test can exceed vitest's 5000ms
-    // default while doing exactly its normal work (observed 3.1-3.5s
-    // quiet, >5s under load). The ui project raised its timeout for the
-    // same reason; keep these tests' real-per-work margin too.
-    testTimeout: 15_000
+    // `e2e/**/*.unit.test.ts` is the e2e HELPERS, not the specs: plain node
+    // modules that should be provable without booting Electron. Playwright
+    // ignores the same pattern so they run in exactly one runner.
+    include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}', 'e2e/**/*.unit.test.ts'],
+    // These use node:test and have dedicated npm scripts, not Vitest suites.
+    exclude: ['scripts/run-short-session-hang-repro.test.mjs', 'scripts/tasks-scroll.test.mjs']
   }
 }
 
