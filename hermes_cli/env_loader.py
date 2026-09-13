@@ -395,48 +395,15 @@ def load_hermes_dotenv(
         _apply_external_secret_sources(home_path)
     _apply_managed_env()
 
-    if os.getenv("HERMES_CLIPROXY_ONLY") == "1":
-        # Fail closed after every profile reload: retain the CLIProxyAPI
-        # credential but remove direct LLM-provider credentials so auxiliary
-        # clients/tools cannot bypass the configured provider policy.
-        blocked_provider_keys = {
-            "OPENAI_API_KEY",
-            "HERMES_GPT_OPENAI_API_KEY",
-            "VOICE_TOOLS_OPENAI_KEY",
-            "OPENROUTER_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "GOOGLE_API_KEY",
-            "GEMINI_API_KEY",
-            "XAI_API_KEY",
-            "GROQ_API_KEY",
-            "MISTRAL_API_KEY",
-            "CEREBRAS_API_KEY",
-            "COHERE_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "TOGETHER_API_KEY",
-            "FIREWORKS_API_KEY",
-            "PERPLEXITY_API_KEY",
-            "KIMI_API_KEY",
-            "MOONSHOT_API_KEY",
-            "MINIMAX_API_KEY",
-            "ZAI_API_KEY",
-            "GLM_API_KEY",
-        }
-        for key in blocked_provider_keys:
-            os.environ.pop(key, None)
-
-    # config.yaml is the documented source of truth for terminal.* settings,
-    # but the dotenv loads above run with override=True — so a stale
-    # TERMINAL_ENV=docker left in ~/.hermes/.env (e.g. written by an older
-    # `hermes setup` before the user switched terminal.backend in config.yaml)
-    # silently wins again on every reload. Startup launchers bridge
-    # config→env once, but long-lived processes (gateway per-turn reload,
-    # cron standalone runs) call load_hermes_dotenv() repeatedly and used to
-    # flip the effective backend back to the stale .env value mid-session
-    # (#29186, #67323). Re-apply config.yaml's explicit terminal keys last so
-    # the documented config path always wins. Runs after _apply_managed_env()
-    # so the merged config (which already carries the managed overlay) is
-    # what lands in the env.
+    # config.yaml owns terminal.*, but the override=True loads above let a stale TERMINAL_ENV=docker in
+    # ~/.hermes/.env win on every reload and flip the backend mid-session in long-lived processes.
+    # Re-apply the explicit terminal keys LAST, after the managed overlay, so the merged config lands.
+    # config.yaml is the documented source of truth for terminal.* settings, but the dotenv loads above run
+    # with override=True — so a stale TERMINAL_ENV=docker left in ~/.hermes/.env (e.g. written by an older
+    # `hermes setup` before the user switched terminal.backend in config.yaml) silently wins again on every
+    # reload. Startup launchers bridge config→env once, but long-lived processes (gateway per-turn reload,
+    # cron standalone runs) call load_hermes_dotenv() repeatedly and used to flip the effective backend back
+    # to the stale .env value mid-session (#29186, #67323).
     _reapply_terminal_config_bridge(home_path)
 
     return loaded
