@@ -1258,8 +1258,10 @@ class TestEventBridgePollE2E:
         )
         conn.commit()
         conn.close()
-        # Touch the DB file to update mtime (WAL mode may not update mtime on small writes)
-        os.utime(db_path, None)
+        # Future mtime: WAL mode may not update mtime on small writes, and
+        # coarse-mtime filesystems can keep utime(now) identical to the
+        # previous stat, leaving the poll gate closed.
+        os.utime(db_path, times=(time.time() + 2, time.time() + 2))
 
         # Update sessions.json updated_at to trigger re-check
         sessions_data["agent:main:telegram:dm:new"]["updated_at"] = "2026-03-29T15:00:10"
@@ -1374,7 +1376,7 @@ class TestEventBridgePollE2E:
             "id": 2, "role": "assistant", "content": "arrived after start",
             "timestamp": "2026-03-29T15:05:00",
         })
-        os.utime(db_path, None)  # bump mtime so the poll gate opens
+        os.utime(db_path, times=(time.time() + 2, time.time() + 2))  # future mtime so the poll gate opens on coarse-mtime filesystems
         bridge._poll_once(DB())
         events = bridge.poll_events(after_cursor=0)["events"]
         assert len(events) == 1
@@ -1412,7 +1414,9 @@ class TestEventBridgePollE2E:
             "id": 1, "role": "user", "content": "hello after baseline",
             "timestamp": "2026-03-29T15:10:00",
         }]
-        os.utime(db_path, None)
+        # Future mtime: coarse-mtime filesystems can keep utime(now) identical to
+        # the baseline stat, leaving the poll gate closed.
+        os.utime(db_path, times=(time.time() + 2, time.time() + 2))
         bridge._poll_once(DB())
 
         events = bridge.poll_events(after_cursor=0)["events"]

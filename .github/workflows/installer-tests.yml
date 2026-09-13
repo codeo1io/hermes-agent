@@ -19,7 +19,9 @@ concurrency:
 jobs:
   powershell:
     name: PowerShell installer tests
-    runs-on: windows-latest
+    # pwsh 7 runs on the Linux self-hosted runner; the Windows PowerShell 5.1
+    # step below is skipped there via its step-level runner-image guard.
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -34,13 +36,16 @@ jobs:
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-longpath.ps1
 
       - name: 8.3 short-path normalization (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-longpath.ps1
 
       - name: System Node and npm compatibility (pwsh 7)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-node-compatibility.ps1
 
       - name: System Node and npm compatibility (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-node-compatibility.ps1
