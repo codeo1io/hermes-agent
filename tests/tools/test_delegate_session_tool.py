@@ -398,6 +398,60 @@ def test_stop_closes_client_but_native_id_can_be_resumed():
     assert FakePiClient.instances[-1].session_id == sid
 
 
+def test_start_on_stopped_session_reopens_instead_of_failing():
+    """R20 (conductor b0ac, 2026-09-05): the spool server's budget reaper stops
+    a timed-out turn (client.close()); every later dispatch is action="start"
+    on the same binding. Before the fix, start dispatched a turn onto the
+    closed client and failed instantly ("pi rpc client is closed"), burning
+    the retry budget. start on a closed client must REOPEN (fresh client,
+    native session id preserved), exactly like resume."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    first_client = FakePiClient.instances[-1]
+
+    stopped = payload(
+        ds.delegate_session(action="stop", session_id=sid, parent_agent=parent)
+    )
+    assert stopped["closed"] is True
+
+    restarted = payload(
+        ds.delegate_session(
+            action="start", session_id=sid, parent_agent=parent, goal="do it"
+        )
+    )
+    assert restarted["created"] is True
+    assert restarted["session_id"] == sid
+    new_client = FakePiClient.instances[-1]
+    assert new_client is not first_client
+    assert new_client.is_closed is False
+    assert new_client.session_id == sid
+
+
+def test_start_on_dead_process_reopens():
+    """A client whose native process died (reaper kill, OOM, crash) must reopen
+    on start, not dispatch onto a dead transport."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    first_client = FakePiClient.instances[-1]
+
+    class _DeadProc:
+        @staticmethod
+        def poll():
+            return 1
+
+    first_client._proc = _DeadProc()
+
+    restarted = payload(
+        ds.delegate_session(
+            action="start", session_id=sid, parent_agent=parent, goal="again"
+        )
+    )
+    assert restarted["created"] is True
+    assert FakePiClient.instances[-1] is not first_client
+
+
 def test_stop_then_resume_reopens_in_same_gateway_process():
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))
