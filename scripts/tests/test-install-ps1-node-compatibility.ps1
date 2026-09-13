@@ -70,6 +70,7 @@ function Get-Command {
 }
 function Ensure-NodeExeOnPath { $true }
 function Get-WindowsArch { 'x64' }
+function Test-ManagedNodeInUse { $false }
 function Invoke-WebRequest {
     $script:DownloadAttempts++
     throw 'network disabled by test'
