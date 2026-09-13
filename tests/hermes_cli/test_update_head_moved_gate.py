@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import main as hermes_main
+import hermes_cli.main_web_build as main_web_build
+import hermes_cli.main_install_repair as main_install_repair
 from hermes_cli import update_cmd
 
 

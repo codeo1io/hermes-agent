@@ -150,24 +150,9 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # bare IPv6 literal
     url = f"http://{host}:{port}/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "X-Hermes-Session-Id": session_id,
-        # Bounded lease wait: a wake turn is a BACKGROUND turn. If a
-        # foreground turn currently holds the session's cross-process turn
-        # lease, fail fast (bounded wait → HTTP error status) and retry on
-        # this lane's bounded backoff instead of parking a waiter thread for
-        # up to 30 minutes. The pile-up of concurrent lease waiters, each
-        # timing out and firing late synthetic turns, is what produced the
-        # repeated-message / no-progress surface on 2026-09-07.
-        "X-Hermes-Lease-Wait-Seconds": "2",
-    }
-    payload = {
-        "model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
-        "messages": [{"role": "user", "content": text}],
-        "stream": False,
-    }
-
+    headers = {"Authorization": f"Bearer {api_key}", "X-Hermes-Session-Id": session_id}
+    payload = {"model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
+               "messages": [{"role": "user", "content": text}], "stream": False}
     last_err: Optional[BaseException] = None
     attempts = 1 + len(_RETRY_DELAYS_SECONDS)
     for attempt in range(attempts):
@@ -183,23 +168,7 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
                         )
                         logger.warning("%s; attempt %d/%d", last_err, attempt + 1, attempts)
                         continue
-                    if resp.status == 503 and "session_turn_lease_busy" in (
-                        await resp.text()
-                    ):
-                        # Foreground turn holds the session lease; the bounded
-                        # X-Hermes-Lease-Wait-Seconds expired. Transient by
-                        # construction — back off and retry (the foreground
-                        # turn releases on completion; the notifier's cursor
-                        # stays rewound if all retries exhaust).
-                        last_err = RuntimeError(
-                            f"wake self-post deferred for session {session_id}: "
-                            f"foreground turn holds the session lease"
-                        )
-                        logger.info(
-                            "%s; attempt %d/%d", last_err, attempt + 1, attempts
-                        )
-                        continue
-                    if resp.status >= 400:
+                    if resp.status >= 400:  # non-transient (auth/validation): fail immediately
                         body = (await resp.text())[:300]
                         raise RuntimeError(
                             f"wake self-post failed for session {session_id}: HTTP {resp.status}: {body}"
