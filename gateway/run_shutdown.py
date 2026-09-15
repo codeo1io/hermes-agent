@@ -1415,6 +1415,28 @@ class GatewayShutdownMixin:
         for kind, count in (("api", self._active_api_run_count()), ("deferred", self._active_deferred_agent_worker_count())):
             units.extend({"kind": kind, "pid": os.getpid()} for _ in range(count))
         return units
+    def _raise_if_restart_requester_gone(self) -> None:
+        """Abort a plain planned-stop restart whose requesting process died mid-drain.
+
+        Only the CLI process that wrote the planned-stop marker performs a plain (non-service,
+        non-detached) restart: it waits out this drain, then starts the replacement. If it is
+        gone (terminal timeout, SSH drop) nothing will ever restart the gateway — the drain
+        would shed new runs for the full cap and then exit cleanly, which service managers
+        treat as deliberate. Cancelling resumes serving instead.
+        """
+        if self._restart_via_service or self._restart_detached:
+            return
+        from gateway.status import planned_stop_stopper_alive
+        try:
+            gone = not planned_stop_stopper_alive()
+        except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+            return
+        if gone:
+            logger.warning(
+                "Planned-stop requester is gone; cancelling the pending restart and resuming "
+                "service (orphaned planned-stop marker)"
+            )
+            raise _RestartRequesterGone()
 
     def _raise_if_restart_requester_gone(self) -> None:
         """Abort a plain planned-stop restart whose requesting process died mid-drain.
@@ -1522,8 +1544,11 @@ class GatewayShutdownMixin:
                 # Orphaned planned stop: nobody is left to perform the restart. Clear the
                 # marker and resume serving instead of draining to a clean exit nothing revives.
                 with _log_suppressed(logging.WARNING, "Failed to clear orphaned planned-stop marker: %s"):
-                    from gateway.status import clear_planned_stop_marker
-                    clear_planned_stop_marker()
+                    # Canonical path (same as run.py's watcher); the facade re-export
+                    # clear_planned_stop_marker is plugin-compat only (check_compat_pointers.py).
+                    from gateway.status import _get_planned_stop_marker_path
+
+                    _get_planned_stop_marker_path().unlink(missing_ok=True)
                 self._restart_requested = False
                 self._restart_task_started = False
                 self._draining = False
