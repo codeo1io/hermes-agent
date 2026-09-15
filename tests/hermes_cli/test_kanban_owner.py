@@ -3,7 +3,8 @@
 Covers the odd-numbered plan items (T1 schema/create-default/migration-backfill,
 T3 model tools) of ``docs/kanban/task-owner-field-plan.md``:
 
-- ``owner`` defaults to the creator at WRITE time (no read-path COALESCE);
+- ``owner`` defaults to the creator at WRITE time (no read-path COALESCE),
+  including decompose fan-out children (they are created, not routed);
 - free text: stripped, ``""`` stored/read as NULL, never profile-validated;
 - ``set_task_owner`` transfers under a live claim without touching any
   routing column (the deliberate contrast with ``assign_task``), records an
@@ -49,6 +50,29 @@ def test_create_owner_defaults_to_creator(kanban_home):
     try:
         tid = kb.create_task(conn, title="defaults", assignee="worker", created_by="alice")
         assert kb.get_task(conn, tid).owner == "alice"
+    finally:
+        conn.close()
+
+
+def test_decompose_fanout_children_default_owner_to_decomposer(kanban_home):
+    """Decomposed children are CREATED, not routed — they take the same
+    write-time creator default as every other creation path (review finding:
+    the raw graph INSERT used to leave them owner-NULL)."""
+    from hermes_cli.kanban_db_graph import decompose_triage_task
+
+    conn = kbc.connect()
+    try:
+        root = kb.create_task(conn, title="root", triage=True, created_by="alice")
+        child_ids = decompose_triage_task(
+            conn, root, root_assignee="default",
+            children=[{"title": "a"}, {"title": "b"}], author="alice",
+        )
+        assert child_ids and len(child_ids) == 2
+        owners = {kb.get_task(conn, cid).owner for cid in child_ids}
+        assert owners == {"alice"}
+        # The children are reachable through the owner filter like any task.
+        listed = kb.list_tasks(conn, owner="alice")
+        assert set(t.id for t in listed) >= set(child_ids)
     finally:
         conn.close()
 
