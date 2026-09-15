@@ -715,6 +715,9 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    # Routing-neutral accountability label; NULL = explicitly cleared (see
+    # _owner_or_none / set_task_owner). Never read by the dispatcher.
+    owner: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -746,9 +749,11 @@ _TASK_OPTIONAL_COLUMNS = (
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
     "current_step_key", "max_retries", "session_id", "completion_contract",
 )
-# Text columns where "" is stored/read as "not set".
+# Text columns where "" is stored/read as "not set". (from_row merges these
+# AFTER _TASK_OPTIONAL_COLUMNS, so a column must appear in exactly one tuple.)
 _TASK_EMPTY_IS_NULL_COLUMNS = (
     "model_override", "provider_override", "reasoning_effort", "goal_max_turns", "block_kind",
+    "owner",
 )
 
 
@@ -867,6 +872,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the task's worktree is anchored under the project's primary repo with a
     -- deterministic branch name instead of a random wt/<task-id> fallback.
     project_id           TEXT,
+    -- Routing-neutral accountability label (who owns the outcome). Defaults
+    -- to creator; transferable; never consulted by dispatch.
+    owner                TEXT,
     claim_lock           TEXT,
     claim_expires        INTEGER,
     tenant               TEXT,
@@ -1092,6 +1100,17 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _owner_or_none(owner: Optional[str]) -> Optional[str]:
+    """Free-text owner label: stripped, ``""``/whitespace → None.
+
+    Deliberately NOT profile-validated — owner is an accountability label
+    (person/team), never a dispatch target, so it keeps whatever casing the
+    writer chose. Lowercasing it like ``assignee`` would corrupt free text."""
+    if owner is None:
+        return None
+    return str(owner).strip() or None
+
+
 def _resolve_project_link(
     conn: sqlite3.Connection, project_id: Optional[str], project_source_task_id: Optional[str],
     workspace_kind: str, workspace_path: Optional[str],
@@ -1232,6 +1251,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1245,6 +1265,7 @@ def create_task(
     dependency edges; an explicit ``session_id`` still wins.
     ``project_source_task_id``: cross-profile fallback when ``project_id`` is not
     in the active profile's projects.db — see ``_resolve_project_link``.
+    ``owner``: routing-neutral accountability label; NULL/blank → ``created_by``.
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
@@ -1255,6 +1276,7 @@ def create_task(
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
+    owner = _owner_or_none(owner) or created_by
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -1331,8 +1353,9 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract,
+                        owner
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1342,6 +1365,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        owner,
                     ),
                 )
                 for pid in parents:
@@ -1352,6 +1376,7 @@ def create_task(
                     "created",
                     {
                         "assignee": assignee,
+                        "owner": owner,
                         "status": task_status,
                         "parents": list(parents),
                         "creator_task_id": creator_task_id,
@@ -1469,6 +1494,7 @@ def list_tasks(
     tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
     limit: Optional[int] = None, order_by: Optional[str] = None,
     workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> list[Task]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
@@ -1477,7 +1503,7 @@ def list_tasks(
     for col, val in (
         ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
         ("session_id", session_id), ("workflow_template_id", workflow_template_id),
-        ("current_step_key", current_step_key),
+        ("current_step_key", current_step_key), ("owner", _owner_or_none(owner)),
     ):
         if val is not None:
             query += f" AND {col} = ?"
@@ -1522,6 +1548,29 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
         _append_event(conn, task_id, "assigned", {"assignee": profile})
     # Observer fires AFTER commit so subscribers see durable state.
     notify_task_updated(conn, task_id, ("assignee",))
+    return True
+
+
+def set_task_owner(conn: sqlite3.Connection, task_id: str, owner: Optional[str]) -> bool:
+    """Transfer/clear the routing-neutral owner label; False on unknown id.
+
+    Deliberately NOT ``assign_task``: owner is accountability metadata, not a
+    dispatch target — so it is settable under a live claim (the human owning the
+    outcome can change even while a worker runs) and never touches ``assignee``,
+    claim state, or the failure counters. Refused only on archived tasks.
+    """
+    owner = _owner_or_none(owner)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, owner FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] == "archived":
+            raise RuntimeError(f"cannot transfer owner on archived task {task_id}")
+        conn.execute("UPDATE tasks SET owner = ? WHERE id = ?", (owner, task_id))
+        _append_event(conn, task_id, "owner_transferred", {"from": row["owner"], "to": owner})
+    notify_task_updated(conn, task_id, ("owner",))
     return True
 
 
