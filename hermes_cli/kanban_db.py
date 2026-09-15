@@ -719,6 +719,20 @@ class Task:
     # _owner_or_none / set_task_owner). Never read by the dispatcher.
     owner: Optional[str] = None
 
+    @property
+    def effective_owner(self) -> Optional[str]:
+        """Display-only owner resolution: ``owner ?? created_by ?? None``.
+
+        Legacy/mixed-version rows written before the owner column landed (or
+        while a pre-owner install was still inserting without it) are
+        owner-NULL; every read surface that shows a human an owner uses this
+        so those rows display their creator instead of "-". Queries stay
+        COALESCE-free — NULL remains the honest stored value and the
+        "explicitly cleared" sentinel; reconciliation (G4) is the write-side
+        fix, this is the read-side display.
+        """
+        return self.owner or self.created_by or None
+
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
         g = lambda col, default=None: _row_get(row, col, default)  # noqa: E731
@@ -1572,6 +1586,71 @@ def set_task_owner(conn: sqlite3.Connection, task_id: str, owner: Optional[str])
         _append_event(conn, task_id, "owner_transferred", {"from": row["owner"], "to": owner})
     notify_task_updated(conn, task_id, ("owner",))
     return True
+
+
+# PRAGMA user_version set once the post-deploy owner reconciliation (G4) has
+# run on a board. 0 = not yet reconciled. Verified unused across hermes_cli/,
+# plugins/ and tools/ before claiming it (grep 2026-09-15).
+OWNER_RECONCILED_USER_VERSION = 1
+
+
+def reconcile_task_owners(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict:
+    """Backfill owner from created_by for mixed-version rows; report what changed.
+
+    The first-add migration backfill (``_migrate_add_optional_columns``) fires
+    exactly once per board — when the ``owner`` column is added. But the column
+    existed on the live board for hours before any owner-writing install ran,
+    so every task created in that window (and until deploy) is owner-NULL with
+    ``created_by`` set, and the one-shot never re-runs. This reconciliation is
+    the write-side fix: it re-points those rows at their creator, guarded by
+    ``PRAGMA user_version`` so it too runs exactly once per board.
+
+    Explicit clears are indistinguishable from window rows and ARE overwritten
+    (documented limitation, docs/kanban-owner.md §5) — reconciliation must run
+    before users start relying on explicit NULL.
+
+    ``dry_run=True`` computes and returns the plan without writing. The return
+    dict is the audit report: ``changes`` = [{id, from, to}], counts, and the
+    gate state. Idempotent: the gate makes second calls no-ops; even without
+    it the UPDATE's WHERE clause is a fixed point.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= OWNER_RECONCILED_USER_VERSION:
+        return {"ran": False, "dry_run": dry_run, "already_reconciled": True,
+                "candidates": 0, "changed": 0, "changes": []}
+    rows = conn.execute(
+        "SELECT id, owner, created_by FROM tasks "
+        "WHERE owner IS NULL AND created_by IS NOT NULL AND created_by != '' "
+        "ORDER BY id"
+    ).fetchall()
+    changes = [{"id": r["id"], "from": r["owner"], "to": r["created_by"]} for r in rows]
+    report = {"ran": not dry_run, "dry_run": dry_run, "already_reconciled": False,
+              "candidates": len(rows), "changed": 0, "changes": changes if dry_run else []}
+    if dry_run:
+        return report
+    with write_txn(conn):
+        # Re-select under the write lock: candidates may have gained an owner
+        # (or been archived/re-keyed) between the unlocked snapshot and now.
+        # An empty pass still sets the gate — "ran once" must not mean "found
+        # something", or every open would re-scan.
+        live = conn.execute(
+            "SELECT id, owner, created_by FROM tasks "
+            "WHERE owner IS NULL AND created_by IS NOT NULL AND created_by != '' "
+            "ORDER BY id"
+        ).fetchall()
+        for r in live:
+            conn.execute(
+                "UPDATE tasks SET owner = ? WHERE id = ? AND owner IS NULL",
+                (r["created_by"], r["id"]),
+            )
+            _append_event(conn, r["id"], "owner_reconciled",
+                          {"from": r["owner"], "to": r["created_by"], "backfill": True})
+        conn.execute(f"PRAGMA user_version = {OWNER_RECONCILED_USER_VERSION}")
+    report["changed"] = len(live)
+    report["changes"] = [{"id": r["id"], "from": r["owner"], "to": r["created_by"]} for r in live]
+    if live:
+        _log.info("kanban owner reconciliation: %d task(s) re-pointed at their creator", len(live))
+    return report
 
 
 def set_model_override(

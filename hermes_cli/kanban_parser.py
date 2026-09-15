@@ -244,6 +244,15 @@ _SPECS = [
              "the outcome. Routing-neutral: it never changes who runs the task (that's `assign`) "
              "and works even while a worker is live on it"
          )),
+    _cmd("owner-reconcile", [
+        _arg("--apply", action="store_true",
+             help="Write the changes (default is a dry run that only prints the plan)"),
+        _json_flag(),
+    ], help=(
+         "One-shot G4 backfill: repoint owner-NULL tasks with a creator at their creator "
+         "(mixed-version window rows the first-add migration missed). Dry-run by default; "
+         "guarded by PRAGMA user_version so it runs exactly once per board"
+    )),
     _cmd("set-model", [
         _TASK_ID,
         _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),

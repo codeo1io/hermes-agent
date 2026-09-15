@@ -77,7 +77,9 @@ def _fmt_task_line(t: kb.Task) -> str:
     # Always shown, even when equal to the creator: owner usually ≠ assignee
     # (human/accountability vs worker profile), so hide-when-equal would almost
     # never hide and just make the column's meaning inconsistent.
-    owner = t.owner or "-"
+    # effective_owner: legacy owner-NULL rows display their creator (G3);
+    # stored owner stays NULL — reconciliation (G4) owns the write-side fix.
+    owner = t.effective_owner or "-"
     tenant = f" [{t.tenant}]" if t.tenant else ""
     return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{owner:16s}{tenant}  {t.title}"
 

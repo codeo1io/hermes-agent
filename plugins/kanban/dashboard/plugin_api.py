@@ -178,6 +178,9 @@ def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None) ->
         d["age"] = kanban_db.task_age(task)
     except Exception:
         d["age"] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
+    # Display-only owner resolution (G3): asdict() drops the Task property, so
+    # surface it explicitly next to the raw (possibly NULL) stored value.
+    d["effective_owner"] = task.effective_owner
     # Latest non-null run summary (workers hand off via ``task_runs.summary``, not ``tasks.result``).
     d["latest_summary"] = latest_summary
     return d
