@@ -1577,13 +1577,9 @@ def planned_stop_stopper_alive() -> bool:
     stopper_pid = parsed[0].get("stopper_pid")
     if not isinstance(stopper_pid, int) or stopper_pid <= 0 or stopper_pid == os.getpid():
         return True
-    try:
-        os.kill(stopper_pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True  # e.g. EPERM: the process exists but belongs to another user
-    return True
+    # _pid_exists, never hand-rolled os.kill(pid, 0): sig=0 on Windows Ctrl+C's the target's
+    # console group (bpo-14484). It already treats EPERM as alive and zombies as dead.
+    return _pid_exists(stopper_pid)
 
 
 def get_running_pid(
