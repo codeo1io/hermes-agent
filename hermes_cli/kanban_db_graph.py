@@ -196,19 +196,20 @@ def _insert_decomposed_child(
         child_ws_path = None
     new_id = _new_task_id()
     body = child.get("body")
+    creator = author or "decomposer"
     conn.execute(
         "INSERT INTO tasks "
         "(id, title, body, assignee, status, workspace_kind, "
-        " workspace_path, tenant, created_at, created_by) "
-        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+        " workspace_path, tenant, created_at, created_by, owner) "
+        "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
         (
             new_id, child["title"].strip(), body if isinstance(body, str) else None,
             _canonical_assignee(child.get("assignee")), child_ws_kind, child_ws_path,
-            root_row["tenant"], now, (author or "decomposer"),
+            root_row["tenant"], now, creator, creator,
         ),
     )
     _append_event(
-        conn, new_id, "created", {"by": author or "decomposer", "from_decompose_of": root_id},
+        conn, new_id, "created", {"by": creator, "from_decompose_of": root_id},
     )
     inherit_creator_origin(conn, new_id, root_id, created_at=now)
     return new_id

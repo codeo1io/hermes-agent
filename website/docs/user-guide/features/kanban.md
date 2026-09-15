@@ -112,7 +112,7 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
   (e.g. one per project, repo, or domain); see [Boards (multi-project)](#boards-multi-project)
   below. Single-project users stay on the `default` board and never see the
   word "board" outside this docs section.
-- **Task** — a row with title, optional body, one assignee (a profile name), status (`triage | todo | ready | running | blocked | review | done | archived`), optional tenant namespace, optional idempotency key (dedup for retried automation).
+- **Task** — a row with title, optional body, one assignee (a profile name), status (`triage | todo | ready | running | blocked | review | done | archived`), optional tenant namespace, optional idempotency key (dedup for retried automation), and an optional `owner` (an accountability label: who owns the outcome — a person or team, free text, defaults to the creator, transferable anytime even mid-run. Routing-neutral by design: the dispatcher never reads it, so it never changes who works the task — that's the assignee's job).
 - **Link** — `task_links` row recording a parent → child dependency. The dispatcher promotes `todo → ready` when all parents are `done`.
 - **Comment** — the inter-agent protocol. Agents and humans append comments; when a worker is (re-)spawned it reads the full comment thread as part of its context.
 - **Workspace** — the directory a worker operates in. Three kinds:
@@ -358,7 +358,7 @@ parent, missing input, unmet capability) before unblocking, or raise
 | `kanban_attach` | Attach a file to a task by passing its bytes inline (base64); stored under the task's attachments dir (25 MB cap). | file bytes + name |
 | `kanban_attach_url` | Attach a file to a task by URL. | `url` |
 | `kanban_attachments` | List a task's attachments. | — |
-| `kanban_create` | (Orchestrators) fan out into child tasks with an `assignee`, optional `parents`, `skills`, etc. | `title`, `assignee` |
+| `kanban_create` | (Orchestrators) fan out into child tasks with an `assignee`, optional `parents`, `skills`, `owner` (accountability label; defaults to the creator), etc. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id → child_id` dependency edge after the fact. | `parent_id`, `child_id` |
 | `kanban_unblock` | (Orchestrators) restore a blocked task to its source phase (`review` or `ready`), or `todo` while a parent remains open. | `task_id` |
 
@@ -721,8 +721,8 @@ All routes are mounted under `/api/plugins/kanban/` and protected by the dashboa
 | `GET` | `/board?tenant=<name>&include_archived=…` | Full board grouped by status column, plus tenants + assignees for filter dropdowns |
 | `GET` | `/tasks/:id` | Task + comments + events + links |
 | `POST` | `/tasks` | Create (wraps `kanban_db.create_task`, accepts `triage: bool` and `parents: [id, …]`) |
-| `PATCH` | `/tasks/:id` | Status / assignee / priority / title / body / result |
-| `POST` | `/tasks/bulk` | Apply the same patch (status / archive / assignee / priority) to every id in `ids`. Per-id failures reported without aborting siblings |
+| `PATCH` | `/tasks/:id` | Status / assignee / owner / priority / title / body / result |
+| `POST` | `/tasks/bulk` | Apply the same patch (status / archive / assignee / owner / priority) to every id in `ids`. Per-id failures reported without aborting siblings |
 | `POST` | `/tasks/:id/comments` | Append a comment |
 | `POST` | `/tasks/:id/specify` | Run the triage specifier — auxiliary LLM fleshes out the task body and promotes it from `triage` to `todo`. Returns `{ok, task_id, reason, new_title}`; `ok=false` with a human-readable reason on "not in triage" / no aux client / LLM error is a 200, not a 4xx |
 | `POST` | `/tasks/:id/decompose` | Run the kanban decomposer — auxiliary LLM produces a task graph and the helper atomically creates the children + links the root + flips `triage → todo`. Returns `{ok, task_id, reason, fanout, child_ids, new_title}`. Same 200-on-LLM-error convention as `/specify`. |
@@ -785,7 +785,7 @@ This is the surface **you** (or scripts, cron, the dashboard) use to drive the b
 ```
 hermes kanban init                                     # create kanban.db + print daemon hint
 hermes kanban create "<title>" [--body ...] [--assignee <profile>]
-                                [--parent <id>]... [--tenant <name>]
+                                [--owner <name>] [--parent <id>]... [--tenant <name>]
                                 [--workspace scratch|worktree|worktree:<path>|dir:<path>]
                                 [--branch <name>]
                                 [--priority N] [--triage] [--idempotency-key KEY]
@@ -794,15 +794,16 @@ hermes kanban create "<title>" [--body ...] [--assignee <profile>]
                                 [--goal] [--goal-max-turns N]
                                 [--skill <name>]...
                                 [--json]
-hermes kanban list [--mine] [--assignee P] [--status S] [--tenant T] [--archived]
+hermes kanban list [--mine] [--assignee P] [--owner O] [--status S] [--tenant T] [--archived]
         [--workflow-template-id <id>] [--current-step-key <key>]
         [--sort created|created-desc|priority|priority-desc|status|assignee|title|updated]
         [--json]
 hermes kanban show <id> [--json]
 hermes kanban assign <id> <profile>                    # or 'none' to unassign
+hermes kanban owner <id> <name>                        # set/transfer the owner label (or 'none' to clear)
 hermes kanban reassign <id>... <profile>               # bulk re-assign tasks to a profile
-hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body / priority in place
-        [--priority N]
+hermes kanban edit <id> --result <text>                # backfill the result text on an already-completed task
+        [--summary ...] [--metadata JSON]              # handoff fields stored on the latest completed run
 hermes kanban promote <id>...                          # move todo/blocked tasks to ready (recovery)
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
