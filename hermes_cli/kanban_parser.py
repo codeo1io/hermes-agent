@@ -170,6 +170,9 @@ _SPECS = [
                   "30m, 2h, 1d). When exceeded, the dispatcher SIGTERMs (then "
                   "SIGKILLs) the worker and re-queues the task."),
         _arg("--created-by", default="user", help="Author name recorded on the task (default: user)"),
+        _arg("--owner",
+             help="Owner label recorded on the card (accountability, not routing — "
+                  "defaults to the creator name)"),
         _arg("--skill", action="append", default=[], dest="skills",
              help="Skill to force-load into the worker (repeatable). The kanban "
                   "lifecycle is already injected automatically. Example: --skill "
@@ -218,6 +221,7 @@ _SPECS = [
     _cmd("list", [
         _arg("--mine", action="store_true", help="Filter by $HERMES_PROFILE as assignee"),
         _arg("--assignee"),
+        _arg("--owner", help="Filter by owner (the accountability label, not the assignee)"),
         _arg("--status", choices=sorted(kb.VALID_STATUSES)),
         _arg("--tenant"),
         _arg("--session",
@@ -234,6 +238,12 @@ _SPECS = [
          help="Show a task with comments + events"),
     _cmd("assign", [_TASK_ID, _arg("profile", help="Profile name (or 'none' to unassign)")],
          help="Assign or reassign a task"),
+    _cmd("owner", [_TASK_ID, _arg("owner", help="Owner name (or 'none' to clear)")],
+         help=(
+             "Set, transfer, or clear a task's owner — the accountability label for who owns "
+             "the outcome. Routing-neutral: it never changes who runs the task (that's `assign`) "
+             "and works even while a worker is live on it"
+         )),
     _cmd("set-model", [
         _TASK_ID,
         _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),
