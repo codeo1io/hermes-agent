@@ -79,6 +79,30 @@ function openDrawer() {
   )
 }
 
+describe('owner metadata row', () => {
+  it('renders the task owner beside the creator, falling back to an em dash when unset', async () => {
+    detail = {
+      ...legacyDetail,
+      task: { ...legacyDetail.task, owner: 'alice', created_by: 'ops-lead' }
+    }
+    openDrawer()
+
+    // Owner is accountability metadata: its row shows even without a value, so
+    // assert the label is always present and the value tracks the backend field.
+    expect(await screen.findByText(en.metaOwner)).toBeTruthy()
+    expect(screen.getByText('alice')).toBeTruthy()
+    expect(screen.getByText(en.metaCreatedBy)).toBeTruthy()
+    expect(screen.getByText('ops-lead')).toBeTruthy()
+
+    // A backend that predates the field (or a cleared owner) still renders.
+    detail = { ...legacyDetail, task: { ...legacyDetail.task } }
+    await act(() => client.invalidateQueries({ queryKey: taskKey('', legacyDetail.task.id) }))
+    await waitFor(() => expect(screen.queryByText('alice')).toBeNull())
+    expect(screen.getByText(en.metaOwner)).toBeTruthy()
+    expect(screen.getByText('—')).toBeTruthy()
+  })
+})
+
 describe('task attachment compatibility', () => {
   it.each([{}, { attachments: null }])(
     'keeps older task details usable without attachment controls (%j)',
