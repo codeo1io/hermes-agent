@@ -56,6 +56,18 @@ import hermes_constants
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 
+# The autouse ``_kanban_write_guard`` in tests/conftest.py refuses any kanban
+# write whose resolved path lands under the REAL ``~/.hermes`` (#69283). On the
+# self-hosted runner TMPDIR is ``<real root>/tmp/gh-runner-*/hermes-pytest-tmproot-*``
+# — i.e. pytest's tmp_path is INSIDE the real root — so a fake native root
+# derived from tmp_path would trip the guard even though the test is fully
+# hermetic. Import the conftest module (same pattern as
+# test_kanban_write_guard.py) and relocate the fake root outside it when
+# needed; keep using tmp_path when it is already outside (dev machines).
+from tests import conftest as _conftest  # noqa: E402
+
+_REAL_ROOT = _conftest._REAL_KANBAN_ROOT
+
 
 # Sidecar files the connect/init machinery can leave beside a DB: the
 # cross-process init lock (``<db>.init.lock``), the dispatcher tick lock, and
@@ -70,17 +82,53 @@ _Sentinel = namedtuple("_Sentinel", "sha256 columns files")
 # Fixture — the incident topology
 # ---------------------------------------------------------------------------
 
+def _fake_root_outside_real_root(tmp_path: Path) -> Path:
+    """A ``<dir>/native/.hermes`` fake root that is NEVER under the real root.
+
+    On the self-hosted runner ``tmp_path`` itself lives under the real
+    ``~/.hermes`` (see module comment), so derive the fake root from the
+    filesystem root (``/``) instead — a path that cannot be inside any user
+    home. Kept per-test unique via the tmp_path leaf name.
+    """
+    candidate = tmp_path / "native" / ".hermes"
+    try:
+        candidate.resolve().relative_to(_REAL_ROOT)
+    except ValueError:
+        return candidate  # already outside the real root (dev machines)
+    # tmp_path is inside the real root: relocate to a sibling OUTSIDE it.
+    # Unique per process: pytest's tmp_path leaf is stable across runs
+    # (``<test>0``), so a stale DB from an earlier run would otherwise fail
+    # the "seeded clean" assertions.
+    outside = (
+        Path("/tmp") / "kanban-pin-isolation" / f"pid{os.getpid()}" / tmp_path.name
+        / "native" / ".hermes"
+    )
+    outside.mkdir(parents=True, exist_ok=True)
+    return outside
+
+
+def _guard_safe_base(tmp_path: Path) -> Path:
+    """Directory (never under the real root) to build per-test siblings in.
+
+    The guard deny-lists every write under the real root — including the
+    PINNED db path — so both the fake native root and the pinned file must
+    live outside it. Same base on every host: ``tmp_path`` when it is already
+    outside, else the relocated ``/tmp/kanban-pin-isolation/<leaf>``.
+    """
+    return _fake_root_outside_real_root(tmp_path).parent.parent
+
+
 @pytest.fixture
 def shared_root(tmp_path, monkeypatch):
-    """Incident topology: native root = ``<tmp>/native/.hermes`` (a FAKE
-    "live" root), ``HERMES_HOME`` = a profile dir under it.
+    """Incident topology: native root = a FAKE "live" root, ``HERMES_HOME`` =
+    a profile dir under it.
 
     ``kanban_home()`` therefore resolves to the fake live root — the
     shared-across-profiles design — exactly like the 30c1df938db6 probe run,
     where pointing ``HERMES_HOME`` at scratch did NOT move the kanban root.
     """
-    fake_root = tmp_path / "native" / ".hermes"
-    fake_root.mkdir(parents=True)
+    fake_root = _fake_root_outside_real_root(tmp_path)
+    fake_root.mkdir(parents=True, exist_ok=True)
     # Patch where production reads: get_default_hermes_root() resolves this
     # module global at call time (hermes_constants.py). Host-independent —
     # the win32 LOCALAPPDATA branch funnels through the same function.
@@ -233,8 +281,11 @@ def test_pinned_kanban_db_keeps_connect_init_create_complete_off_shared_root(
     assert before.columns  # seeded schema is real — guard the guard
 
     # Pin exactly what dispatch pins; the DB pin must win over board and
-    # root resolution (kanban_db._board_path checks it first).
-    pinned = tmp_path / "pinned" / "kanban.db"
+    # root resolution (kanban_db._board_path checks it first). The pinned
+    # file lives in a guard-safe base (never under the real root — see
+    # _guard_safe_base) so the autouse write-guard can never mistake it for
+    # a hermetic-isolation bypass on hosts where tmp_path is inside ~/.hermes.
+    pinned = _guard_safe_base(tmp_path) / "pinned" / "kanban.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(pinned))
     monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(tmp_path / "pinned-ws"))
     assert kb.kanban_db_path() == pinned
@@ -296,9 +347,14 @@ def _child_base_env(tmp_path: Path) -> tuple[dict, Path]:
         env["LOCALAPPDATA"] = str(tmp_path / "la")
         env["USERPROFILE"] = str(tmp_path / "u")
     else:
-        fake_root = tmp_path / "u" / ".hermes"
-        env["HOME"] = str(tmp_path / "u")
-    fake_root.mkdir(parents=True)
+        # Outside the real root (see module comment): on the self-hosted
+        # runner tmp_path is under the real ~/.hermes, and while the guard is
+        # in-process-only, keeping the child's fake root outside it too makes
+        # the topology identical on every host.
+        home = _fake_root_outside_real_root(tmp_path).parent / "u"
+        fake_root = home / ".hermes"
+        env["HOME"] = str(home)
+    fake_root.mkdir(parents=True, exist_ok=True)
     return env, fake_root
 
 
@@ -368,12 +424,13 @@ def test_probe_subprocess_with_env_pin_only_leaves_shared_root_untouched(tmp_pat
     )
 
     # The probe child: incident topology + ONLY the env pin (no monkeypatch).
-    pinned = tmp_path / "pinned" / "kanban.db"
+    # Guard-safe base for the pinned file (see _guard_safe_base).
+    pinned = _guard_safe_base(tmp_path) / "pinned" / "kanban.db"
     probe_env = dict(base_env)
     probe_env.update(
         HERMES_HOME=str(fake_root / "profiles" / "probe"),
         HERMES_KANBAN_DB=str(pinned),
-        HERMES_KANBAN_WORKSPACES_ROOT=str(tmp_path / "pinned-ws"),
+        HERMES_KANBAN_WORKSPACES_ROOT=str(_guard_safe_base(tmp_path) / "pinned-ws"),
     )
     report = _run_child(
         "import json\n"
@@ -393,7 +450,10 @@ def test_probe_subprocess_with_env_pin_only_leaves_shared_root_untouched(tmp_pat
     # the DB, not kanban_home(); that is the designed behavior under test.)
     assert Path(report["db"]) == pinned
     assert Path(report["kanban_home"]) == fake_root
-    assert tmp_path in Path(report["kanban_home"]).resolve().parents
+    # fake_root lives under the guard-safe base (tmp_path itself on dev
+    # machines; the relocated /tmp base where tmp_path is inside the real
+    # root) — either way it must be an ancestor of the resolved root.
+    assert _guard_safe_base(tmp_path) in Path(report["kanban_home"]).resolve().parents
     assert report["completed"] is True
 
     pinned_facts = _facts(pinned, task_id=report["task"])
