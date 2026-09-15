@@ -1522,8 +1522,13 @@ class GatewayShutdownMixin:
                 # Orphaned planned stop: nobody is left to perform the restart. Clear the
                 # marker and resume serving instead of draining to a clean exit nothing revives.
                 with _log_suppressed(logging.WARNING, "Failed to clear orphaned planned-stop marker: %s"):
-                    from gateway.status import clear_planned_stop_marker
-                    clear_planned_stop_marker()
+                    # Canonical path (same as run.py's watcher): the facade re-export
+                    # clear_planned_stop_marker is plugin-compat only (check_compat_pointers.py).
+                    from gateway.status import _get_planned_stop_marker_path
+                    try:
+                        _get_planned_stop_marker_path().unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 self._restart_requested = False
                 self._restart_task_started = False
                 self._draining = False
