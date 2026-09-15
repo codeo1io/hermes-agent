@@ -482,6 +482,13 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "the profile's provider and will fail if it belongs "
                 "to a different one. Requires 'model'."
         )),
+        "owner": _prop("string", (
+                "Optional owner label recorded on the card — who is "
+                "accountable for the outcome (person or team). Pure "
+                "metadata: never affects routing or dispatch, and "
+                "distinct from 'assignee' (the profile that runs it). "
+                "Defaults to the creating profile."
+        )),
     },
     ["title", "assignee"],
 )
