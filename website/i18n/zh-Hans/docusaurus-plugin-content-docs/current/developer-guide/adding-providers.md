@@ -321,13 +321,13 @@ Prompt（提示词）缓存和 provider 专属的调节项很容易出现回归�
 
 常见位置：
 
-- `tests/test_runtime_provider_resolution.py`
-- `tests/test_cli_provider_resolution.py`
-- `tests/test_cli_model_command.py`
-- `tests/test_setup_model_selection.py`
-- `tests/test_provider_parity.py`
-- `tests/test_run_agent.py`
-- 原生 provider 的 `tests/test_<provider>_adapter.py`
+- `tests/hermes_cli/test_runtime_provider_resolution.py`
+- `tests/hermes_cli/test_cli_provider_resolution.py`
+- `tests/hermes_cli/test_model_switch_custom_providers.py`（以及相邻的 `tests/hermes_cli/test_model_switch_*.py`）
+- `tests/hermes_cli/test_setup_model_provider.py`
+- `tests/agent/test_provider_parity.py`
+- `tests/agent/test_run_agent.py`
+- 原生 provider 的 `tests/agent/test_<provider>_adapter.py`
 
 对于仅文档示例，确切的文件集可能不同。重点是覆盖：
 
@@ -342,7 +342,7 @@ Prompt（提示词）缓存和 provider 专属的调节项很容易出现回归�
 
 ```bash
 source venv/bin/activate
-python -m pytest tests/test_runtime_provider_resolution.py tests/test_cli_provider_resolution.py tests/test_cli_model_command.py tests/test_setup_model_selection.py -q
+python -m pytest tests/hermes_cli/test_runtime_provider_resolution.py tests/hermes_cli/test_cli_provider_resolution.py tests/hermes_cli/test_setup_model_provider.py tests/agent/test_provider_parity.py -q
 ```
 
 对于更深层的修改，在推送前运行完整测试套件：
