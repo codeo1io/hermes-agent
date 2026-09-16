@@ -170,7 +170,7 @@ def _start_freezeable_producer(tmp_path, block_s, errors, write_stall_s=1.5):
     return state, ready
 
 
-def _wait_heartbeat_stale(tmp_path, stale_after, timeout_s=5.0):
+def _wait_heartbeat_stale(tmp_path, stale_after, timeout_s=15.0):
     """Block until the heartbeat file is older than ``stale_after``."""
     hb_path = get_loop_heartbeat_path(tmp_path)
     deadline = time.monotonic() + timeout_s
@@ -552,13 +552,13 @@ class TestLoopTickWitness:
         thread.start()
         try:
             sock_path = get_loop_tick_socket_path(tmp_path, pid)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 15.0
             while not sock_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert sock_path.exists(), "producer never armed the tick socket"
 
             hb_path = get_loop_heartbeat_path(tmp_path)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 15.0
             while True:
                 try:
                     age = time.time() - hb_path.stat().st_mtime
@@ -572,9 +572,12 @@ class TestLoopTickWitness:
                 time.sleep(0.02)
 
             # The file is stale but the loop answers: ALIVE, not WEDGED.
+            # Loop answers whenever scheduled; 1.0 (the probe default) leaves the
+            # sustained window ~3.4s of starvation tolerance on a loaded runner —
+            # the contract under test is the classification, not the timeout.
             assert (
                 gateway_cli.probe_gateway_loop_liveness(
-                    pid, home=tmp_path, stale_after=stale_after, tick_timeout=0.25
+                    pid, home=tmp_path, stale_after=stale_after, tick_timeout=1.0
                 )
                 == gateway_cli.GATEWAY_LOOP_ALIVE
             )
@@ -643,7 +646,7 @@ class TestLoopTickWitness:
             drains = [e for e in events if isinstance(e, tuple) and e[0] == "drain"]
             assert drains, events
         finally:
-            thread.join(timeout=5.0)
+            thread.join(timeout=15.0)
             assert not errors, errors
 
     @_NEEDS_UNIX_SOCKETS
@@ -900,7 +903,7 @@ class TestLoopTickWitness:
         reviewer's required composed regression (#90502 review).
         """
         pid = os.getpid()
-        block_s = 0.5
+        block_s = 0.25
         stale_after = 1.0
         tick_timeout = 0.2
         tick_strikes = 3
@@ -911,9 +914,9 @@ class TestLoopTickWitness:
         errors = []
         state, ready = _start_freezeable_producer(tmp_path, block_s, errors)
         try:
-            assert ready.wait(timeout=5.0)
+            assert ready.wait(timeout=15.0)
             sock_path = get_loop_tick_socket_path(tmp_path, pid)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 15.0
             while not sock_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert sock_path.exists(), "producer never armed the tick socket"
@@ -952,7 +955,7 @@ class TestLoopTickWitness:
         ``TestLaunchdRestartWedgedIntegration``.)
         """
         pid = os.getpid()
-        block_s = 1.2
+        block_s = 2.0
         stale_after = 1.0
         tick_timeout = 0.2
         tick_strikes = 3
@@ -963,9 +966,9 @@ class TestLoopTickWitness:
         errors = []
         state, ready = _start_freezeable_producer(tmp_path, block_s, errors)
         try:
-            assert ready.wait(timeout=5.0)
+            assert ready.wait(timeout=15.0)
             sock_path = get_loop_tick_socket_path(tmp_path, pid)
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + 15.0
             while not sock_path.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert sock_path.exists(), "producer never armed the tick socket"

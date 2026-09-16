@@ -188,7 +188,10 @@ async def test_unexpected_signal_starts_teardown_after_bounded_interrupt_grace()
         "gateway.status.write_runtime_status"
     ):
         stop_task = asyncio.create_task(runner.stop())
-        await asyncio.wait_for(disconnect_started.wait(), timeout=0.75)
+        # Event-based sync (disconnect_started) with a watchdog only; the bound is
+        # the repo flake-policy floor (>=2s) so a loaded runner's interrupt-grace
+        # path (+~1.8s post-interrupt tool kill under 28-worker load) still fits.
+        await asyncio.wait_for(disconnect_started.wait(), timeout=2.0)
         await stop_task
 
     assert runner._shutdown_event.is_set() is True

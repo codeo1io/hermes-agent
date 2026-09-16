@@ -19,6 +19,21 @@ from fastapi.testclient import TestClient
 from hermes_cli import web_server
 
 
+def _free_port() -> int:
+    """Reserve then release an ephemeral port.
+
+    ``start_server`` runs its real ``_port_bind_conflict`` probe (skipped only
+    for port 0), so tests must not hardcode the product default 9119 — a live
+    gateway holding it fails the probe with SystemExit 75 (BACKEND_PORT_IN_USE).
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+
 @pytest.fixture
 def client_loopback():
     # Pin the bound-host state for host_header_middleware so requests with
@@ -28,8 +43,9 @@ def client_loopback():
     prev_host = getattr(web_server.app.state, "bound_host", None)
     prev_port = getattr(web_server.app.state, "bound_port", None)
     web_server.app.state.bound_host = "127.0.0.1"
-    web_server.app.state.bound_port = 9119
-    client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
+    port = _free_port()
+    web_server.app.state.bound_port = _free_port()
+    client = TestClient(web_server.app, base_url=f"http://127.0.0.1:{port}")
     yield client
     web_server.app.state.bound_host = prev_host
     web_server.app.state.bound_port = prev_port
@@ -162,7 +178,7 @@ def test_start_server_loopback_sets_auth_required_false(monkeypatch):
     # Force a fresh state to detect that start_server actually set it.
     web_server.app.state.auth_required = None
     web_server.start_server(
-        host="127.0.0.1", port=9119,
+        host="127.0.0.1", port=_free_port(),
         open_browser=False, allow_public=False,
     )
     assert web_server.app.state.auth_required is False
@@ -180,7 +196,7 @@ def test_start_server_insecure_public_no_longer_bypasses_gate(monkeypatch):
     web_server.app.state.auth_required = None
     with pytest.raises(SystemExit):
         web_server.start_server(
-            host="0.0.0.0", port=9119,
+            host="0.0.0.0", port=_free_port(),
             open_browser=False, allow_public=True,
         )
     assert web_server.app.state.auth_required is True
@@ -199,7 +215,7 @@ def test_start_server_public_without_insecure_records_auth_required(monkeypatch)
     web_server.app.state.auth_required = None
     with pytest.raises(SystemExit):
         web_server.start_server(
-            host="0.0.0.0", port=9119,
+            host="0.0.0.0", port=_free_port(),
             open_browser=False, allow_public=False,
         )
     assert web_server.app.state.auth_required is True
@@ -227,7 +243,7 @@ def test_start_server_gate_with_provider_proceeds_and_sets_proxy_headers(monkeyp
     try:
         web_server.app.state.auth_required = None
         web_server.start_server(
-            host="0.0.0.0", port=9119,
+            host="0.0.0.0", port=_free_port(),
             open_browser=False, allow_public=False,
         )
         assert web_server.app.state.auth_required is True
@@ -257,7 +273,7 @@ def test_start_server_passes_bounded_trusted_proxy_networks(monkeypatch, caplog)
     try:
         with caplog.at_level(logging.INFO, logger=web_server._log.name):
             web_server.start_server(
-                host="0.0.0.0", port=9119,
+                host="0.0.0.0", port=_free_port(),
                 open_browser=False, allow_public=False,
             )
         assert captured["kwargs"]["forwarded_allow_ips"] == [
@@ -372,7 +388,7 @@ def test_start_server_loopback_public_url_enables_gate(monkeypatch):
     )
     try:
         web_server.start_server(
-            host="127.0.0.1", port=9119,
+            host="127.0.0.1", port=_free_port(),
             open_browser=False, allow_public=False,
         )
         assert web_server.app.state.auth_required is True
@@ -405,7 +421,7 @@ def test_start_server_loopback_public_url_without_provider_fails_closed(monkeypa
 
     with pytest.raises(SystemExit, match=r"no auth providers"):
         web_server.start_server(
-            host="127.0.0.1", port=9119,
+            host="127.0.0.1", port=_free_port(),
             open_browser=False, allow_public=False,
         )
     assert web_server.app.state.auth_required is True
@@ -436,7 +452,7 @@ def test_loopback_public_url_fail_closed_message_is_actionable(monkeypatch):
 
     with pytest.raises(SystemExit) as exc:
         web_server.start_server(
-            host="127.0.0.1", port=9119,
+            host="127.0.0.1", port=_free_port(),
             open_browser=False, allow_public=False,
         )
     msg = str(exc.value)
