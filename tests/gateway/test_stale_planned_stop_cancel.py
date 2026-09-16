@@ -9,7 +9,11 @@ revive it.
 Contracts:
   * plain restart + dead stopper -> drain cancels: flags reset, marker cleared, stop() never
     called, service resumes
-  * live stopper / via_service / detached / no marker -> the drain proceeds exactly as before
+  * via_service + a TTL-live marker whose stopper died -> cancels the same way: the live
+    marker names a stopper that took responsibility and nobody else performs the service
+    restart (2026-09-15: terminal-timeout kill shed 503s for the whole drain cap)
+  * live stopper / via_service without a live marker / detached / no marker -> the drain
+    proceeds exactly as before (updater SIGUSR1 and pause-for-update write no marker)
 """
 
 from __future__ import annotations
@@ -135,8 +139,15 @@ async def test_live_stopper_still_drains_and_stops(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_via_service_ignores_dead_stopper(tmp_path, monkeypatch):
-    """A service restart is completed by the service manager, not the stopper: never cancel."""
+async def test_via_service_dead_stopper_live_marker_cancels(tmp_path, monkeypatch):
+    """via_service + a TTL-live marker naming a dead stopper: orphaned, so the drain self-cancels.
+
+    A live marker names a concrete stopper that took responsibility for the pending stop. When
+    that process dies nobody performs the service restart, and the surviving marker would
+    classify the eventual exit as operator-initiated — a clean exit nothing revives. So the
+    via_service request opts back into the dead-stopper probe exactly when a live marker
+    exists (regression for the 2026-09-15 503-shedding incident).
+    """
     marker = _marker_path(tmp_path, monkeypatch)
     _write_marker(marker, _dead_pid())
     runner = _runner_with_active_work()
@@ -144,8 +155,24 @@ async def test_via_service_ignores_dead_stopper(tmp_path, monkeypatch):
     assert runner.request_restart(via_service=True) is True
     await asyncio.wait_for(runner._restart_task, 5)
 
+    runner.stop.assert_not_awaited()  # gateway keeps serving
+    assert marker.exists() is False  # orphaned marker cleared
+    assert runner._draining is False
+    assert runner._restart_requested is False
+    assert runner._restart_task_started is False
+
+
+@pytest.mark.asyncio
+async def test_via_service_without_marker_still_drains_and_stops(tmp_path, monkeypatch):
+    """Usual via_service requesters (updater SIGUSR1, control-socket pause-for-update) write no
+    marker: the service manager completes the restart, so the drain proceeds as before."""
+    _marker_path(tmp_path, monkeypatch)
+    runner = _runner_with_active_work()
+
+    assert runner.request_restart(via_service=True) is True
+    await asyncio.wait_for(runner._restart_task, 5)
+
     runner.stop.assert_awaited_once()
-    assert marker.exists() is True  # untouched; the stop path consumes it
 
 
 @pytest.mark.asyncio

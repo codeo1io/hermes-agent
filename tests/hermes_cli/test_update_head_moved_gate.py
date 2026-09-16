@@ -113,11 +113,34 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     monkeypatch.setattr(main_install_repair, "_clear_update_incomplete_marker", lambda: None)
     # Gateway restart path (called after a successful update).
     monkeypatch.setattr(update_cmd, "_finish_dashboard_update_cleanup", lambda *a, **k: None)
-    # Keep the (now surfaced — #78574) gateway auto-restart phase away from
-    # this machine's real gateways: discovery returns nothing, systemd is
-    # unsupported, so the phase is a clean no-op for both snapshots.
+    # Fence the (now surfaced — #78574) gateway auto-restart phases away from this
+    # machine's real gateways. Discovery mocks alone are NOT enough: a phase error
+    # (e.g. the conftest live-system guard blocking os.kill on a real gateway pid)
+    # flips the incomplete gate (update_cmd_fleet.py:1417 sys.exit(1)), and
+    # abort-recovery probes real gateway sockets ("Fresh gateway restart recovery
+    # returned invalid JSON"). Stub the phase entry points on the update_cmd
+    # bindings _cmd_update_impl resolves (module globals, read at call time) with
+    # a clean-success restart outcome so these tests stay about the HEAD gate.
     import hermes_cli.gateway as hermes_gateway
+    from hermes_cli.update_cmd_fleet import _GatewayRestartOutcome
 
+    _ok_restart = _GatewayRestartOutcome(
+        incomplete=False,
+        phase_errors=[],
+        pre_restart_gateway_pids=[],
+        restarted_services=[],
+        failed_or_stale_units=[],
+        relaunched_profiles=[],
+        externally_supervised_profiles=[],
+        killed_pids=set(),
+    )
+    monkeypatch.setattr(
+        update_cmd, "_restart_gateway_fleet_after_update",
+        lambda *a, **k: _ok_restart,
+    )
+    monkeypatch.setattr(
+        update_cmd, "_verify_fleet_after_update", lambda *a, **k: None
+    )
     monkeypatch.setattr(
         hermes_gateway, "find_gateway_pids", lambda all_profiles=False: []
     )
