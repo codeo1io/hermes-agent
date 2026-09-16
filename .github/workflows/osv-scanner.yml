@@ -74,14 +74,14 @@ jobs:
         run: |
           set -uo pipefail
           status=0
-          "$RUNNER_TEMP/bin/osv-scanner" \
+          "$RUNNER_TEMP/bin/osv-scanner" scan source \
             --lockfile=uv.lock \
             --lockfile=package-lock.json \
             --lockfile=website/package-lock.json \
             --lockfile=plugins/platforms/photon/sidecar/package-lock.json \
             --lockfile=scripts/whatsapp-bridge/package-lock.json \
-            --output-format=sarif \
-            --output=osv-results.sarif \
+            --format=sarif \
+            --output-file=osv-results.sarif \
             || status=$?
           if [ ! -s osv-results.sarif ]; then
             echo "::error::osv-scanner produced no SARIF output (exit $status)"
