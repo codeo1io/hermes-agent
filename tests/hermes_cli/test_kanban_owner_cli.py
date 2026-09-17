@@ -19,6 +19,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli.kanban import kanban_command
 from hermes_cli.kanban_parser import build_parser
+from tests.kanban_pin_testutils import pin_kanban_db
 
 
 @pytest.fixture
@@ -26,6 +27,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    pin_kanban_db(monkeypatch, tmp_path)
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
     kb.init_db()
