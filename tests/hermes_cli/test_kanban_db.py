@@ -967,6 +967,10 @@ class TestSharedBoardPaths:
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
         assert env["HERMES_KANBAN_BRANCH"] == "wt/t_dispatch_env"
+        # Worker verification fan-out is bounded at spawn (2026-09-17: one
+        # worker's full-suite pytest ran ~140 concurrent children at load ~170).
+        expected_cap = max(1, (os.cpu_count() or 4) // kbd.KANBAN_WORKER_TEST_WORKERS_DIVISOR)
+        assert int(env["HERMES_TEST_WORKERS"]) == expected_cap
         for key in sc._VAR_MAP:
             if key == "HERMES_SESSION_SOURCE":
                 # Re-set by the dispatcher, so what matters is that it carries

@@ -243,18 +243,40 @@ class BaseEnvironment(ABC):
         """Profile-scoped names that must not persist in the snapshot. Monotonic for the
         environment lifetime: an allowlist can be cleared after a value was captured, and
         retaining the exclusion keeps that old value from leaking to a later profile."""
-        if not self._profile_scoped_passthrough:
-            return ()
-        try:
-            from agent.secret_scope import is_multiplex_active
-            if is_multiplex_active():
-                from tools.env_passthrough import get_all_passthrough
-                names = (*get_all_passthrough(), *self._additional_profile_scoped_passthrough_names())
-                self._snapshot_passthrough_names.update(
-                    name for name in names if isinstance(name, str) and _SHELL_ENV_NAME_RE.fullmatch(name))
-        except Exception:
-            logger.debug("Could not refresh profile-scoped snapshot exclusions", exc_info=True)
+        excluded: set[str] = set()
+        if self._profile_scoped_passthrough:
+            try:
+                from agent.secret_scope import is_multiplex_active
+                if is_multiplex_active():
+                    from tools.env_passthrough import get_all_passthrough
+                    names = (*get_all_passthrough(), *self._additional_profile_scoped_passthrough_names())
+                    excluded.update(
+                        name for name in names if isinstance(name, str) and _SHELL_ENV_NAME_RE.fullmatch(name))
+            except Exception:
+                logger.debug("Could not refresh profile-scoped snapshot exclusions", exc_info=True)
+        excluded.update(self._worker_lineage_snapshot_exclusions())
+        self._snapshot_passthrough_names.update(excluded)
         return tuple(sorted(self._snapshot_passthrough_names))
+
+    def _worker_lineage_snapshot_exclusions(self) -> tuple[str, ...]:
+        """Kanban board-location pins that must not persist in a worker's snapshot.
+
+        A dispatcher worker's terminal snapshot is captured once and re-``source``d
+        for EVERY later command; a persisted ``HERMES_KANBAN_DB`` re-asserts the
+        live-board pin inside each command — defeating the per-command runner
+        repin in ``LocalEnvironment._make_run_env_for`` (the Popen env loses to
+        the sourced snapshot). Excluding the pins here means the snapshot never
+        carries them: commands inherit whatever the (possibly repinned) Popen env
+        passed. Identity vars are already handled (the fence marker is unset by
+        the shared snapshot exclusions; TASK/RUN_ID never survive the scrub).
+        Only applies inside a kanban worker lineage; an operator's own session
+        keeps its pins.
+        """
+        import os as _os
+        if not _os.environ.get("HERMES_KANBAN_TASK"):
+            return ()
+        from agent.delegation_context import KANBAN_LOCATION_ENV_KEYS
+        return tuple(KANBAN_LOCATION_ENV_KEYS)
 
     def _snapshot_script_kwargs(self, cwd: str) -> dict:
         """Quoting inputs shared by the bootstrap and per-command wrapper scripts.

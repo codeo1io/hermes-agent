@@ -24,6 +24,13 @@ KANBAN_ENV_KEYS: tuple[str, ...] = (
     "HERMES_KANBAN_GOAL_MODE", "HERMES_KANBAN_GOAL_MAX_TURNS",
 )
 
+# Board-location pins (as opposed to identity): a descendant's verification
+# subprocesses (pytest, conductor fleet runs) must have these repointed at a
+# per-lineage scratch board, never the live board the dispatcher pinned.
+KANBAN_LOCATION_ENV_KEYS: tuple[str, ...] = (
+    "HERMES_KANBAN_DB", "HERMES_KANBAN_WORKSPACES_ROOT", "HERMES_KANBAN_HOME",
+)
+
 
 @contextmanager
 def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
@@ -99,6 +106,36 @@ def _fenced_kanban_root() -> str:
         return "1"
 
 
+def _scratch_kanban_root(env: Mapping[str, str]) -> str | None:
+    """Per-lineage scratch board root for repinning a descendant's board pins.
+
+    Verification/agent subprocesses a worker spawns (pytest, conductor fleet runs)
+    must not carry the dispatcher's live-board ``HERMES_KANBAN_DB`` pin: the pin
+    outranks every test-fixture sandbox (``kanban_db_path()`` resolves it first),
+    so a test suite that leaks fixture rows writes them into the LIVE board
+    (2026-09-17: 7 fixture waves, 156 rows, two real worker runs burned). A strip
+    is not enough either — without the pin ``kanban_db_path()`` falls back to
+    ``kanban_home()`` (the shared default root), which IS the live board. The pin
+    must be repointed at a scratch root the lineage owns.
+
+    The scratch root lives under the worker's task workspace when it is a real
+    directory (``HERMES_KANBAN_WORKSPACE``), else under the system temp dir, so
+    scratch boards die with the workspace instead of accumulating.
+    """
+    workspace = str(env.get("HERMES_KANBAN_WORKSPACE") or "").strip()
+    if workspace:
+        try:
+            from pathlib import Path
+            root = Path(workspace).expanduser()
+            if root.is_dir():
+                return str(root / ".kanban-scratch")
+        except Exception:
+            pass
+    from pathlib import Path
+    import tempfile
+    return str(Path(tempfile.gettempdir()) / f"hermes-kanban-scratch-{os.getpid()}")
+
+
 def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[str, str]:
     """Remove worker identity, retaining board/location and an inherited write fence.
 
@@ -111,11 +148,115 @@ def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[
     against a temp ``HERMES_HOME`` got a silently read-only board there. An inherited
     path-valued marker is kept (a grandchild that moved HERMES_HOME must not re-fence
     onto its scratch root and unfence the real one).
+
+    Board-location pins are RETAINED for reads (``HERMES_KANBAN_DB`` still names the
+    lineage board) but a verification subprocess never sees them: the dispatcher
+    repins them to a per-lineage scratch board at spawn (see
+    :func:`repin_kanban_board_env`). Only the write fence is inherited.
     """
     cleaned = {k: v for k, v in env.items() if k not in KANBAN_ENV_KEYS}
     inherited = str(env.get(DELEGATED_CHILD_ENV_MARKER) or "")
     cleaned[DELEGATED_CHILD_ENV_MARKER] = inherited if inherited and inherited != "1" else _fenced_kanban_root()
     return cleaned
+
+
+def repin_kanban_board_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[str, str]:
+    """Repoint a descendant env's live-board pins at a per-lineage scratch board.
+
+    Counterpart to :func:`scrub_kanban_env` for the operational leak class
+    (2026-09-17): the worker's pytest/conductor verification children inherited the
+    dispatcher's ``HERMES_KANBAN_DB`` pin and wrote fixture cards into the live
+    board. Stripping is insufficient (``kanban_db_path()`` falls back to
+    ``kanban_home()``, the live root), so both location pins are repointed:
+
+    * ``HERMES_KANBAN_DB``           -> ``<scratch>/kanban.db``
+    * ``HERMES_KANBAN_WORKSPACES_ROOT`` -> ``<scratch>/workspaces``
+
+    ``HERMES_KANBAN_HOME`` (a third location override) is dropped when set — the
+    scratch DB pin outranks it everywhere. Read-only board intent survives via the
+    inherited write-fence marker; reads fall back to the scratch board, which
+    exists for exactly the lifetime of the leak-prone child.
+
+    Not applied when ``env`` carries no kanban pin (a non-worker host process
+    spawning an ordinary child must keep its env untouched).
+    """
+    if not any(key in env for key in KANBAN_LOCATION_ENV_KEYS):
+        return dict(env)
+    cleaned = dict(env)
+    scratch = _scratch_kanban_root(env)
+    cleaned["HERMES_KANBAN_DB"] = f"{scratch}/kanban.db"
+    cleaned["HERMES_KANBAN_WORKSPACES_ROOT"] = f"{scratch}/workspaces"
+    cleaned.pop("HERMES_KANBAN_HOME", None)
+    return cleaned
+
+
+# Test-runner invocations whose fixtures historically leaked into the live board
+# when the dispatcher's pin rode the child env (2026-09-17: 7 waves / 156 rows).
+# Matched as COMMAND TOKENS (never substrings): a repro script under
+# /tmp/pytest-of-agent/... carries "pytest" in its path but is not a runner.
+_TEST_RUNNER_TOKENS: tuple[str, ...] = ("pytest", "unittest", "nose2", "green")
+_TEST_RUNNER_SUFFIXES: tuple[str, ...] = (
+    "/pytest", "/unittest", "/nose2",
+    "run_tests_parallel.py", "run_tests.sh", "run_tests.py",
+)
+
+
+def _token_is_test_runner(token: str) -> bool:
+    if token in _TEST_RUNNER_TOKENS:
+        return True
+    return any(token.endswith(suffix) for suffix in _TEST_RUNNER_SUFFIXES)
+
+
+def looks_like_test_runner_command(command: "str | None") -> bool:
+    """Whether *command* is (or wraps) a test-runner invocation.
+
+    Token-based, not a substring scan: pytest's own tmp dirs contain ``pytest``
+    in every path (``/tmp/pytest-of-agent/pytest-N/...``), so a bare substring
+    match would repin ordinary repro scripts that merely live there. A token
+    matches when it IS a runner (``pytest``, ``python -m pytest``, ``-m
+    unittest``) or is a path to one (``/venv/bin/pytest``,
+    ``scripts/run_tests_parallel.py``). This catches the fleet shapes a worker
+    actually launches — including inside ``bash -c 'cd ... && pytest -q'``
+    conductor wrappers — while leaving ``python /tmp/pytest-of-agent/.../repro.py``
+    on the pinned board. False positives only repin a child to a scratch board
+    (the safe direction); false negatives fall back to the write fence.
+    """
+    if not command:
+        return False
+    head = command[:2048]
+    # Strip shell comments: a token after '#' is prose, not a command — the
+    # classic footgun here is pytest's own tmp paths plus a trailing annotation.
+    cut = head.find("#")
+    if cut != -1:
+        head = head[:cut]
+    for raw in head.split():
+        token = raw.strip("\"'(){};|&<>)")
+        if not token or "=" in token and not token.startswith("-"):
+            # Env-assignment prefixes (FOO=bar cmd) and flags are not commands.
+            continue
+        if _token_is_test_runner(token):
+            return True
+    return False
+
+
+def kanban_env_for_child_command(
+    command: "str | None",
+    env: Mapping[str, str] | MutableMapping[str, str],
+) -> dict[str, str]:
+    """Env for a worker descendant subprocess, repinning board pins for runners.
+
+    Split out of :func:`delegated_child_subprocess_env` so the TERMINAL spawn
+    surface — the one place the command string is visible — can apply the
+    operational guard: a test-runner child gets the live-board location pins
+    repointed at a scratch board (fixtures land there even on a stale tree
+    with no write fence), while ordinary commands keep their pinned board for
+    legitimate reads (``kanban show`` in a repro script). The identity scrub
+    and write fence apply to both paths via :func:`scrub_kanban_env`.
+    """
+    cleaned = dict(env)
+    if looks_like_test_runner_command(command):
+        cleaned = repin_kanban_board_env(cleaned)
+    return scrub_kanban_env(cleaned)
 
 
 def kanban_path_is_fenced(path: "os.PathLike[str] | str") -> bool:
@@ -157,6 +298,8 @@ def delegated_child_subprocess_env(
 
     Location and credentials are untouched; callers retain their existing secret policy.
     Dispatcher workers and supervised tool transports grant their own explicit scope.
+    (Board-location pins stay for fenced READ access; verification subprocesses get
+    them repointed at spawn via :func:`kanban_env_for_child_command`.)
     """
     if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):

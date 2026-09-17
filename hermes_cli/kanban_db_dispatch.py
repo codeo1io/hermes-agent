@@ -41,6 +41,13 @@ DEFAULT_LOG_BACKUP_COUNT = 1
 # and call kanban_block/kanban_complete before max_runtime_seconds kills it.
 KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS = 30
 
+# Worker-spawned verification runs (run_tests_parallel.py) get at most
+# cpu_count // this divisor parallel pytest files (2026-09-17: one worker's
+# full-suite verification ran ~140 concurrent pytests, load ~170, and the
+# self-hosted actions runner lost communication with GitHub). An explicit
+# HERMES_TEST_WORKERS in the dispatching env still wins (setdefault).
+KANBAN_WORKER_TEST_WORKERS_DIVISOR = 8
+
 # A healthy worker is still alive for a while after kanban_complete /
 # kanban_request_review returns (final assistant turn, session persistence), so
 # a run's retained worker is only reaped once ended_at is at least this old
@@ -2609,6 +2616,19 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env["HERMES_KANBAN_DB"] = str(_kb.kanban_db_path(board=board))
     env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(_kb.workspaces_root(board=board))
     _retag_legacy_worker_sessions(env["HERMES_KANBAN_WORKSPACES_ROOT"])
+    # Bound the worker's verification fan-out BEFORE it starts: the worker's own
+    # env carries these pins (its terminal/conductor children must see the real
+    # board), but any pytest that leaks its fixtures writes to a scratch board
+    # because every spawn out of the worker repins the location pins (see
+    # agent.delegation_context.repin_kanban_board_env). Separately, cap the
+    # parallelism any ``run_tests_parallel.py`` the worker invokes can use — the
+    # 2026-09-17 incident had ~140 concurrent per-file pytests from ONE worker
+    # (load ~170) starving the box and self-hosted CI. Only set when the worker
+    # would otherwise inherit a wider/no cap; operator can override per board.
+    env.setdefault(
+        "HERMES_TEST_WORKERS",
+        str(max(1, (os.cpu_count() or 4) // KANBAN_WORKER_TEST_WORKERS_DIVISOR)),
+    )
     # Board slug — defense-in-depth pin if a path is resolved without the
     # DB / workspaces env vars.
     env["HERMES_KANBAN_BOARD"] = _kb._normalize_board_slug(board) or _kb.get_current_board()

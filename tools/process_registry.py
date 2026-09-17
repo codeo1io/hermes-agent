@@ -137,16 +137,62 @@ def _worker_memory_max_bytes() -> int:
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
 
+def _systemd_scope_cpu_quota_percent() -> int:
+    """CPU quota for worker-lineage background scopes, as a percent of one core.
+
+    Bounds a lineage's CPU hunger without pinning it to a subset of cores: a
+    verification fleet that fans out (per-file pytest subprocesses) can use the
+    whole box's idle capacity but never crowd out the gateway and self-hosted CI
+    (2026-09-17: ~140 parallel pytests from ONE worker pushed load to ~170 and the
+    actions runner lost communication with GitHub). Default 50% of one core is a
+    floor, not a ceiling on usefulness — batch test runners are rarely
+    latency-sensitive. ``TERMINAL_WORKER_CPU_QUOTA_PERCENT`` tightens or widens
+    (100 = one full core), clamped to [10, nproc*100].
+    """
+    default = 100
+    override = os.getenv("TERMINAL_WORKER_CPU_QUOTA_PERCENT", "").strip()
+    value = default
+    if override:
+        try:
+            value = int(override)
+        except ValueError:
+            logger.warning("Ignoring invalid TERMINAL_WORKER_CPU_QUOTA_PERCENT=%r", override)
+            value = default
+    try:
+        cores = os.cpu_count() or 4
+    except Exception:
+        cores = 4
+    return max(10, min(value, cores * 100))
+
+
+def _worker_lineage_cpu_quota() -> Optional[int]:
+    """CPUQuota percent for scopes when the spawning process is a kanban worker.
+
+    The gateway's own background executors keep the historical unbounded-CPU
+    scope: they are operator-driven and short-lived. A dispatcher worker's
+    background children are exactly where the unbounded verification fleet ran
+    (a worker is not the gateway, so the scope gate used to skip them entirely —
+    now they get a scope AND a CPU bound).
+    """
+    if not os.environ.get("HERMES_KANBAN_TASK"):
+        return None
+    return _systemd_scope_cpu_quota_percent()
+
+
 def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> List[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
     No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486)."""
-    return [
+    argv_out = [
         binary, "--user", "--scope", "--quiet", "--unit", unit_name, "--collect",
         "--property", "MemoryAccounting=yes",
         "--property", f"MemoryMax={_worker_memory_max_bytes()}",
-        "--", *argv,
     ]
+    quota = _worker_lineage_cpu_quota()
+    if quota is not None:
+        argv_out += ["--property", f"CPUQuota={quota}%"]
+    argv_out += ["--", *argv]
+    return argv_out
 
 
 def _default_user_runtime_dir() -> Path:
@@ -932,11 +978,15 @@ class ProcessRegistry(ProcessCheckpointMixin):
         """Login-shell argv for *safe_command* (parity with LocalEnvironment: rc files
         sourced, user tools on PATH), wrapped in a transient systemd scope when we are
         the supervised gateway (own cgroup: an OOM kills only the worker, not the
-        gateway and its messaging control plane)."""
+        gateway and its messaging control plane) or a kanban worker lineage (a
+        dispatcher worker is NOT the gateway: without this branch its background
+        children ran with no cgroup at all — 2026-09-17, ~140 parallel verification
+        pytests at load ~170 starved the box and self-hosted CI)."""
         argv = [_find_shell(), "-lic", f"set +m; {safe_command}"]
         # This applies to both pipe mode and the PTY path above. See #70716.
         in_supervised_gateway = _IS_LINUX and _is_supervised_gateway_process()
-        if in_supervised_gateway and _systemd_run_user_scope_available():
+        worker_lineage = _IS_LINUX and not in_supervised_gateway and bool(os.environ.get("HERMES_KANBAN_TASK"))
+        if (in_supervised_gateway or worker_lineage) and _systemd_run_user_scope_available():
             session.systemd_unit = f"hermes-worker-{unit_suffix}.scope"
             return _build_systemd_scope_argv(argv, unit_suffix=unit_suffix)
         if in_supervised_gateway:
@@ -945,6 +995,10 @@ class ProcessRegistry(ProcessCheckpointMixin):
             logger.debug(
                 "%s background executor not isolated in a systemd scope "
                 "(systemd-run --user unavailable); worker shares the gateway cgroup.", label)
+        elif worker_lineage:
+            logger.debug(
+                "%s worker-lineage background executor not isolated in a systemd scope "
+                "(systemd-run --user unavailable); it shares the worker's cgroup.", label)
         return argv
 
     @staticmethod
