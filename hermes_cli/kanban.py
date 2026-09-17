@@ -212,7 +212,7 @@ def _profile_author() -> str:
 
 
 _DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
-    "init", "create", "swarm", "assign", "reclaim", "reassign", "link", "unlink",
+    "init", "create", "swarm", "assign", "owner", "owner-reconcile", "reclaim", "reassign", "link", "unlink",
     "claim", "comment", "attach", "attach-rm", "complete", "edit", "block",
     "schedule", "unblock", "promote", "archive", "dispatch", "daemon", "repair",
     "heartbeat", "notify-subscribe", "notify-unsubscribe", "specify", "decompose",
@@ -374,6 +374,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_max_turns=getattr(args, "goal_max_turns", None),
             completion_contract=getattr(args, "completion_contract", None),
             initial_status=getattr(args, "initial_status", "running"),
+            owner=getattr(args, "owner", None),
             creator_task_id=(os.environ.get("HERMES_KANBAN_TASK")
                              if is_dispatcher_owned_worker_context() else None),
         )
@@ -426,6 +427,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             conn, assignee=assignee, status=args.status, tenant=args.tenant, session_id=args.session,
             include_archived=args.archived, order_by=getattr(args, "sort", None),
             workflow_template_id=args.workflow_template_id, current_step_key=args.current_step_key,
+            owner=getattr(args, "owner", None),
         )
     if _json_out(args, [_task_to_dict(t) for t in tasks]):
         return 0
@@ -505,6 +507,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"Task {task.id}: {task.title}")
     field("status", task.status)
     field("assignee", task.assignee or "-")
+    # effective_owner: legacy owner-NULL rows display their creator (G3);
+    # stored owner stays NULL — reconciliation (G4) owns the write-side fix.
+    field("owner", task.effective_owner or "-")
     if task.tenant:
         field("tenant", task.tenant)
     field("workspace", f"{task.workspace_kind}" + (f" @ {task.workspace_path}" if task.workspace_path else ""))
@@ -575,6 +580,46 @@ def _cmd_assign(args: argparse.Namespace) -> int:
         ok = kb.assign_task(conn, args.task_id, profile)
     return _ok_or_err(ok, f"no such task: {args.task_id}",
                       f"Assigned {args.task_id} to {profile or '(unassigned)'}")
+
+
+def _cmd_owner(args: argparse.Namespace) -> int:
+    # Mirrors `_cmd_assign`, but the archived-refusal RuntimeError from
+    # `set_task_owner` simply propagates: `kanban_command`'s handler wrapper
+    # already turns it into a stderr line + rc 1 (same UX as `assign`'s 409s).
+    owner = _none_profile(args.owner)
+    with kbc.connect_closing() as conn:
+        ok = kb.set_task_owner(conn, args.task_id, owner)
+    return _ok_or_err(ok, f"no such task: {args.task_id}",
+                      f"Owner of {args.task_id} set to {owner or '(none)'}")
+
+
+def _cmd_owner_reconcile(args: argparse.Namespace) -> int:
+    """G4 backfill driver: dry-run by default, ``--apply`` writes.
+
+    Print the audit report (id, from, to) either way; ``--json`` emits the
+    machine-readable dict straight from ``reconcile_task_owners``.
+    """
+    with kbc.connect_closing() as conn:
+        report = kb.reconcile_task_owners(conn, dry_run=not args.apply)
+    if getattr(args, "json", False):
+        _print_json(report)
+        return 0
+    mode = "DRY RUN" if report["dry_run"] else "APPLIED"
+    if report["already_reconciled"]:
+        print(f"owner reconciliation already ran on this board (user_version "
+              f">= {kb.OWNER_RECONCILED_USER_VERSION}); nothing to do.")
+        return 0
+    verb = "would repoint" if report["dry_run"] else "repointed"
+    print(f"owner reconciliation [{mode}]: {verb} {report['candidates']} task(s) "
+          f"at their creator (owner IS NULL AND created_by IS NOT NULL):")
+    for c in report["changes"]:
+        print(f"  {c['id']}: {c['from'] or '(none)'} -> {c['to']}")
+    if report["dry_run"]:
+        print("dry run — no changes written. Re-run with --apply to execute.")
+    else:
+        print(f"applied: {report['changed']} task(s) changed; gate set "
+              f"(user_version = {kb.OWNER_RECONCILED_USER_VERSION}).")
+    return 0
 
 
 def _cmd_set_model(args: argparse.Namespace) -> int:
@@ -1232,7 +1277,8 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
-    "assign": _cmd_assign, "set-model": _cmd_set_model,
+    "assign": _cmd_assign, "owner": _cmd_owner, "owner-reconcile": _cmd_owner_reconcile,
+    "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
     "link": _cmd_link, "unlink": _cmd_unlink, "claim": _cmd_claim,

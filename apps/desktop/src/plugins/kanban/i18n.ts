@@ -120,6 +120,7 @@ type KanbanMessages = {
   // drawer — meta + sections
   metaPriority: string
   metaTenant: string
+  metaOwner: string
   metaCreatedBy: string
   metaCreated: string
   metaWorkerPid: string
@@ -333,6 +334,7 @@ export const en: KanbanMessages = {
   someone: 'someone',
   metaPriority: 'Priority',
   metaTenant: 'Tenant',
+  metaOwner: 'Owner',
   metaCreatedBy: 'Created by',
   metaCreated: 'Created',
   metaWorkerPid: 'Worker pid',
@@ -544,6 +546,7 @@ const ja: KanbanMessages = {
   someone: '誰か',
   metaPriority: '優先度',
   metaTenant: 'テナント',
+  metaOwner: 'オーナー',
   metaCreatedBy: '作成者',
   metaCreated: '作成',
   metaWorkerPid: 'ワーカー PID',
@@ -754,6 +757,7 @@ const zh: KanbanMessages = {
   someone: '某人',
   metaPriority: '优先级',
   metaTenant: '租户',
+  metaOwner: '负责人',
   metaCreatedBy: '创建者',
   metaCreated: '创建于',
   metaWorkerPid: '工作单元 PID',
@@ -962,6 +966,7 @@ const zhHant: KanbanMessages = {
   someone: '某人',
   metaPriority: '優先順序',
   metaTenant: '租戶',
+  metaOwner: '負責人',
   metaCreatedBy: '建立者',
   metaCreated: '建立於',
   metaWorkerPid: '工作單元 PID',

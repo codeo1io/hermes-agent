@@ -813,6 +813,9 @@ _LATER_TASK_COLUMNS = (
     # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
     ("block_kind", "block_kind TEXT"),
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
+    # Routing-neutral accountability label (who owns the outcome); NULL after
+    # the first-add backfill means explicitly cleared.
+    ("owner", "owner TEXT"),
 )
 
 _NOTIFY_SUB_COLUMNS = (
@@ -863,8 +866,22 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         if name not in cols:
             if name == "model_override":
                 conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
+                added = True
             else:
-                _add_column_if_missing(conn, "tasks", name, ddl)
+                added = _add_column_if_missing(conn, "tasks", name, ddl)
+            if name == "owner" and added:
+                # One-shot backfill on FIRST ADD only: rows predating the column
+                # get their creator as owner. Guarded on ``added`` so a later
+                # explicit clear (NULL = "no owner") is never resurrected by a
+                # subsequent open — same shape as the delivery_mode precedent.
+                # ``created_by`` in the pre-loop snapshot: every real board has
+                # it from the v1 schema; a synthetic table without it (the
+                # concurrent-migration race fixture) has nothing to backfill
+                # from, and the UPDATE would raise on the missing column.
+                if "created_by" in cols:
+                    conn.execute(
+                        "UPDATE tasks SET owner = created_by WHERE owner IS NULL"
+                    )
 
     # Indexes over additive ``tasks`` columns must be created AFTER the columns
     # exist: ``executescript`` parses each statement against the live schema,

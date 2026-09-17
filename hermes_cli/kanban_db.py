@@ -715,6 +715,23 @@ class Task:
     block_kind: Optional[str] = None
     block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
     completion_contract: Optional[str] = None
+    # Routing-neutral accountability label; NULL = explicitly cleared (see
+    # _owner_or_none / set_task_owner). Never read by the dispatcher.
+    owner: Optional[str] = None
+
+    @property
+    def effective_owner(self) -> Optional[str]:
+        """Display-only owner resolution: ``owner ?? created_by ?? None``.
+
+        Legacy/mixed-version rows written before the owner column landed (or
+        while a pre-owner install was still inserting without it) are
+        owner-NULL; every read surface that shows a human an owner uses this
+        so those rows display their creator instead of "-". Queries stay
+        COALESCE-free — NULL remains the honest stored value and the
+        "explicitly cleared" sentinel; reconciliation (G4) is the write-side
+        fix, this is the read-side display.
+        """
+        return self.owner or self.created_by or None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -746,9 +763,11 @@ _TASK_OPTIONAL_COLUMNS = (
     "max_runtime_seconds", "last_heartbeat_at", "current_run_id", "workflow_template_id",
     "current_step_key", "max_retries", "session_id", "completion_contract",
 )
-# Text columns where "" is stored/read as "not set".
+# Text columns where "" is stored/read as "not set". (from_row merges these
+# AFTER _TASK_OPTIONAL_COLUMNS, so a column must appear in exactly one tuple.)
 _TASK_EMPTY_IS_NULL_COLUMNS = (
     "model_override", "provider_override", "reasoning_effort", "goal_max_turns", "block_kind",
+    "owner",
 )
 
 
@@ -867,6 +886,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the task's worktree is anchored under the project's primary repo with a
     -- deterministic branch name instead of a random wt/<task-id> fallback.
     project_id           TEXT,
+    -- Routing-neutral accountability label (who owns the outcome). Defaults
+    -- to creator; transferable; never consulted by dispatch.
+    owner                TEXT,
     claim_lock           TEXT,
     claim_expires        INTEGER,
     tenant               TEXT,
@@ -1092,6 +1114,17 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _owner_or_none(owner: Optional[str]) -> Optional[str]:
+    """Free-text owner label: stripped, ``""``/whitespace → None.
+
+    Deliberately NOT profile-validated — owner is an accountability label
+    (person/team), never a dispatch target, so it keeps whatever casing the
+    writer chose. Lowercasing it like ``assignee`` would corrupt free text."""
+    if owner is None:
+        return None
+    return str(owner).strip() or None
+
+
 def _resolve_project_link(
     conn: sqlite3.Connection, project_id: Optional[str], project_source_task_id: Optional[str],
     workspace_kind: str, workspace_path: Optional[str],
@@ -1232,6 +1265,7 @@ def create_task(
     project_source_task_id: Optional[str] = None,
     creator_task_id: Optional[str] = None,
     completion_contract: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
@@ -1245,6 +1279,7 @@ def create_task(
     dependency edges; an explicit ``session_id`` still wins.
     ``project_source_task_id``: cross-profile fallback when ``project_id`` is not
     in the active profile's projects.db — see ``_resolve_project_link``.
+    ``owner``: routing-neutral accountability label; NULL/blank → ``created_by``.
     ``workspace_kind=None`` (omitted) inherits a project-scoped board's project;
     an explicit ``"scratch"`` or ``project_id=""`` is a request for no project.
     """
@@ -1255,6 +1290,7 @@ def create_task(
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
+    owner = _owner_or_none(owner) or created_by
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -1331,8 +1367,9 @@ def create_task(
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
                         reasoning_effort,
-                        goal_mode, goal_max_turns, session_id, completion_contract
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, completion_contract,
+                        owner
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id, title.strip(), body, assignee, task_status, priority,
@@ -1342,6 +1379,7 @@ def create_task(
                         json.dumps(skills_list) if skills_list is not None else None,
                         _opt_int(max_retries), model_override, provider_override, reasoning_effort,
                         1 if goal_mode else 0, _opt_int(goal_max_turns), session_id, completion_contract,
+                        owner,
                     ),
                 )
                 for pid in parents:
@@ -1352,6 +1390,7 @@ def create_task(
                     "created",
                     {
                         "assignee": assignee,
+                        "owner": owner,
                         "status": task_status,
                         "parents": list(parents),
                         "creator_task_id": creator_task_id,
@@ -1469,6 +1508,7 @@ def list_tasks(
     tenant: Optional[str] = None, session_id: Optional[str] = None, include_archived: bool = False,
     limit: Optional[int] = None, order_by: Optional[str] = None,
     workflow_template_id: Optional[str] = None, current_step_key: Optional[str] = None,
+    owner: Optional[str] = None,
 ) -> list[Task]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
@@ -1477,7 +1517,7 @@ def list_tasks(
     for col, val in (
         ("assignee", _canonical_assignee(assignee)), ("status", status), ("tenant", tenant),
         ("session_id", session_id), ("workflow_template_id", workflow_template_id),
-        ("current_step_key", current_step_key),
+        ("current_step_key", current_step_key), ("owner", _owner_or_none(owner)),
     ):
         if val is not None:
             query += f" AND {col} = ?"
@@ -1523,6 +1563,94 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     # Observer fires AFTER commit so subscribers see durable state.
     notify_task_updated(conn, task_id, ("assignee",))
     return True
+
+
+def set_task_owner(conn: sqlite3.Connection, task_id: str, owner: Optional[str]) -> bool:
+    """Transfer/clear the routing-neutral owner label; False on unknown id.
+
+    Deliberately NOT ``assign_task``: owner is accountability metadata, not a
+    dispatch target — so it is settable under a live claim (the human owning the
+    outcome can change even while a worker runs) and never touches ``assignee``,
+    claim state, or the failure counters. Refused only on archived tasks.
+    """
+    owner = _owner_or_none(owner)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, owner FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] == "archived":
+            raise RuntimeError(f"cannot transfer owner on archived task {task_id}")
+        conn.execute("UPDATE tasks SET owner = ? WHERE id = ?", (owner, task_id))
+        _append_event(conn, task_id, "owner_transferred", {"from": row["owner"], "to": owner})
+    notify_task_updated(conn, task_id, ("owner",))
+    return True
+
+
+# PRAGMA user_version set once the post-deploy owner reconciliation (G4) has
+# run on a board. 0 = not yet reconciled. Verified unused across hermes_cli/,
+# plugins/ and tools/ before claiming it (grep 2026-09-15).
+OWNER_RECONCILED_USER_VERSION = 1
+
+
+def reconcile_task_owners(conn: sqlite3.Connection, *, dry_run: bool = False) -> dict:
+    """Backfill owner from created_by for mixed-version rows; report what changed.
+
+    The first-add migration backfill (``_migrate_add_optional_columns``) fires
+    exactly once per board — when the ``owner`` column is added. But the column
+    existed on the live board for hours before any owner-writing install ran,
+    so every task created in that window (and until deploy) is owner-NULL with
+    ``created_by`` set, and the one-shot never re-runs. This reconciliation is
+    the write-side fix: it re-points those rows at their creator, guarded by
+    ``PRAGMA user_version`` so it too runs exactly once per board.
+
+    Explicit clears are indistinguishable from window rows and ARE overwritten
+    (documented limitation, docs/kanban-owner.md §5) — reconciliation must run
+    before users start relying on explicit NULL.
+
+    ``dry_run=True`` computes and returns the plan without writing. The return
+    dict is the audit report: ``changes`` = [{id, from, to}], counts, and the
+    gate state. Idempotent: the gate makes second calls no-ops; even without
+    it the UPDATE's WHERE clause is a fixed point.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version >= OWNER_RECONCILED_USER_VERSION:
+        return {"ran": False, "dry_run": dry_run, "already_reconciled": True,
+                "candidates": 0, "changed": 0, "changes": []}
+    rows = conn.execute(
+        "SELECT id, owner, created_by FROM tasks "
+        "WHERE owner IS NULL AND created_by IS NOT NULL AND created_by != '' "
+        "ORDER BY id"
+    ).fetchall()
+    changes = [{"id": r["id"], "from": r["owner"], "to": r["created_by"]} for r in rows]
+    report = {"ran": not dry_run, "dry_run": dry_run, "already_reconciled": False,
+              "candidates": len(rows), "changed": 0, "changes": changes if dry_run else []}
+    if dry_run:
+        return report
+    with write_txn(conn):
+        # Re-select under the write lock: candidates may have gained an owner
+        # (or been archived/re-keyed) between the unlocked snapshot and now.
+        # An empty pass still sets the gate — "ran once" must not mean "found
+        # something", or every open would re-scan.
+        live = conn.execute(
+            "SELECT id, owner, created_by FROM tasks "
+            "WHERE owner IS NULL AND created_by IS NOT NULL AND created_by != '' "
+            "ORDER BY id"
+        ).fetchall()
+        for r in live:
+            conn.execute(
+                "UPDATE tasks SET owner = ? WHERE id = ? AND owner IS NULL",
+                (r["created_by"], r["id"]),
+            )
+            _append_event(conn, r["id"], "owner_reconciled",
+                          {"from": r["owner"], "to": r["created_by"], "backfill": True})
+        conn.execute(f"PRAGMA user_version = {OWNER_RECONCILED_USER_VERSION}")
+    report["changed"] = len(live)
+    report["changes"] = [{"id": r["id"], "from": r["owner"], "to": r["created_by"]} for r in live]
+    if live:
+        _log.info("kanban owner reconciliation: %d task(s) re-pointed at their creator", len(live))
+    return report
 
 
 def set_model_override(

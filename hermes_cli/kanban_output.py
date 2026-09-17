@@ -16,7 +16,7 @@ _STATUS_ICONS = {
 }
 
 _TASK_DICT_FIELDS = (
-    "id", "title", "body", "assignee", "status", "priority", "tenant",
+    "id", "title", "body", "assignee", "owner", "status", "priority", "tenant",
     "workspace_kind", "workspace_path", "branch_name", "project_id",
     "created_by", "created_at", "started_at", "completed_at", "result",
     "skills", "max_retries", "model_override", "provider_override",
@@ -74,8 +74,14 @@ def _bulk_apply(ids: Iterable[str], op: Callable[[str], Any],
 def _fmt_task_line(t: kb.Task) -> str:
     icon = _STATUS_ICONS.get(t.status, "?")
     assignee = t.assignee or "(unassigned)"
+    # Always shown, even when equal to the creator: owner usually ≠ assignee
+    # (human/accountability vs worker profile), so hide-when-equal would almost
+    # never hide and just make the column's meaning inconsistent.
+    # effective_owner: legacy owner-NULL rows display their creator (G3);
+    # stored owner stays NULL — reconciliation (G4) owns the write-side fix.
+    owner = t.effective_owner or "-"
     tenant = f" [{t.tenant}]" if t.tenant else ""
-    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}"
+    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{owner:16s}{tenant}  {t.title}"
 
 
 def _obj_dict(obj: Any, fields: tuple[str, ...]) -> dict[str, Any]:

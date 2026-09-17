@@ -178,6 +178,9 @@ def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None) ->
         d["age"] = kanban_db.task_age(task)
     except Exception:
         d["age"] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
+    # Display-only owner resolution (G3): asdict() drops the Task property, so
+    # surface it explicitly next to the raw (possibly NULL) stored value.
+    d["effective_owner"] = task.effective_owner
     # Latest non-null run summary (workers hand off via ``task_runs.summary``, not ``tasks.result``).
     d["latest_summary"] = latest_summary
     return d
@@ -389,6 +392,8 @@ class CreateTaskBody(BaseModel):
     provider_override: Optional[str] = None
     reasoning_effort: Optional[str] = None  # none|minimal|…|ultra; None inherits the profile's level
     project_id: Optional[str] = None  # None inherits the board's scoped project (if any)
+    # Routing-neutral accountability label; None → create_task's created_by default.
+    owner: Optional[str] = None
 
 
 @router.post("/tasks")
@@ -506,6 +511,10 @@ class UpdateTaskBody(BaseModel):
     clear_model_override: bool = False
     reasoning_effort: Optional[str] = None
     clear_reasoning_effort: bool = False
+    # Owner is accountability metadata, not an override (no next-dispatch
+    # semantics) and not a routing target — its refusal maps to 400, not 409.
+    owner: Optional[str] = None
+    clear_owner: bool = False
 
 
 class BulkTaskBody(BaseModel):
@@ -524,6 +533,8 @@ class BulkTaskBody(BaseModel):
     clear_model_override: bool = False
     reasoning_effort: Optional[str] = None
     clear_reasoning_effort: bool = False
+    owner: Optional[str] = None
+    clear_owner: bool = False
 
 
 class _StatusRejected(Exception):
@@ -649,6 +660,13 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if payload.assignee is not None and not review_assignee_deferred:
             with _map_errors(409, RuntimeError):
                 _require_ok(kanban_db.assign_task(conn, task_id, payload.assignee or None))
+        # Deliberately NOT an _OVERRIDE_OPS entry: overrides change the next
+        # dispatch; owner is board metadata (settable under a live claim), and
+        # its archived refusal is a validation problem (400), not a conflict.
+        if payload.clear_owner or payload.owner is not None:
+            with _map_errors(400, ValueError, RuntimeError):
+                _require_ok(kanban_db.set_task_owner(
+                    conn, task_id, None if payload.clear_owner else payload.owner))
         if payload.status is not None:
             _patch_status(conn, task_id, payload, review_assignee_deferred)
         for wanted, apply, _refused in _OVERRIDE_OPS:
@@ -793,6 +811,13 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
             entry.update(ok=False, error=str(e))
     if payload.priority is not None:
         _set_priority(conn, tid, payload.priority, board)
+    if payload.clear_owner or payload.owner is not None:
+        try:
+            if not kanban_db.set_task_owner(
+                    conn, tid, None if payload.clear_owner else payload.owner):
+                entry.update(ok=False, error="owner refused")
+        except (ValueError, RuntimeError) as e:
+            entry.update(ok=False, error=str(e))
     for wanted, apply, refused in _OVERRIDE_OPS:
         if wanted(payload):
             try:

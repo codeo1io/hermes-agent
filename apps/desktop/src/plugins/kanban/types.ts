@@ -97,6 +97,9 @@ export interface KanbanAttachment {
 export interface KanbanTaskFull extends KanbanTask {
   result?: null | string
   created_by?: null | string
+  /** Routing-neutral accountability label (who owns the outcome); defaults to
+   *  the creator, distinct from `assignee` (the profile that runs it). */
+  owner?: null | string
   /** Per-task worker overrides. Null/absent = the assigned profile's own
    *  model, provider, and reasoning effort decide. */
   model_override?: null | string

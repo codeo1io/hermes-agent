@@ -781,6 +781,7 @@ export function TaskDrawer({
                   }}
                 />
               </MetaRow>
+              <MetaRow label={k.metaOwner}>{task.owner ?? '—'}</MetaRow>
               {task.created_by && <MetaRow label={k.metaCreatedBy}>{task.created_by}</MetaRow>}
               {ago(task.created_at) && <MetaRow label={k.metaCreated}>{ago(task.created_at)}</MetaRow>}
               {running && task.worker_pid ? <MetaRow label={k.metaWorkerPid}>{task.worker_pid}</MetaRow> : null}
