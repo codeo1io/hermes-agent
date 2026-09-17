@@ -1,0 +1,111 @@
+# CODEOWNERS — codeo1io/hermes-agent
+# Derived from the approved ownership map t_851e7951 OWNERS.md §3 (2026-09-17).
+# Reviewers must be real GitHub identities — only @codeo1io qualifies (roster rule:
+# valid board owners = {default, voice, codeo1io}); the BOARD owner rides in comments.
+# GitHub rule: LAST matching pattern wins → `*` fallback FIRST, voice overrides LAST.
+
+# board owner: default (fallback: codeo1io)
+* @codeo1io
+
+# ── map §3: agent/ core loop + model providers ──
+# board owner: default (fallback: codeo1io)
+/agent/            @codeo1io
+/run_agent.py      @codeo1io
+/providers/        @codeo1io
+
+# ── map §3: gateway/ (+ tui_gateway, ui-tui) ──
+# board owner: default (fallback: codeo1io)
+/gateway/          @codeo1io
+/tui_gateway/      @codeo1io
+/ui-tui/           @codeo1io
+
+# ── map §3: hermes_cli/ (CLI, kanban_db.py, web server) ──
+# board owner: default (fallback: codeo1io)
+/hermes_cli/       @codeo1io
+/cli.py            @codeo1io
+
+# ── map §3: hermes_state_*.py (state/persistence, 30 modules) ──
+# board owner: default (fallback: codeo1io)
+/hermes_state*.py  @codeo1io
+
+# ── map §3: tools/ + toolsets.py (tool runtime) ──
+# Connectors moved into tools/connectors/ (d105376b21): owned via /tools/.
+# board owner: default (fallback: codeo1io)
+/tools/            @codeo1io
+/toolsets.py       @codeo1io
+/toolset_distributions.py @codeo1io
+/model_tools.py    @codeo1io
+
+# ── map §3: acp_adapter/ (ACP protocol adapter) ──
+# board owner: default (fallback: codeo1io)
+/acp_adapter/      @codeo1io
+
+# ── map §3: scripts/ + tests-js/ (repo scripts, JS test suite) ──
+# board owner: default (fallback: codeo1io)
+/scripts/          @codeo1io
+/tests-js/         @codeo1io
+
+# ── map §3: plugins/, skills/, optional-skills, optional-mcps, plugin-catalog ──
+# board owner: default (fallback: codeo1io)
+/plugins/          @codeo1io
+/skills/           @codeo1io
+/optional-skills/  @codeo1io
+/optional-mcps/    @codeo1io
+/plugin-catalog/   @codeo1io
+
+# ── map §3: web/, website/, apps/ (dashboard & docs site) ──
+# board owner: default (fallback: codeo1io)
+/web/              @codeo1io
+/website/          @codeo1io
+/apps/             @codeo1io
+
+# ── map §3: tests/, evals/, CI workflows (self-hosted runners) ──
+# board owner: default (fallback: codeo1io)
+/tests/            @codeo1io
+/evals/            @codeo1io
+/.github/workflows/ @codeo1io
+
+# ── map §3: docs/ ── (reserved: map §3 docs row; in-repo docs live under /website/ today)
+# board owner: default (fallback: codeo1io)
+/docs/             @codeo1io
+
+# ── remaining top-level dirs (no §3 row → map catch-all: default) ──
+# board owner: default (fallback: codeo1io)
+/assets/           @codeo1io
+/contributors/     @codeo1io
+/cron/             @codeo1io
+/docker/           @codeo1io
+/hermes             @codeo1io
+/locales/          @codeo1io
+/native/           @codeo1io
+/nix/              @codeo1io
+
+# ═══ map §3: Voice stack touchpoints (audio, STT/TTS wiring) ═══
+# LAST so each overrides the default-owned parent dir (last-match-wins).
+# board owner: voice (fallback: default)
+/tools/voice_*.py              @codeo1io
+# board owner: voice (fallback: default)
+/tools/wake_word*.py           @codeo1io
+# board owner: voice (fallback: default)
+/tools/wakewords/              @codeo1io
+# board owner: voice (fallback: default)
+/tools/audio_*.py              @codeo1io
+# board owner: voice (fallback: default)
+/tools/tts_*.py                @codeo1io
+# board owner: voice (fallback: default)
+/tools/transcription_*.py      @codeo1io
+# board owner: voice (fallback: default)
+/tools/neutts_*                @codeo1io
+# board owner: voice (fallback: default)
+/hermes_cli/voice.py           @codeo1io
+# board owner: voice (fallback: default)
+/hermes_cli/cli_voice_mixin.py @codeo1io
+# board owner: voice (fallback: default)
+/gateway/run_voice.py          @codeo1io
+# board owner: voice (fallback: default)
+/gateway/streaming_tts_consumer.py @codeo1io
+# board owner: voice (fallback: default)
+/tui_gateway/methods_voice.py   @codeo1io
+# board owner: voice (fallback: default) — reserved: voice_stack plugin exists on the
+# ownership-map lineage, not on main; activates here if it lands.
+/plugins/voice_stack/          @codeo1io
