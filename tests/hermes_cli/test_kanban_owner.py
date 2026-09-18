@@ -48,8 +48,8 @@ def kanban_home(tmp_path, monkeypatch):
 def test_create_owner_defaults_to_creator(kanban_home):
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="defaults", assignee="worker", created_by="alice")
-        assert kb.get_task(conn, tid).owner == "alice"
+        tid = kb.create_task(conn, title="defaults", assignee="worker", created_by="codeo1io")
+        assert kb.get_task(conn, tid).owner == "codeo1io"
     finally:
         conn.close()
 
@@ -62,16 +62,16 @@ def test_decompose_fanout_children_default_owner_to_decomposer(kanban_home):
 
     conn = kbc.connect()
     try:
-        root = kb.create_task(conn, title="root", triage=True, created_by="alice")
+        root = kb.create_task(conn, title="root", triage=True, created_by="codeo1io")
         child_ids = decompose_triage_task(
             conn, root, root_assignee="default",
-            children=[{"title": "a"}, {"title": "b"}], author="alice",
+            children=[{"title": "a"}, {"title": "b"}], author="codeo1io",
         )
         assert child_ids and len(child_ids) == 2
         owners = {kb.get_task(conn, cid).owner for cid in child_ids}
-        assert owners == {"alice"}
+        assert owners == {"codeo1io"}
         # The children are reachable through the owner filter like any task.
-        listed = kb.list_tasks(conn, owner="alice")
+        listed = kb.list_tasks(conn, owner="codeo1io")
         assert set(t.id for t in listed) >= set(child_ids)
     finally:
         conn.close()
@@ -82,13 +82,13 @@ def test_create_explicit_owner_honored_verbatim(kanban_home):
     conn = kbc.connect()
     try:
         tid = kb.create_task(
-            conn, title="explicit", assignee="worker", created_by="alice", owner="  Platform Team "
+            conn, title="explicit", assignee="worker", created_by="codeo1io", owner="codeo1io"
         )
-        assert kb.get_task(conn, tid).owner == "Platform Team"
+        assert kb.get_task(conn, tid).owner == "codeo1io"
 
         # Blank owner is "not set" — falls back to the creator, never "".
-        blank = kb.create_task(conn, title="blank", assignee="worker", created_by="carol", owner="   ")
-        assert kb.get_task(conn, blank).owner == "carol"
+        blank = kb.create_task(conn, title="blank", assignee="worker", created_by="default", owner="   ")
+        assert kb.get_task(conn, blank).owner == "default"
     finally:
         conn.close()
 
@@ -97,7 +97,7 @@ def test_owner_empty_string_reads_as_none(kanban_home):
     """The EMPTY-IS-NULL column contract: a legacy/raw "" row reads as None."""
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="raw", assignee="worker", created_by="alice")
+        tid = kb.create_task(conn, title="raw", assignee="worker", created_by="codeo1io")
         conn.execute("UPDATE tasks SET owner = '' WHERE id = ?", (tid,))
         task = kb.get_task(conn, tid)
         assert task.owner is None
@@ -110,12 +110,12 @@ def test_create_event_payload_carries_created_owner(kanban_home):
     is the write-time default, matching the row (contract #2)."""
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="ev", assignee="worker", created_by="alice")
+        tid = kb.create_task(conn, title="ev", assignee="worker", created_by="codeo1io")
         row = conn.execute(
             "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created'", (tid,)
         ).fetchone()
         payload = json.loads(row["payload"])
-        assert payload["owner"] == "alice"
+        assert payload["owner"] == "codeo1io"
     finally:
         conn.close()
 
@@ -127,7 +127,7 @@ def test_create_event_payload_carries_created_owner(kanban_home):
 def test_set_task_owner_unknown_id_returns_false(kanban_home):
     conn = kbc.connect()
     try:
-        assert kb.set_task_owner(conn, "no-such-task", "bob") is False
+        assert kb.set_task_owner(conn, "no-such-task", "voice") is False
     finally:
         conn.close()
 
@@ -135,16 +135,16 @@ def test_set_task_owner_unknown_id_returns_false(kanban_home):
 def test_set_task_owner_transfers_and_audits(kanban_home):
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="t", assignee="worker", created_by="alice")
-        assert kb.set_task_owner(conn, tid, "bob") is True
-        assert kb.get_task(conn, tid).owner == "bob"
+        tid = kb.create_task(conn, title="t", assignee="worker", created_by="codeo1io")
+        assert kb.set_task_owner(conn, tid, "voice") is True
+        assert kb.get_task(conn, tid).owner == "voice"
 
         row = conn.execute(
             "SELECT kind, payload FROM task_events WHERE task_id = ? "
             "ORDER BY id DESC LIMIT 1", (tid,),
         ).fetchone()
         assert row["kind"] == "owner_transferred"
-        assert json.loads(row["payload"]) == {"from": "alice", "to": "bob"}
+        assert json.loads(row["payload"]) == {"from": "codeo1io", "to": "voice"}
 
         # Clear ("" and None both mean "no owner").
         assert kb.set_task_owner(conn, tid, "") is True
@@ -153,7 +153,7 @@ def test_set_task_owner_transfers_and_audits(kanban_home):
             "SELECT payload FROM task_events WHERE task_id = ? "
             "ORDER BY id DESC LIMIT 1", (tid,),
         ).fetchone()
-        assert json.loads(row["payload"]) == {"from": "bob", "to": None}
+        assert json.loads(row["payload"]) == {"from": "voice", "to": None}
     finally:
         conn.close()
 
@@ -164,7 +164,7 @@ def test_owner_transfer_is_routing_neutral_under_live_claim(kanban_home):
     ``assign_task``, which raises and resets ``consecutive_failures``."""
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="live", assignee="worker", created_by="alice")
+        tid = kb.create_task(conn, title="live", assignee="worker", created_by="codeo1io")
         conn.execute(
             "UPDATE tasks SET status = 'running', claim_lock = 'lk-1', "
             "claim_expires = 9999999999, consecutive_failures = 3, "
@@ -178,13 +178,13 @@ def test_owner_transfer_is_routing_neutral_under_live_claim(kanban_home):
             f"SELECT {', '.join(routing_cols)} FROM tasks WHERE id = ?", (tid,)
         ).fetchone()
 
-        assert kb.set_task_owner(conn, tid, "onlooker") is True
+        assert kb.set_task_owner(conn, tid, "voice") is True
 
         after = conn.execute(
             f"SELECT {', '.join(routing_cols)} FROM tasks WHERE id = ?", (tid,)
         ).fetchone()
         assert tuple(before) == tuple(after)
-        assert kb.get_task(conn, tid).owner == "onlooker"
+        assert kb.get_task(conn, tid).owner == "voice"
     finally:
         conn.close()
 
@@ -192,11 +192,11 @@ def test_owner_transfer_is_routing_neutral_under_live_claim(kanban_home):
 def test_set_task_owner_refuses_archived(kanban_home):
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="done", assignee="worker", created_by="alice")
+        tid = kb.create_task(conn, title="done", assignee="worker", created_by="codeo1io")
         assert kb.archive_task(conn, tid) is True
         with pytest.raises(RuntimeError, match="archived"):
-            kb.set_task_owner(conn, tid, "bob")
-        assert kb.get_task(conn, tid).owner == "alice"
+            kb.set_task_owner(conn, tid, "voice")
+        assert kb.get_task(conn, tid).owner == "codeo1io"
     finally:
         conn.close()
 
@@ -205,7 +205,7 @@ def test_set_task_owner_fires_updated_observer_after_commit(kanban_home):
     """Contract #6: notify_task_updated fires with ("owner",) — field names only."""
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="obs", assignee="worker", created_by="alice")
+        tid = kb.create_task(conn, title="obs", assignee="worker", created_by="codeo1io")
         seen: list[tuple[str, tuple[str, ...]]] = []
         real = kb.notify_task_updated
 
@@ -215,7 +215,7 @@ def test_set_task_owner_fires_updated_observer_after_commit(kanban_home):
 
         kb.notify_task_updated = spy
         try:
-            kb.set_task_owner(conn, tid, "bob")
+            kb.set_task_owner(conn, tid, "voice")
         finally:
             kb.notify_task_updated = real
         assert seen == [(tid, ("owner",))]
@@ -231,13 +231,13 @@ def test_set_task_owner_fires_updated_observer_after_commit(kanban_home):
 def test_list_tasks_filters_by_owner(kanban_home):
     conn = kbc.connect()
     try:
-        a = kb.create_task(conn, title="a", assignee="worker", created_by="alice", owner="dana")
-        b = kb.create_task(conn, title="b", assignee="worker", created_by="alice", owner="kim")
-        c = kb.create_task(conn, title="c", assignee="worker", created_by="alice")
-        assert [t.id for t in kb.list_tasks(conn, owner="dana")] == [a]
-        assert [t.id for t in kb.list_tasks(conn, owner="kim")] == [b]
-        # alice owns her own unattributed card via the creator default.
-        assert [t.id for t in kb.list_tasks(conn, owner="alice")] == [c]
+        a = kb.create_task(conn, title="a", assignee="worker", created_by="codeo1io", owner="voice")
+        b = kb.create_task(conn, title="b", assignee="worker", created_by="codeo1io", owner="default")
+        c = kb.create_task(conn, title="c", assignee="worker", created_by="codeo1io")
+        assert [t.id for t in kb.list_tasks(conn, owner="voice")] == [a]
+        assert [t.id for t in kb.list_tasks(conn, owner="default")] == [b]
+        # codeo1io owns her own unattributed card via the creator default.
+        assert [t.id for t in kb.list_tasks(conn, owner="codeo1io")] == [c]
         assert kb.list_tasks(conn, owner="nobody") == []
     finally:
         conn.close()
@@ -341,13 +341,13 @@ def orchestrator_env(tmp_path, monkeypatch):
 def test_kanban_create_owner_param_lands(orchestrator_env):
     from tools import kanban_tools as kt
 
-    out = kt._handle_create({"title": "owned", "assignee": "worker", "owner": "dana"})
+    out = kt._handle_create({"title": "owned", "assignee": "worker", "owner": "voice"})
     d = json.loads(out)
     assert d["ok"] is True
     conn = kbc.connect()
     try:
         task = kb.get_task(conn, d["task_id"])
-        assert task.owner == "dana"
+        assert task.owner == "voice"
         assert task.created_by == "orch"  # owner ≠ creator here by explicit choice
     finally:
         conn.close()
@@ -367,15 +367,15 @@ def test_kanban_show_and_list_include_owner(orchestrator_env):
 
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="shown", assignee="worker", created_by="orch", owner="dana")
+        tid = kb.create_task(conn, title="shown", assignee="worker", created_by="orch", owner="voice")
     finally:
         conn.close()
     shown = json.loads(kt._handle_show({"task_id": tid}))
-    assert shown["task"]["owner"] == "dana"
+    assert shown["task"]["owner"] == "voice"
 
     listed = json.loads(kt._handle_list({}))
     entry = next(t for t in listed["tasks"] if t["id"] == tid)
-    assert entry["owner"] == "dana"
+    assert entry["owner"] == "voice"
 
 
 def test_kanban_create_schema_declares_owner(orchestrator_env):

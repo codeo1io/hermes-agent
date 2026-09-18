@@ -622,6 +622,30 @@ def _cmd_owner_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_owner_audit(args: argparse.Namespace) -> int:
+    """Repeatable board-wide ownership audit (read-only; policy: OWNERS.md v2)."""
+    from hermes_cli.kanban_owner import audit_task_owners
+
+    with kbc.connect_closing() as conn:
+        report = audit_task_owners(conn)
+    healthy = report["counts"]["unowned"] == 0 and report["counts"]["invalid"] == 0
+    if getattr(args, "json", False):
+        _print_json(report)
+        return 0 if healthy else 1
+    counts = report["counts"]
+    print(f"ownership audit: {report['open_cards']} open card(s), "
+          f"roster = {', '.join(report['roster'])}")
+    print(f"  unowned (no owner, no created_by):    {counts['unowned']}")
+    print(f"  invalid owner (outside roster):        {counts['invalid']}")
+    print(f"  owner/assignee divergence (advisory):  {counts['divergence']}")
+    for issue in report["issues"]:
+        print(f"  {issue['kind']}: {issue['id']} — {issue['detail']}")
+    if healthy:
+        print("OK: no unowned or invalid-owner open cards.")
+        return 0
+    return 1
+
+
 def _cmd_set_model(args: argparse.Namespace) -> int:
     model = args.model
     if model is not None and model.lower() in {"none", "-", "null", ""}:
@@ -1278,6 +1302,7 @@ _HANDLERS = {
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "owner": _cmd_owner, "owner-reconcile": _cmd_owner_reconcile,
+    "owner-audit": _cmd_owner_audit,
     "set-model": _cmd_set_model,
     "reclaim": _cmd_reclaim, "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics, "diag": _cmd_diagnostics,
