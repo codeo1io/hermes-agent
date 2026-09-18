@@ -12,9 +12,15 @@ recurrence at 14:54).
 The connect-time choke ``kanban_db_connect._ensure_test_isolation`` must make
 that write impossible from a test context regardless of how the path was
 resolved — env pin, board, or explicit db_path — and must fire BEFORE any
-mkdir/sqlite touch. These tests replay the exact topology against the REAL
-platform root with the pin pointing at the REAL live board path and assert
-the guard raises without creating or mutating anything.
+mkdir/sqlite touch. These tests replay the exact topology — the pin pointing
+at the platform root's board while ``HERMES_HOME`` sits in a sandbox — against
+a SYNTHETIC platform root: the conftest keeps ``HOME`` stable by design ("a
+test that needs HOME isolated sets it explicitly in its own fixture"), so this
+file's fixture pins ``HOME`` at a per-test platform home whose
+``.hermes/kanban.db`` is a minimal real sqlite board. The regression is then
+deterministic on CI (no live board to stat) and on developer boxes (the real
+``~/.hermes`` is never read or touched) — the original file statting the REAL
+live board was red on any fresh clone.
 
 ``@pytest.mark.live_system_guard_bypass`` (the established escape hatch, the
 same marker hermes_state's live-DB guard honors) must keep working for tests
@@ -38,14 +44,29 @@ _REPO = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def pinned_live_env(_hermetic_environment, monkeypatch, tmp_path):
-    """Replay the dispatcher env: ``HERMES_KANBAN_DB`` pinned at the REAL live
-    board, ``HERMES_HOME`` redirected to a per-test sandbox tmp_path."""
-    root = _real_platform_state_root()
-    assert root is not None, "platform state root must resolve for this regression"
+    """Replay the dispatcher env: ``HERMES_KANBAN_DB`` pinned at the platform
+    root's board, ``HERMES_HOME`` redirected to a per-test sandbox tmp_path.
+
+    The platform root is SYNTHETIC (see module docstring): ``HOME`` points at
+    a per-test platform home so ``_real_platform_state_root()`` — which reads
+    HOME, never HERMES_HOME — resolves to it, and its ``kanban.db`` is a real
+    minimal sqlite board (the ``tasks`` sentinel table) so mtime/size probes
+    and the read-only leak check behave exactly as against a live board."""
+    platform_home = tmp_path / "platform-home"
+    root = platform_home / ".hermes"
+    root.mkdir(parents=True)
+    board = root / "kanban.db"
+    con = sqlite3.connect(board)
+    try:
+        con.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT)")
+        con.commit()
+    finally:
+        con.close()
+    monkeypatch.setenv("HOME", str(platform_home))
     sandbox = tmp_path / "worker-home"
     sandbox.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(sandbox))
-    monkeypatch.setenv("HERMES_KANBAN_DB", str(root / "kanban.db"))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(board))
     for var in (
         "HERMES_KANBAN_HOME",
         "HERMES_KANBAN_BOARD",
@@ -53,6 +74,9 @@ def pinned_live_env(_hermetic_environment, monkeypatch, tmp_path):
         "HERMES_KANBAN_GUARD_BYPASS",
     ):
         monkeypatch.delenv(var, raising=False)
+    assert _real_platform_state_root() == root.resolve(), (
+        "synthetic platform root must be what the choke resolves"
+    )
     return root
 
 
@@ -132,6 +156,23 @@ def test_tool_layer_create_refuses_live_board(pinned_live_env):
     finally:
         live.close()
     assert n == 0, "fixture row reached the live board"
+
+
+def test_repair_db_refuses_live_db_with_env_pin(pinned_live_env):
+    """repair_db is a public entry point that opens its own connections via
+    _sqlite_connect — the conftest connect patch never sees it — so the choke
+    itself must refuse the pinned live path (2026-09-18 assess probe:
+    repair_db() returned status='ok' on the pinned production board while
+    connect() refused)."""
+    from hermes_cli import kanban_db_connect as kbc
+
+    root = pinned_live_env
+    before = _live_stat(root)
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kbc.repair_db()  # no db_path arg: resolves via the pin, like connect()
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kbc.repair_db(root / "kanban.db")  # explicit live path refused too
+    assert _live_stat(root) == before, "refused repair must not touch the live DB"
 
 
 # ---------------------------------------------------------------------------

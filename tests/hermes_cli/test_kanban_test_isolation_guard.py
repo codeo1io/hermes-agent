@@ -100,6 +100,49 @@ def test_guard_refuses_production_board_dirs_and_profiles(_pytest_context):
         _ensure_test_isolation(root / "profiles" / "worker" / "kanban.db")
 
 
+# Table-driven shape contract for the deny predicate (2026-09-18): a profile
+# home <root>/profiles/<name>/ is its own root, so every production shape
+# beneath it must be denied too — the pre-fix predicate's profiles rule
+# (len(parts) == 3) covered only the profile's DEFAULT board and let a
+# profile-scoped named board through. Sandboxes and non-board files stay
+# legitimate anywhere under the root, including under a profile home.
+_PATH_SHAPES = [
+    # root-level production boards
+    (("kanban.db",), True),
+    (("kanban", "boards", "second", "kanban.db"), True),
+    (("kanban", "workspaces", "w1", "kanban.db"), True),
+    # profile home = its own root: same production shapes beneath it
+    (("profiles", "worker", "kanban.db"), True),
+    (("profiles", "worker", "kanban", "boards", "second", "kanban.db"), True),
+    (("profiles", "worker", "kanban", "workspaces", "w1", "kanban.db"), True),
+    (("profiles", "deep", "profiles", "nested", "kanban.db"), True),
+    # sandboxes and non-board paths stay legitimate
+    (("tmp", "pytest-x", ".hermes", "kanban.db"), False),
+    (("profiles", "worker", "tmp", "pytest-x", ".hermes", "kanban.db"), False),
+    (("profiles", "worker",), False),
+    (("profiles", "worker", "config.yaml"), False),
+    ((), False),
+]
+
+
+@pytest.mark.parametrize(("rel_parts", "denied"), _PATH_SHAPES)
+def test_guard_deny_predicate_path_shapes(_pytest_context, rel_parts, denied):
+    """The deny predicate is a pure shape contract on path parts relative to
+    the platform root — no file access, so it runs identically on CI (no live
+    board) and on developer boxes (real root, files need not exist)."""
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    root = _real_platform_state_root()
+    assert root is not None
+    path = root.joinpath(*rel_parts)
+    if denied:
+        with pytest.raises(RuntimeError, match="test-isolation guard"):
+            _ensure_test_isolation(path)
+    else:
+        _ensure_test_isolation(path)  # must not raise
+
+
 def test_guard_allows_sandboxed_db_under_real_root(_pytest_context):
     """pytest tmpdirs parked under ~/.hermes are legitimate sandboxes — only
     the production BOARD paths are denied."""

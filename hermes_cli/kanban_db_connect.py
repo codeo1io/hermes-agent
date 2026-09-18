@@ -587,6 +587,12 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
         resolved = path.resolve()
     except OSError:
         resolved = path
+    # Same choke as connect()/init_db(): repair opens its own connections
+    # via _sqlite_connect, so the conftest connect patch never sees it — the
+    # guard must fire here, before the flock or any sqlite touch
+    # (2026-09-18 assess probe: repair_db sailed through on the pinned
+    # production board while connect() refused).
+    _ensure_test_isolation(resolved)
     if _missing_or_empty(resolved):
         return RepairResult(status="missing", db_path=resolved)
 
@@ -673,6 +679,28 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
     return conn, out
 
 
+def _is_production_board_parts(parts: tuple[str, ...]) -> bool:
+    """Deny-list shape test: is ``parts`` (a path relative to a Hermes root)
+    a PRODUCTION board path?
+
+    ``<root>/kanban.db`` and anything under ``<root>/kanban/`` are production.
+    A profile home ``<root>/profiles/<name>/`` is its own root, so the same
+    shapes beneath it are production too — a profile-scoped named board
+    (``profiles/<name>/kanban/boards/<slug>/kanban.db``) must be refused just
+    like a root-level one. Everything else — notably sandbox tempdirs parked
+    under the root or under a profile home (``tmp/...``, ``config.yaml``) —
+    stays legitimate. Shared with the conftest write-guard so the two
+    predicates cannot drift apart again.
+    """
+    if parts == ("kanban.db",):
+        return True
+    if len(parts) >= 2 and parts[0] == "kanban":
+        return True
+    if len(parts) >= 3 and parts[0] == "profiles":
+        return _is_production_board_parts(parts[2:])
+    return False
+
+
 def _ensure_test_isolation(path: Path) -> None:
     """Fail-closed choke point: refuse a PRODUCTION kanban DB from a test-context
     process, before any mkdir/connect/pragma (mirrors ``hermes_state._ensure_test_isolation``).
@@ -691,7 +719,9 @@ def _ensure_test_isolation(path: Path) -> None:
     root": sandboxed homes parked under ``~/.hermes`` (pytest ``--basetemp
     ~/.hermes/tmp/...``) are legitimate, so only the production board files
     themselves are refused: ``<root>/kanban.db``, ``<root>/kanban/`` (boards,
-    workspaces-side DBs), and ``<root>/profiles/<name>/`` kanban paths.
+    workspaces-side DBs), and the same shapes beneath ``<root>/profiles/<name>/``
+    (a profile home is its own root — its named boards and workspaces-side
+    DBs are production too). See :func:`_is_production_board_parts`.
 
     Escape hatch mirrors ``hermes_state._STATE_DB_GUARD_BYPASS``: the
     ``@pytest.mark.live_system_guard_bypass`` conftest wiring flips the module
@@ -717,11 +747,7 @@ def _ensure_test_isolation(path: Path) -> None:
         parts = resolved.relative_to(root).parts
     except ValueError:
         return
-    production = (
-        parts == ("kanban.db",)
-        or (len(parts) >= 2 and parts[0] == "kanban")
-        or (len(parts) == 3 and parts[0] == "profiles")
-    )
+    production = _is_production_board_parts(parts)
     if production:
         raise RuntimeError(
             "kanban test-isolation guard: test attempted to open the "

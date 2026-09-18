@@ -43,7 +43,17 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
     assert default["profile"] == "default"
     assert len(tail["messages"]) == 120
     assert len(older["messages"]) == 79
-    assert len(default["messages"]) == 1
+    if serving_profile:
+        # Classic named-profile home: ``profile=default`` resolves to the default
+        # home beside the profiles tree, which holds one message.
+        assert len(default["messages"]) == 1
+    else:
+        # A custom home nested under the default root is its OWN installation
+        # (sandbox semantics — hermes_constants.get_default_hermes_root treats a
+        # non-profile env home under the native root as a root, so a sandboxed
+        # dashboard can never reach the enclosing home's data). ``profile=default``
+        # therefore resolves to the custom home, not the outer default root.
+        assert len(default["messages"]) == 120
     assert [row["content"] for row in older["messages"] + tail["messages"]] == [
         f"message-{index}" for index in range(199)
     ]

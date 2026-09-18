@@ -1042,13 +1042,24 @@ class TestFTS5Search:
         db.append_message("s1", role="assistant", content="projectionneedle")
         db.append_message("s1", role="user", content="after")
 
+        # Since the readpool redesign, every search checks out its own pooled
+        # read-only connection via _read_ctx() (LIFO pool, _READ_POOL_MAX deep),
+        # so no single connection sees all the traffic. Trace at the seam:
+        # wrap _read_ctx so every connection it yields gets the callback.
         statements = []
-        read_conn = db._get_read_conn() or db._conn
         traced_connections = [db._conn]
-        if read_conn is not db._conn:
-            traced_connections.append(read_conn)
-        for conn in traced_connections:
-            conn.set_trace_callback(statements.append)
+        db._conn.set_trace_callback(statements.append)
+        orig_read_ctx = db._read_ctx
+
+        @contextlib.contextmanager
+        def _tracing_read_ctx():
+            with orig_read_ctx() as conn:
+                if conn not in traced_connections:
+                    traced_connections.append(conn)
+                    conn.set_trace_callback(statements.append)
+                yield conn
+
+        db._read_ctx = _tracing_read_ctx
 
         def context_query_count():
             normalized = (" ".join(sql.upper().split()) for sql in statements)
@@ -1073,6 +1084,7 @@ class TestFTS5Search:
             assert default[0]["context"]
             assert context_query_count() == 2
         finally:
+            del db._read_ctx  # drop the instance shadow; restore class lookup
             for conn in traced_connections:
                 conn.set_trace_callback(None)
 
