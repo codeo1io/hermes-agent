@@ -1,6 +1,7 @@
 """Execution-bearing option detection across interpreters and read-only tools."""
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -49,6 +50,20 @@ def test_real_binaries_execute_leading_dash_program_payload(
     """A PATH marker proves these binaries do not reparse '-program' as an option."""
     if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
         pytest.skip(f"{tool} or script is not installed")
+    if tool == "rg":
+        # rg < 14 reparses a leading-dash --pre payload as an option ("error: Found
+        # argument '-y' ...") and never executes it; the no-reparse contract asserted
+        # below only holds for fixed builds. Skip pre-fix rg rather than assert a
+        # known-unfixed binary — same host-capability class as the skip above.
+        _ver = subprocess.run(
+            [shutil.which("rg"), "--version"], capture_output=True, text=True
+        ).stdout
+        _major = re.search(r"ripgrep (\d+)", _ver)
+        if _major and int(_major.group(1)) < 14:
+            pytest.skip(
+                f"rg {_major.group(1)} reparses leading-dash program payloads; "
+                "contract requires rg >= 14"
+            )
 
     marker = tmp_path / "executed"
     payload = tmp_path / "-payload-marker"

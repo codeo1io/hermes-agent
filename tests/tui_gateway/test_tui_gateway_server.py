@@ -22652,6 +22652,11 @@ def test_load_cfg_raw_sees_replacement_with_pinned_mtime_and_size(monkeypatch, t
     st = cfg.stat()
     other = tmp_path / "other.yaml"
     other.write_text("model:\n  default: aaaa-route\n", encoding="utf-8")
+    # The cache's change key includes st_ctime_ns, which cannot be pinned from user space —
+    # but inode timestamps come from the kernel's coarse clock, so a replacement performed
+    # within the same tick as the original write leaves ctime unchanged and the key equal.
+    # Cross a tick boundary so the ctime half of the guard is genuinely exercised.
+    time.sleep(0.2)
     shutil.copy2(other, cfg)
     os.utime(cfg, ns=(st.st_atime_ns, st.st_mtime_ns))
     assert server._load_cfg_raw()["model"]["default"] == "aaaa-route"
