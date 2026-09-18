@@ -71,8 +71,8 @@ def test_effective_owner_falls_back_to_created_by(kanban_home):
 def test_effective_owner_prefers_explicit_owner(kanban_home):
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="owned", assignee="w", created_by="alice", owner="bob")
-        assert kb.get_task(conn, tid).effective_owner == "bob"
+        tid = kb.create_task(conn, title="owned", assignee="w", created_by="codeo1io", owner="voice")
+        assert kb.get_task(conn, tid).effective_owner == "voice"
     finally:
         conn.close()
 

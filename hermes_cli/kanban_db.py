@@ -1117,12 +1117,31 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
 def _owner_or_none(owner: Optional[str]) -> Optional[str]:
     """Free-text owner label: stripped, ``""``/whitespace → None.
 
-    Deliberately NOT profile-validated — owner is an accountability label
-    (person/team), never a dispatch target, so it keeps whatever casing the
-    writer chose. Lowercasing it like ``assignee`` would corrupt free text."""
+    Deliberately NOT lowercased like ``assignee`` — it is an accountability
+    label, never a dispatch target, so it keeps the writer's casing. Also
+    used to canonicalize READ-side owner filters, so it must stay validation-
+    free: filtering by an unknown name is a legitimate empty result. Write
+    paths validate through :func:`_validated_owner` instead.
+    """
     if owner is None:
         return None
     return str(owner).strip() or None
+
+
+def _validated_owner(owner: Optional[str]) -> Optional[str]:
+    """``_owner_or_none`` + roster validation, for OWNER WRITE paths only.
+
+    None/blank passes through (the ``owner = created_by`` write-time default
+    then applies); any other value must be in the roster of record
+    (``kanban_owner.validate_owner``) or a ``ValueError`` naming the roster
+    is raised. Read-side filters use plain ``_owner_or_none``.
+    """
+    from hermes_cli.kanban_owner import validate_owner
+
+    value = _owner_or_none(owner)
+    if value is not None:
+        validate_owner(value)
+    return value
 
 
 def _resolve_project_link(
@@ -1290,7 +1309,7 @@ def create_task(
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
     assignee = _canonical_assignee(assignee)
-    owner = _owner_or_none(owner) or created_by
+    owner = _validated_owner(owner) or created_by
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
@@ -1572,8 +1591,11 @@ def set_task_owner(conn: sqlite3.Connection, task_id: str, owner: Optional[str])
     dispatch target — so it is settable under a live claim (the human owning the
     outcome can change even while a worker runs) and never touches ``assignee``,
     claim state, or the failure counters. Refused only on archived tasks.
+
+    An explicit non-blank owner must be in the roster of record
+    (:func:`_validated_owner`); None/'' stays the documented clear signal.
     """
-    owner = _owner_or_none(owner)
+    owner = _validated_owner(owner)
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, owner FROM tasks WHERE id = ?", (task_id,)

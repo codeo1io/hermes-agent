@@ -231,3 +231,55 @@ touched; unrelated to this feature.
 - Dashboard SPA → API yes, prebuilt dist out of in-tree scope; desktop drawer
   in-tree.
 - Clearing owner → allowed via `none`/`-` for symmetry with assign's unassign.
+
+## Enforcement layer — roster validation + board audit (follow-up card t_c39dfaac)
+
+The owner field shipped routing-neutral and *free text*. The enforcement layer
+(OWNERS.md v2, roster of record §0) tightens exactly one thing on top: an
+**explicit** owner value on a write must name a real identity — one of
+`default`, `voice`, `codeo1io` — or the write is rejected with a `ValueError`
+naming the roster. Everything else is unchanged and deliberately so:
+
+- **Blank/None is never rejected** — it means "use the default" and falls
+  through to the write-time `owner = created_by` stamp (which may itself be a
+  provenance string like `"user"` from the CLI or `"auto-decomposer"`;
+  provenance is never validated — it is a record, not a choice).
+- **`created_by` fallback values are not validated** — the default path stamps
+  whatever the creating surface recorded. An off-roster *default* is not a
+  write-time error; it becomes visible via the audit below instead (that is
+  the point of an audit: it sees what validation cannot, because defaults and
+  pre-validation rows cannot raise at write time).
+- **Read paths never validate** — `list_tasks(owner=...)` filtering by an
+  unknown name is a legitimate empty result, not an error.
+- **Roster override**: set `HERMES_OWNER_ROSTER=alpha,beta` (comma-separated)
+  to grow/change the roster without code change; unset it and the roster of
+  record (`default, voice, codeo1io`) applies.
+- **Raw-SQL system writes are exempt**: `reconcile_task_owners` (backfill) and
+  decompose fan-out stamp provenance/creator values by design and must not
+  raise on legacy names.
+
+New primitives (`hermes_cli/kanban_owner.py`):
+
+- `validate_owner(value)` — strict roster check for explicit values; raises
+  `ValueError("invalid owner 'x': must be one of …")` on unknown names.
+- `audit_task_owners(conn)` — **read-only, repeatable** board audit over OPEN
+  cards (`todo/triage/ready/running/blocked/review`; triage is a live
+  pre-work status — cards there still need a resolvable owner); reports
+  `unowned` (no owner and
+  no `created_by` fallback), `invalid` (resolved owner outside the roster), and
+  `owner != assignee` **divergence** (OWNERS.md v2 §3 invariant — advisory:
+  legitimate owner/assignee splits exist once accountability and routing part
+  ways). Exit condition for a healthy board: `unowned == 0 and invalid == 0`.
+  Terminal/archived cards are historical record and exempt.
+
+CLI: `hermes kanban owner-audit` (text or `--json`) prints counts + per-issue
+detail and exits 1 while unowned/invalid open cards exist. Unlike the one-shot
+`owner-reconcile` backfill, it never writes.
+
+Live board at enforcement-merge time (2026-09-18, 210 open cards): the audit
+surfaces the two known defect classes — the ~1,5xx fixture corpus (§5.3:
+deliberately unowned until area-3 disposition) and a handful of pre-validation
+rows with `owner='user'` (CLI provenance default) or owner/assignee split.
+These are findings, not blockers: the audit exists to keep them visible until
+dispositioned.
+

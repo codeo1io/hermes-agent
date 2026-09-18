@@ -253,6 +253,11 @@ _SPECS = [
          "(mixed-version window rows the first-add migration missed). Dry-run by default; "
          "guarded by PRAGMA user_version so it runs exactly once per board"
     )),
+    _cmd("owner-audit", [_json_flag()], help=(
+         "Read-only ownership audit over the whole board (repeatable, unlike the "
+         "one-shot owner-reconcile): counts open cards with no resolvable owner, "
+         "an owner outside the roster of record, or owner != assignee divergence"
+    )),
     _cmd("set-model", [
         _TASK_ID,
         _arg("model", nargs="?", help="Model to pin the worker to (or 'none' to clear the override)"),

@@ -77,8 +77,8 @@ def _get(client, tid: str) -> dict:
 
 
 def test_create_accepts_and_returns_owner(client):
-    task = _create(client, owner="alice")
-    assert task["owner"] == "alice"
+    task = _create(client, owner="codeo1io")
+    assert task["owner"] == "codeo1io"
 
 
 def test_create_without_owner_defaults_to_creator(client, conn):
@@ -92,21 +92,21 @@ def test_create_without_owner_defaults_to_creator(client, conn):
 
 
 def test_patch_transfers_owner_and_audits(client, conn):
-    task = _create(client, owner="alice")
-    r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": "bob"})
+    task = _create(client, owner="codeo1io")
+    r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": "voice"})
     assert r.status_code == 200, r.text
-    assert r.json()["task"]["owner"] == "bob"
+    assert r.json()["task"]["owner"] == "voice"
     ev = [e for e in kb.list_events(conn, task["id"]) if e.kind == "owner_transferred"]
-    assert ev and ev[-1].payload == {"from": "alice", "to": "bob"}
+    assert ev and ev[-1].payload == {"from": "codeo1io", "to": "voice"}
 
 
 def test_patch_clear_owner_and_empty_string_both_clear(client):
-    task = _create(client, owner="alice")
+    task = _create(client, owner="codeo1io")
     r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"clear_owner": True})
     assert r.status_code == 200, r.text
     assert r.json()["task"]["owner"] is None
 
-    r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": "carol"})
+    r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": "default"})
     assert r.status_code == 200, r.text
     # "" is the same explicit-clear signal as on assignee.
     r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": ""})
@@ -115,26 +115,26 @@ def test_patch_clear_owner_and_empty_string_both_clear(client):
 
 
 def test_patch_without_owner_leaves_it_alone(client):
-    task = _create(client, owner="alice")
+    task = _create(client, owner="codeo1io")
     r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"priority": 3})
     assert r.status_code == 200, r.text
-    assert r.json()["task"]["owner"] == "alice"
+    assert r.json()["task"]["owner"] == "codeo1io"
 
 
 def test_patch_owner_under_a_live_claim_is_routing_neutral(client, conn):
-    task = _create(client, owner="alice")
+    task = _create(client, owner="codeo1io")
     tid = task["id"]
     with kb.write_txn(conn):
         conn.execute(
             "UPDATE tasks SET status = 'running', claim_lock = ?, consecutive_failures = 2, "
             "last_failure_error = 'boom' WHERE id = ?", ("cl-123", tid))
-    r = client.patch(f"/api/plugins/kanban/tasks/{tid}", json={"owner": "bob"})
+    r = client.patch(f"/api/plugins/kanban/tasks/{tid}", json={"owner": "voice"})
     assert r.status_code == 200, r.text
     row = conn.execute(
         "SELECT assignee, claim_lock, consecutive_failures, last_failure_error, status "
         "FROM tasks WHERE id = ?", (tid,)).fetchone()
     # Transfer succeeds mid-run AND every routing column is untouched.
-    assert r.json()["task"]["owner"] == "bob"
+    assert r.json()["task"]["owner"] == "voice"
     assert row["assignee"] == "worker"
     assert row["claim_lock"] == "cl-123"
     assert row["consecutive_failures"] == 2
@@ -143,9 +143,9 @@ def test_patch_owner_under_a_live_claim_is_routing_neutral(client, conn):
 
 
 def test_patch_owner_on_archived_task_is_a_400(client, conn):
-    task = _create(client, owner="alice")
+    task = _create(client, owner="codeo1io")
     assert kb.archive_task(conn, task["id"])
-    r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": "bob"})
+    r = client.patch(f"/api/plugins/kanban/tasks/{task['id']}", json={"owner": "voice"})
     assert r.status_code == 400
     assert "archived" in r.json()["detail"]
 
@@ -154,15 +154,15 @@ def test_patch_owner_on_archived_task_is_a_400(client, conn):
 
 
 def test_bulk_sets_and_clears_owner(client):
-    t1, t2 = _create(client, owner="alice"), _create(client)
+    t1, t2 = _create(client, owner="codeo1io"), _create(client)
     r = client.post(
         "/api/plugins/kanban/tasks/bulk",
-        json={"ids": [t1["id"], t2["id"]], "owner": "team-a"},
+        json={"ids": [t1["id"], t2["id"]], "owner": "default"},
     )
     assert r.status_code == 200, r.text
     assert all(entry["ok"] for entry in r.json()["results"])
-    assert _get(client, t1["id"])["owner"] == "team-a"
-    assert _get(client, t2["id"])["owner"] == "team-a"
+    assert _get(client, t1["id"])["owner"] == "default"
+    assert _get(client, t2["id"])["owner"] == "default"
 
     r = client.post(
         "/api/plugins/kanban/tasks/bulk",
@@ -170,15 +170,15 @@ def test_bulk_sets_and_clears_owner(client):
     )
     assert r.status_code == 200, r.text
     assert _get(client, t1["id"])["owner"] is None
-    assert _get(client, t2["id"])["owner"] == "team-a"
+    assert _get(client, t2["id"])["owner"] == "default"
 
 
 def test_bulk_owner_refusal_on_archived_is_reported_not_raised(client, conn):
-    task = _create(client, owner="alice")
+    task = _create(client, owner="codeo1io")
     assert kb.archive_task(conn, task["id"])
     r = client.post(
         "/api/plugins/kanban/tasks/bulk",
-        json={"ids": [task["id"]], "owner": "bob"},
+        json={"ids": [task["id"]], "owner": "voice"},
     )
     assert r.status_code == 200, r.text
     entry = r.json()["results"][0]
