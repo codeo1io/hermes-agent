@@ -131,6 +131,13 @@ def test_guard_inert_outside_test_context(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.delenv("PYTEST_VERSION", raising=False)
     monkeypatch.delenv("HERMES_TEST_ISOLATION", raising=False)
+    # The ancestry signal survives the env deletion by design (it is the
+    # belt for children spawned with rebuilt envs) — but THIS test simulates
+    # "not a test process", and under run_tests_parallel.py / nested pytest
+    # the process tree genuinely has a pytest ancestor, which would flip the
+    # guard back on. Neutralize it: the guard is memoised, so patch the
+    # module global _in_test_context consults.
+    monkeypatch.setattr("hermes_state_guard._PYTEST_ANCESTOR", False)
     # Not memoised in this process yet: without psutil ancestors there is
     # nothing pytest-shaped above us inside the test runner either, so the
     # guard must stay silent and simply return.
