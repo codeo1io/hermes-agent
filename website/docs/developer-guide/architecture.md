@@ -50,6 +50,24 @@ This page is the top-level map of Hermes Agent internals. Use it to orient yours
 
 ## Directory Structure
 
+### Hermes root resolution (`hermes_constants`)
+
+`get_hermes_home()` is the path anchor for all user state; `get_default_hermes_root()`
+is the *shared* root it resolves against when computing defaults. The resolution
+rules, in order: a native `~/.hermes` is the root; a profile home
+(`<root>/profiles/<name>`) maps back to its parent root (profiles share the
+root's kanban board and other multi-profile surfaces) — but only when `<name>`
+is not a dot-name: `profiles/.sandbox` and similar hidden entries are treated
+as their own root (profile-internal scratch dirs do not inherit the shared
+root); and any other
+`HERMES_HOME` — including one parked *under* the native root, e.g. a pytest
+sandbox at `~/.hermes/tmp/...` — is treated as its own root rather than
+collapsing to the parent. That last rule is deliberate (2026-09-17 kanban
+fixture-leak regression): collapsing a sandbox-under-root back to the production
+root made every kanban path resolve to the live board. Callers should never
+re-derive these rules — always go through `hermes_constants`, never hardcode
+`~/.hermes`.
+
 ```text
 hermes-agent/
 ├── run_agent.py              # AIAgent facade — loop lives in agent/conversation_loop.py + agent/turn_*.py

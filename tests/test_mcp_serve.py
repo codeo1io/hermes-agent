@@ -24,6 +24,19 @@ import pytest
 # Fixtures
 # ---------------------------------------------------------------------------
 
+def _bump_db_mtime(path) -> None:
+    """Advance a db file's mtime deterministically.
+
+    os.utime(path, None) stamps the current time from the kernel's coarse
+    inode clock: a write and a utime(None) inside the same tick produce
+    IDENTICAL mtimes, so the EventBridge poll gate (equality check against
+    the baseline mtime) skips the tick and the test sees zero events. Stat
+    the file and advance a full second instead.
+    """
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path, monkeypatch):
     """Redirect HERMES_HOME to a temp directory."""
@@ -1202,6 +1215,12 @@ class TestEventBridgePollE2E:
         first_calls = db.call_count
         assert first_calls >= 1
 
+        # Poll 1's own _load_sessions_index() settles the state.db WAL header
+        # (journal delete -> WAL rewrite), advancing the gate mtime the bridge
+        # recorded at poll start. Re-baseline so poll 2 measures what this
+        # test actually asserts: no change since the bridge last looked.
+        bridge._state_db_mtime = mcp_serve._read_state_db_mtime()
+
         # Second poll — files unchanged, should skip entirely
         bridge._poll_once(db)
         assert db.call_count == first_calls, \
@@ -1258,8 +1277,8 @@ class TestEventBridgePollE2E:
         )
         conn.commit()
         conn.close()
-        # Touch the DB file to update mtime (WAL mode may not update mtime on small writes)
-        os.utime(db_path, None)
+        # Advance the DB file's mtime (WAL mode may not update mtime on small writes)
+        _bump_db_mtime(db_path)
 
         # Update sessions.json updated_at to trigger re-check
         sessions_data["agent:main:telegram:dm:new"]["updated_at"] = "2026-03-29T15:00:10"
@@ -1374,7 +1393,7 @@ class TestEventBridgePollE2E:
             "id": 2, "role": "assistant", "content": "arrived after start",
             "timestamp": "2026-03-29T15:05:00",
         })
-        os.utime(db_path, None)  # bump mtime so the poll gate opens
+        _bump_db_mtime(db_path)  # bump mtime so the poll gate opens
         bridge._poll_once(DB())
         events = bridge.poll_events(after_cursor=0)["events"]
         assert len(events) == 1
@@ -1412,7 +1431,7 @@ class TestEventBridgePollE2E:
             "id": 1, "role": "user", "content": "hello after baseline",
             "timestamp": "2026-03-29T15:10:00",
         }]
-        os.utime(db_path, None)
+        _bump_db_mtime(db_path)
         bridge._poll_once(DB())
 
         events = bridge.poll_events(after_cursor=0)["events"]

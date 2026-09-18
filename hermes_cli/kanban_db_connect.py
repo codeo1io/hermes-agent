@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 import random
 import re
 import secrets
@@ -32,6 +33,13 @@ _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
+
+# ``@pytest.mark.live_system_guard_bypass`` escape hatch, mirroring
+# ``hermes_state._STATE_DB_GUARD_BYPASS``: the hermetic conftest flips the
+# module global for a marked test; a child process exports the env twin
+# instead (a module global cannot cross a process boundary).
+_KANBAN_GUARD_BYPASS = False
+_KANBAN_GUARD_BYPASS_ENV = "HERMES_KANBAN_GUARD_BYPASS"
 
 # Cap on ``<db>.corrupt.<hash>.bak`` quarantines per board: content-addressing
 # dedupes identical bytes, but mutating corruption mints a new fingerprint each
@@ -579,6 +587,12 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
         resolved = path.resolve()
     except OSError:
         resolved = path
+    # Same choke as connect()/init_db(): repair opens its own connections
+    # via _sqlite_connect, so the conftest connect patch never sees it — the
+    # guard must fire here, before the flock or any sqlite touch
+    # (2026-09-18 assess probe: repair_db sailed through on the pinned
+    # production board while connect() refused).
+    _ensure_test_isolation(resolved)
     if _missing_or_empty(resolved):
         return RepairResult(status="missing", db_path=resolved)
 
@@ -665,6 +679,87 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
     return conn, out
 
 
+def _is_production_board_parts(parts: tuple[str, ...]) -> bool:
+    """Deny-list shape test: is ``parts`` (a path relative to a Hermes root)
+    a PRODUCTION board path?
+
+    ``<root>/kanban.db`` and anything under ``<root>/kanban/`` are production.
+    A profile home ``<root>/profiles/<name>/`` is its own root, so the same
+    shapes beneath it are production too — a profile-scoped named board
+    (``profiles/<name>/kanban/boards/<slug>/kanban.db``) must be refused just
+    like a root-level one. Everything else — notably sandbox tempdirs parked
+    under the root or under a profile home (``tmp/...``, ``config.yaml``) —
+    stays legitimate. Shared with the conftest write-guard so the two
+    predicates cannot drift apart again.
+    """
+    if parts == ("kanban.db",):
+        return True
+    if len(parts) >= 2 and parts[0] == "kanban":
+        return True
+    if len(parts) >= 3 and parts[0] == "profiles":
+        return _is_production_board_parts(parts[2:])
+    return False
+
+
+def _ensure_test_isolation(path: Path) -> None:
+    """Fail-closed choke point: refuse a PRODUCTION kanban DB from a test-context
+    process, before any mkdir/connect/pragma (mirrors ``hermes_state._ensure_test_isolation``).
+
+    The conftest write-guard (``tests/conftest.py::_kanban_write_guard``) only
+    patches ``connect`` for modules already in ``sys.modules`` at fixture time,
+    so the FIRST test in a file that lazily imports ``hermes_cli.kanban_db``
+    inside its body writes before any patch exists (2026-09-17: the first
+    parametrized case of ``test_kanban_creator_origin`` / ``test_kanban_provenance``
+    leaked ``owner``/``child`` fixture rows into the live ``~/.hermes/kanban.db``).
+    This guard instead arms on env/ancestry test signals — see
+    ``hermes_state_guard._in_test_context`` — so it is active from the very
+    first call, patching or not.
+
+    Deny predicate is deliberately narrower than "anywhere under the real
+    root": sandboxed homes parked under ``~/.hermes`` (pytest ``--basetemp
+    ~/.hermes/tmp/...``) are legitimate, so only the production board files
+    themselves are refused: ``<root>/kanban.db``, ``<root>/kanban/`` (boards,
+    workspaces-side DBs), and the same shapes beneath ``<root>/profiles/<name>/``
+    (a profile home is its own root — its named boards and workspaces-side
+    DBs are production too). See :func:`_is_production_board_parts`.
+
+    Escape hatch mirrors ``hermes_state._STATE_DB_GUARD_BYPASS``: the
+    ``@pytest.mark.live_system_guard_bypass`` conftest wiring flips the module
+    global (``_KANBAN_GUARD_BYPASS``), and spawned children export the env twin
+    (``HERMES_KANBAN_GUARD_BYPASS=1``) instead of stripping markers.
+    """
+    if _KANBAN_GUARD_BYPASS or os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
+        return
+    try:
+        from hermes_state_guard import _in_test_context, _real_platform_state_root
+    except ImportError:
+        return
+    if not _in_test_context():
+        return
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return
+    root = _real_platform_state_root()
+    if root is None:
+        return
+    try:
+        parts = resolved.relative_to(root).parts
+    except ValueError:
+        return
+    production = _is_production_board_parts(parts)
+    if production:
+        raise RuntimeError(
+            "kanban test-isolation guard: test attempted to open the "
+            f"production kanban DB at {resolved} (under real Hermes root {root}). "
+            "Tests must run against a temporary HERMES_HOME outside the real "
+            "root — or export HERMES_KANBAN_GUARD_BYPASS=1 for a test that "
+            "genuinely needs the live board."
+        )
+
+
+
+
 def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
     every connection so a re-created file stays robust; the first connection
@@ -673,6 +768,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    _ensure_test_isolation(path)
     from agent.delegation_context import kanban_path_is_fenced
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
@@ -758,6 +854,7 @@ def init_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> P
     migration pass — callers that know the on-disk schema may have drifted
     (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    _ensure_test_isolation(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:

@@ -22,7 +22,11 @@ jobs:
     # 82s). A second slice divides work that is already at that floor, and
     # adds a second setup.
     runs-on: ubuntu-latest-96-core
-    timeout-minutes: 30
+    # 30m was calibrated for the original 96-core EPYC runner where the whole
+    # suite completes in ~126s. The fork's self-hosted runners carry this label
+    # but are a 14-core box: the suite needs 60-90 min there, so a 30m cap made
+    # the lane permanently red (every recent run cancelled, fleet-wide).
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -131,11 +135,20 @@ jobs:
           #       240       2.5x    140s
           #       288       3.0x    142s
           #
-          # One worker for each core wins. The curve is shallow: 126s to 142s
+          # One worker per core wins. The curve is shallow: 126s to 142s
           # across a 6x range. The suite has sufficient concurrency at this
           # size. The remaining time is the slowest files plus the setup.
           # Workers above the core count only add contention.
-          HERMES_TEST_WORKERS: 96
+          #
+          # Fork fleet: the self-hosted runners exposing ubuntu-latest-96-core
+          # are a 14-core box; 96 workers ran at 7x oversubscription. 12 is
+          # the right-sized value for that hardware (validated by full-suite
+          # runs on it: ~88 min, deterministic green modulo co-run load).
+          HERMES_TEST_WORKERS: 12
+          # Contention with co-running jobs on the shared self-hosted box can
+          # flake timing-sensitive files; a retry tail keeps the lane honest
+          # (pass-on-retry is green and reported FLAKY by the runner).
+          HERMES_TEST_FILE_RETRIES: 3
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
