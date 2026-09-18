@@ -3,6 +3,7 @@ Split out of ``hermes_cli/doctor.py``, which re-exports every name so ``hermes_c
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from hermes_cli.doctor_report import (
@@ -462,6 +463,83 @@ def _check_memory_provider(should_fix: bool, f: Finding) -> None:
             _fail_and_issue(*missing_row, missing_issue, f.issues)
     except Exception as _e:
         check_warn(f"{label} check failed", str(_e))
+
+
+def _proc_env_pins_live_board(pid: str, live_db: Path, proc_root: "str | Path" = "/proc") -> "str | None":
+    """Return the pinned ``HERMES_KANBAN_DB`` value when *pid*'s env pins *live_db*.
+
+    Best-effort /proc read (permission-gated on hardened hosts); ``None`` when the
+    process is gone, unreadable, or carries no pin. This is the forensic technique
+    that identified the 2026-09-17 live-board leak source (pytest 1796037).
+    ``proc_root`` exists for tests (a fake tree); production passes /proc.
+    """
+    try:
+        raw = Path(proc_root, pid, "environ").read_bytes()
+    except OSError:
+        return None
+    for entry in raw.split(b"\0"):
+        if entry.startswith(b"HERMES_KANBAN_DB="):
+            value = entry.split(b"=", 1)[1].decode("utf-8", "replace").strip()
+            try:
+                if value and Path(value).expanduser().resolve() == live_db:
+                    return value
+            except OSError:
+                return None
+    return None
+
+
+def _iter_proc_pytest_pids(proc_root: "str | Path" = "/proc") -> "list[str]":
+    """PIDs of live processes whose argv mentions pytest (cmdline, not comm)."""
+    pids: list[str] = []
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return pids
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            cmd = Path(proc_root, name, "cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"pytest" in cmd:
+            pids.append(name)
+    return pids
+
+
+@doctor_check("")  # best-effort: a /proc scan must never break doctor
+def _check_live_board_pin_leak(should_fix: bool, f: Finding) -> None:
+    """Flag any running pytest whose env pins the live kanban board DB.
+
+    The operational leak class (2026-09-17): a worker's verification pytest
+    inherited the dispatcher's ``HERMES_KANBAN_DB`` pin and wrote fixture cards
+    into the LIVE board across 7 waves (156 rows; two real worker runs burned).
+    This check is the board-level tripwire — it finds any live recurrence, names
+    the PID, and gives the operator the kill/verify commands.
+    """
+    from hermes_cli.kanban_db import kanban_db_path as _kdp
+    try:
+        live_db = Path(_kdp()).expanduser().resolve()
+    except Exception as exc:
+        check_info(f"kanban board path unavailable ({exc}) — skipping live-pin scan")
+        return
+    if os.name != "posix" or not Path("/proc").is_dir():
+        return
+    hits: "list[tuple[str, str]]" = []
+    for pid in _iter_proc_pytest_pids():
+        pin = _proc_env_pins_live_board(pid, live_db)
+        if pin:
+            hits.append((pid, pin))
+    _section("Kanban live-board pin leak")
+    if not hits:
+        check_ok(f"no running pytest pins the live board ({live_db.name})")
+        return
+    for pid, pin in hits:
+        _fail_and_issue(
+            f"pytest pid {pid} carries the live-board pin", pin,
+            f"kill {pid} (its parent worker spawned it with HERMES_KANBAN_DB={pin}); "
+            "then sweep leaked fixture rows (titles a0-a4/b0-b2 or 't1', created_by NULL) "
+            "with a timestamped board backup", f.issues)
 
 
 @doctor_check("")  # best-effort: profile enumeration must never break doctor

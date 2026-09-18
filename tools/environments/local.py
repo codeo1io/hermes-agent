@@ -868,6 +868,30 @@ class LocalEnvironment(BaseEnvironment):
                 self.cwd, safe_cwd)
         self.cwd = safe_cwd
 
+    def _make_run_env_for(self, cmd_string: str) -> dict:
+        """Run env for one command, applying the worker-lineage test-runner guard.
+
+        ``_make_run_env`` applies the shared guards but never sees the command;
+        this wrapper is the one spawn surface that does. When the command is a
+        test-runner invocation (pytest / run_tests_parallel / unittest) inside a
+        kanban worker lineage, the live-board location pins are repointed at a
+        per-lineage scratch board: a leaking fixture then writes there, never to
+        the live board (2026-09-17 leak class — the pin outranked every test
+        sandbox and 156 fixture rows landed on the live board). Ordinary
+        commands keep their pinned board: fenced descendants legitimately read
+        it (kanban show in a repro script).
+        """
+        from agent.delegation_context import (
+            DELEGATED_CHILD_ENV_MARKER, kanban_env_for_child_command,
+            looks_like_test_runner_command,
+        )
+        if not (os.environ.get("HERMES_KANBAN_TASK") or os.environ.get(DELEGATED_CHILD_ENV_MARKER)):
+            return _make_run_env(self.env)
+        if not looks_like_test_runner_command(cmd_string):
+            return _make_run_env(self.env)
+        base = dict(os.environ | self.env)
+        return kanban_env_for_child_command(cmd_string, _make_run_env(base))
+
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
         bash = _find_bash()
@@ -878,7 +902,7 @@ class LocalEnvironment(BaseEnvironment):
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
         self._recover_cwd()
         proc = subprocess.Popen(
-            args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
+            args, text=True, env=self._make_run_env_for(cmd_string), encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             start_new_session=True, cwd=self.cwd,
