@@ -196,6 +196,31 @@ def test_audit_ignores_terminal_cards(kanban_home, conn):
     assert tid not in [i["id"] for i in report["issues"]]
 
 
+def test_audit_covers_triage_cards(kanban_home, conn):
+    """Regression: triage is a live pre-work status — unowned and off-roster
+    owners in triage are findings the audit must report, not skip."""
+    _seed_board(conn)
+    t_unowned = kb.create_task(conn, title="awaiting flesh-out",
+                               assignee="default", created_by="default",
+                               triage=True)
+    t_invalid = kb.create_task(conn, title="bad owner in triage",
+                               assignee="default", created_by="default",
+                               triage=True)
+    conn.execute("UPDATE tasks SET owner = NULL, created_by = NULL WHERE id = ?",
+                 (t_unowned,))
+    conn.execute("UPDATE tasks SET owner = 'haxor' WHERE id = ?", (t_invalid,))
+    conn.commit()
+
+    report = ko.audit_task_owners(conn)
+    ids = {i["id"]: i["kind"] for i in report["issues"]}
+    assert ids.get(t_unowned) == "unowned"
+    assert ids.get(t_invalid) == "invalid"
+    assert report["counts"]["unowned"] == 1
+    assert report["counts"]["invalid"] == 1
+    assert t_unowned in report["unowned"]
+    assert {"id": t_invalid, "owner": "haxor"} in report["invalid"]
+
+
 def test_audit_is_repeatable_and_read_only(kanban_home, conn):
     _seed_board(conn)
     before = conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]

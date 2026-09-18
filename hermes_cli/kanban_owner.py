@@ -18,7 +18,8 @@ Two primitives live here:
 ``audit_task_owners(conn)``
     Read-only, repeatable board audit (unlike the one-shot G4
     ``reconcile_task_owners`` backfill, this never writes). It reports, per
-    OPEN card (``todo``/``ready``/``running``/``blocked``/``review``):
+    OPEN card
+    (``todo``/``triage``/``ready``/``running``/``blocked``/``review``):
 
     - ``unowned`` — no stored owner AND no creator to fall back on;
     - ``invalid`` — resolved owner (``owner ?? created_by``) outside the roster;
@@ -42,7 +43,10 @@ DEFAULT_OWNER_ROSTER = ("default", "voice", "codeo1io")
 
 # Statuses of cards still in play. Everything else (done/archived and the
 # dispatcher-internal scheduled state) is historical record for audit purposes.
-OPEN_STATUSES = ("todo", "ready", "running", "blocked", "review")
+# 'triage' is a live pre-work status (kanban_create triage=True; the card is
+# awaiting flesh-out) — an unowned or invalid-owner card sitting in triage is
+# still a finding, so it must be audited, not skipped.
+OPEN_STATUSES = ("todo", "triage", "ready", "running", "blocked", "review")
 
 
 def owner_roster() -> tuple[str, ...]:

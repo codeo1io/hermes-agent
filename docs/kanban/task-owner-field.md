@@ -263,7 +263,9 @@ New primitives (`hermes_cli/kanban_owner.py`):
 - `validate_owner(value)` — strict roster check for explicit values; raises
   `ValueError("invalid owner 'x': must be one of …")` on unknown names.
 - `audit_task_owners(conn)` — **read-only, repeatable** board audit over OPEN
-  cards (`todo/ready/running/blocked/review`); reports `unowned` (no owner and
+  cards (`todo/triage/ready/running/blocked/review`; triage is a live
+  pre-work status — cards there still need a resolvable owner); reports
+  `unowned` (no owner and
   no `created_by` fallback), `invalid` (resolved owner outside the roster), and
   `owner != assignee` **divergence** (OWNERS.md v2 §3 invariant — advisory:
   legitimate owner/assignee splits exist once accountability and routing part
@@ -274,7 +276,7 @@ CLI: `hermes kanban owner-audit` (text or `--json`) prints counts + per-issue
 detail and exits 1 while unowned/invalid open cards exist. Unlike the one-shot
 `owner-reconcile` backfill, it never writes.
 
-Live board at enforcement-merge time (2026-09-18, 208 open cards): the audit
+Live board at enforcement-merge time (2026-09-18, 210 open cards): the audit
 surfaces the two known defect classes — the ~1,5xx fixture corpus (§5.3:
 deliberately unowned until area-3 disposition) and a handful of pre-validation
 rows with `owner='user'` (CLI provenance default) or owner/assignee split.
