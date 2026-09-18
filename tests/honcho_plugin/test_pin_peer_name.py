@@ -16,6 +16,7 @@ chosen ``user_peer_id`` can be asserted without touching the network.
 
 import hashlib
 import json
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,6 +24,16 @@ import pytest
 from plugins.memory.honcho.client import HonchoClientConfig
 from plugins.memory.honcho.session import HonchoSessionManager
 from plugins.memory.honcho.session_peers import HonchoPeerUnresolvedError
+
+
+def _bump_mtime_distinct(path):
+    """Force the file's mtime to a strictly later tick.
+
+    HonchoMemoryProvider.identity_signature memoizes on (path, mtime_ns, size); a same-size
+    rewrite can land inside the previous write's kernel timestamp tick, which would keep the
+    memo serving the stale signature (same class as the state.db poll gate)."""
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns + 1_000_000_000, st.st_mtime_ns + 1_000_000_000))
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +575,9 @@ class TestPinTransition:
         cfg_path.write_text(json.dumps({**base, "sessionPeerPrefix": True, "sessionAiPeerPrefix": False}))
         sig_user_only = provider.identity_signature()["session_prefixing"]
         cfg_path.write_text(json.dumps({**base, "sessionPeerPrefix": True, "sessionAiPeerPrefix": True}))
+        # The signature memo keys on (mtime_ns, size); a same-size rewrite can land in the
+        # same kernel timestamp tick, so force the clock apart (repo flake policy).
+        _bump_mtime_distinct(cfg_path)
         sig_both = provider.identity_signature()["session_prefixing"]
 
         assert sig_user_only != sig_both
@@ -581,6 +595,9 @@ class TestPinTransition:
         cfg_path.write_text(json.dumps({**base, "hosts": {"hermes": {"workspace": "old"}}}))
         sig_old = provider.identity_signature()["workspace"]
         cfg_path.write_text(json.dumps({**base, "hosts": {"hermes": {"workspace": "new"}}}))
+        # Same-size rewrite can share the prior write's mtime tick; the memo would then
+        # keep serving the "old" signature. Force a distinct mtime before re-reading.
+        _bump_mtime_distinct(cfg_path)
         sig_new = provider.identity_signature()["workspace"]
 
         assert (sig_old, sig_new) == ("old", "new")

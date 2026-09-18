@@ -1178,6 +1178,14 @@ class TestEventBridgePollE2E:
         _create_test_db(db_path, session_id, [
             {"role": "user", "content": "Hello", "timestamp": "2026-03-29T15:00:01"},
         ])
+        # The minimal test db can't survive a real SessionDB open (migration
+        # partially applies then aborts), and that partial write would bump
+        # state.db's mtime mid-test — the poll gate would read the migration
+        # write as a file change and never reach the "unchanged" steady state.
+        # Serve the index from the json fallback only, like sibling tests.
+        monkeypatch.setattr(
+            mcp_serve, "_load_sessions_index", mcp_serve._load_sessions_index_from_json
+        )
 
         class TestDB:
             def __init__(self):
@@ -1374,7 +1382,7 @@ class TestEventBridgePollE2E:
             "id": 2, "role": "assistant", "content": "arrived after start",
             "timestamp": "2026-03-29T15:05:00",
         })
-        os.utime(db_path, None)  # bump mtime so the poll gate opens
+        os.utime(db_path, ns=(db_path.stat().st_mtime_ns + 1_000_000_000,) * 2)  # explicit +1s bump: opens the poll gate deterministically (os.utime(p, None) can land in the same kernel timestamp tick as the write)
         bridge._poll_once(DB())
         events = bridge.poll_events(after_cursor=0)["events"]
         assert len(events) == 1
@@ -1412,7 +1420,7 @@ class TestEventBridgePollE2E:
             "id": 1, "role": "user", "content": "hello after baseline",
             "timestamp": "2026-03-29T15:10:00",
         }]
-        os.utime(db_path, None)
+        os.utime(db_path, ns=(db_path.stat().st_mtime_ns + 1_000_000_000,) * 2)  # explicit +1s bump: opens the poll gate deterministically
         bridge._poll_once(DB())
 
         events = bridge.poll_events(after_cursor=0)["events"]
