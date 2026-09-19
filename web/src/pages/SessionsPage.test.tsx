@@ -52,6 +52,19 @@ function click(el: Element | null) {
 
 const button = (label: string) => document.querySelector(`button[aria-label="${label}"]`);
 
+// Import at module scope (after the hoisted vi.mock calls) so the heavy
+// component-tree transform is paid during collection, not billed against the
+// test's testTimeout — the same CI-load flake class d5774ad880 fixed for
+// Messaging/Skills (main run timeouts at 15s with a 15.6s runtime).
+const [{ default: SessionsPage }, { I18nProvider }, { SystemActionsProvider }, { ProfileProvider }, { PageHeaderProvider }] =
+  await Promise.all([
+    import("./SessionsPage"),
+    import("@/i18n"),
+    import("@/contexts/SystemActions"),
+    import("@/contexts/ProfileProvider"),
+    import("@/contexts/PageHeaderProvider"),
+  ]);
+
 async function renderSessionsPage(rows: Record<string, unknown>[]) {
   // Page list uses limit 20; the overview tab's recent-cards fetch uses 50 —
   // keep the overview empty so the list view (with row actions) renders.
@@ -61,14 +74,6 @@ async function renderSessionsPage(rows: Record<string, unknown>[]) {
     limit,
     offset: 0,
   }));
-  const [{ default: SessionsPage }, { I18nProvider }, { SystemActionsProvider }, { ProfileProvider }, { PageHeaderProvider }] =
-    await Promise.all([
-      import("./SessionsPage"),
-      import("@/i18n"),
-      import("@/contexts/SystemActions"),
-      import("@/contexts/ProfileProvider"),
-      import("@/contexts/PageHeaderProvider"),
-    ]);
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);

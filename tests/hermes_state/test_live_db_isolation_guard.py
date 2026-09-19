@@ -24,6 +24,8 @@ from gateway.config import GatewayConfig
 from gateway.session import SessionStore
 from hermes_state import SessionDB
 
+from .conftest_state_guard import real_platform_home
+
 # Must match the root the guard itself computes.  Hardcoding ``~/.hermes``
 # silently disarmed every assertion below on Windows, where the real root is
 # ``%LOCALAPPDATA%\hermes``: the paths under test were then *correctly*
@@ -152,6 +154,13 @@ class TestSubprocessChildCovered:
         env-activated (PYTEST_CURRENT_TEST / PYTEST_VERSION are inherited),
         so the child's argless SessionDB() must fail hard instead of
         opening the developer's real state.db.
+
+        The child's HOME is pinned to the passwd home: the guard denies the
+        PASSWD-home root, but a CI runner may legitimately run this pytest
+        with HOME pointed at a scratch dir (the second hermes-agent runner
+        does). Without the pin the child resolves a scratch ``<HOME>/.hermes``
+        root, the guard correctly stays silent, and the test's premise
+        ("child aims at the production DB") no longer holds.
         """
         env = {
             k: v
@@ -159,6 +168,7 @@ class TestSubprocessChildCovered:
             if k not in ("HERMES_HOME", "PYTEST_PLUGINS", "PYTHONPATH")
         }
         env["PYTEST_CURRENT_TEST"] = "tests/fake.py::test_child (call)"
+        env["HOME"] = str(real_platform_home())
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
         code = (
             "from hermes_state import SessionDB\n"

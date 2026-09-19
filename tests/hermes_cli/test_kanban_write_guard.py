@@ -32,7 +32,10 @@ def test_connect_raises_when_kanban_home_is_real_root(monkeypatch):
         "kanban_db_path",
         lambda board=None: _conftest._REAL_KANBAN_ROOT / "kanban.db",
     )
-    with pytest.raises(RuntimeError, match="kanban_write_guard"):
+    # Wave-9 (2026-09-18): the connect-time choke in kanban_db_connect fires
+    # BEFORE the conftest wrapper, so the message is the choke's — either guard
+    # refusing the production board is the contract; match both spellings.
+    with pytest.raises(RuntimeError, match="(write_guard|test-isolation guard)"):
         kbc.connect()
 
 
@@ -40,5 +43,5 @@ def test_connect_raises_for_explicit_db_path_under_real_root():
     """Explicit db_path pointing under the real root is also refused."""
     import tests.conftest as _conftest
 
-    with pytest.raises(RuntimeError, match="kanban_write_guard"):
+    with pytest.raises(RuntimeError, match="(write_guard|test-isolation guard)"):
         kbc.connect(_conftest._REAL_KANBAN_ROOT / "kanban.db")
