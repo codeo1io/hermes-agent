@@ -30,12 +30,17 @@ permissions:
   actions: read
   pull-requests: write
 
-# One poller per CI run. A new push starts a new CI run, and its poller
-# cancels the poller of the run that GitHub superseded. The group keys
-# on the head repository too: fork PRs often share a branch name
-# (``main``, ``patch-1``), and two PRs must not cancel each other.
+# One poller per source CI run. A new push starts a new CI run, and its poller
+# cancels the poller of the run that GitHub superseded. The group keys on the
+# head repository too: fork PRs often share a branch name (``main``,
+# ``patch-1``), and two PRs must not cancel each other. It includes the
+# source run's id as well: GitHub re-delivers ``workflow_run`` events when a
+# run's jobs flap between queued and in_progress on a busy runner, and two
+# pollers for one CI run would otherwise cancel each other in a loop —
+# observed 2026-09-17/18, 20+ poller runs for a handful of CI runs while
+# ``Run tests`` requeued, each burning runner minutes before cancellation.
 concurrency:
-  group: ci-review-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  group: ci-review-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}-${{ github.event.workflow_run.id }}
   cancel-in-progress: true
 
 jobs:

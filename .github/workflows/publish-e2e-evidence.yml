@@ -13,9 +13,17 @@ permissions:
   contents: read
   pull-requests: write
 
+# One publisher per source CI run. Key on the triggering run's id, not the
+# branch: several PR CI runs can be in flight at once, and each completed
+# run's evidence must publish. ``cancel-in-progress`` replaces a stale or
+# re-delivered publisher for the SAME source run instead of stacking a new
+# one behind it on the single self-hosted runner (observed 2026-09-17/18:
+# 5 publishers for one main sha queued back-to-back and starved PR CI for
+# hours). Evidence of a superseded source run is worthless by the time the
+# newer run completes, so cancelling is safe.
 concurrency:
   group: publish-e2e-evidence-${{ github.event.workflow_run.id }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   publish:
