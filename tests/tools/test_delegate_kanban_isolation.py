@@ -165,7 +165,9 @@ def test_delegate_child_execute_code_env_bridges_contextvar_and_scrubs_kanban(
 
     assert os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT") is None
     assert env["HERMES_HOME"] == str(home)
-    assert env["HERMES_DELEGATED_CHILD_CONTEXT"] == "1"
+    # The marker is path-valued (the fenced board root), not the legacy "1":
+    # see agent/delegation_context.scrub_kanban_env.
+    assert env["HERMES_DELEGATED_CHILD_CONTEXT"] == str(home)
     assert "HERMES_KANBAN_TASK" not in env
     assert "HERMES_KANBAN_RUN_ID" not in env
     assert "HERMES_KANBAN_CLAIM_LOCK" not in env

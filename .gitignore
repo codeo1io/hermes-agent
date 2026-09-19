@@ -63,7 +63,12 @@ agent-browser/
 privvy*
 images/
 __pycache__/
+# Build artifacts (wheel/dist output; fork dist name is hermes_gpt)
+dist/
+web/dist/
 hermes_agent.egg-info/
+hermes_gpt.egg-info/
+*.egg-info/
 wandb/
 testlogs
 playwright-report/
