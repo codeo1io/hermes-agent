@@ -31,7 +31,9 @@ from pathlib import Path
 import pytest
 
 pytestmark = [
-    pytest.mark.skipif(sys.platform != "win32", reason="live Windows venv-holder E2E"),
+    # ``windows_only``: the Windows CI job selects ``-m windows_only``; a bare
+    # skipif would leave this live E2E running on no host at all.
+    pytest.mark.windows_only,
     # ``_spawn`` sleepers carry a "gateway run" argv tail as inert data (the guard's real-gateway
     # spawn check matches it); every child is ``_kill``ed by the test.
     pytest.mark.spawns_gateway_lookalike,
