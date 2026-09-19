@@ -726,7 +726,16 @@ def _ensure_test_isolation(path: Path) -> None:
     production = (
         parts == ("kanban.db",)
         or (len(parts) >= 2 and parts[0] == "kanban")
-        or (len(parts) == 3 and parts[0] == "profiles")
+        # Profile-scoped boards: <root>/profiles/<name>/kanban.db and anything
+        # under <root>/profiles/<name>/kanban/… at ANY depth (HERMES_KANBAN_HOME
+        # and board-dir indirection both add parts) — prefix-shaped, not an
+        # exact part count. Other profile content (config.yaml, memory/, …)
+        # is NOT a board file and must stay reachable.
+        or (
+            len(parts) >= 3
+            and parts[0] == "profiles"
+            and parts[2] in ("kanban", "kanban.db")
+        )
     )
     if production:
         raise RuntimeError(

@@ -184,3 +184,87 @@ def test_real_platform_state_root_ignores_redirected_home(monkeypatch, tmp_path)
     assert _real_platform_state_root() == real, (
         "deny-root must not follow a redirected HOME env"
     )
+
+
+# ---------------------------------------------------------------------------
+# Wave-10 (2026-09-19): profile-scoped boards live at depth, and the
+# workspace / attachment / log roots never route through connect() — the
+# predicate must be prefix-shaped (not part-count-exact) and
+# kanban_db._board_path must guard every resolved surface.
+# ---------------------------------------------------------------------------
+
+
+def test_guard_refuses_profile_scoped_boards_at_any_depth(_pytest_context):
+    """A profile-active test resolves board files as
+    ``<root>/profiles/<name>/kanban/current/<board>/kanban.db`` (6 parts) —
+    the old ``len(parts) == 3`` profiles rule missed every real profile
+    board file, so a leaked profile HOME silently reached the live board.
+    HERMES_KANBAN_HOME pinned inside a profile kanban tree has the same
+    shape and must be refused too."""
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    root = _real_platform_state_root()
+    assert root is not None
+    deep = root / "profiles" / "worker" / "kanban" / "current" / "board-7" / "kanban.db"
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        _ensure_test_isolation(deep)
+    pinned = root / "profiles" / "worker" / "kanban" / "worker-copy.db"
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        _ensure_test_isolation(pinned)
+
+
+def test_guard_allows_non_kanban_profile_content(_pytest_context):
+    """Only board files are production: profile memory/config/logs stay
+    reachable — the deny set is kanban-shaped, not all-of-profiles."""
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    root = _real_platform_state_root()
+    assert root is not None
+    _ensure_test_isolation(root / "profiles" / "worker" / "memory" / "memories.db")
+    _ensure_test_isolation(root / "profiles" / "worker" / "config.yaml")
+
+
+def test_board_path_guard_covers_workspaces_and_attachments(_pytest_context, monkeypatch):
+    """workspaces_root()/attachments_root()/worker_logs_dir() resolve through
+    _board_path and must refuse production-shaped roots from a test context —
+    the connect-path guard never saw these file-tree surfaces (wave-10)."""
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli import kanban_db as kb
+
+    root = _real_platform_state_root()
+    assert root is not None
+    # Default-board branch resolving under the real root via HERMES_KANBAN_HOME.
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_ATTACHMENTS_ROOT", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(root / "kanban"))
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kb.workspaces_root()
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kb.attachments_root()
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kb.kanban_db_path()
+    # Env pins are checked verbatim too (no bypass-by-override).
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(root / "kanban" / "workspaces"))
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kb.workspaces_root()
+    # Profile-scoped workspace tree — the wave-10 depth case.
+    monkeypatch.setenv(
+        "HERMES_KANBAN_ATTACHMENTS_ROOT",
+        str(root / "profiles" / "worker" / "kanban" / "attachments"),
+    )
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        kb.attachments_root()
+
+
+def test_board_path_allows_sandboxed_roots(_pytest_context, monkeypatch, tmp_path):
+    """Sandboxed overrides outside the real root resolve untouched — the
+    guard extends the deny set, not the sandbox."""
+    from hermes_cli import kanban_db as kb
+
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban"))
+    kb.kanban_db_path()  # must not raise
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(tmp_path / "ws"))
+    assert kb.workspaces_root() == tmp_path / "ws"

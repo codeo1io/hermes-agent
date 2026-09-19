@@ -715,8 +715,19 @@ def test_concurrent_compression_does_not_fork_session(tmp_path: Path) -> None:
     t_b = threading.Thread(target=run, args=(agent_b,), name="review_fork")
     t_a.start()
     t_b.start()
-    t_a.join(timeout=10)
-    t_b.join(timeout=10)
+    # Wait for BOTH paths to actually finish before asserting anything: the
+    # winner's full acquire→compress→commit→release cycle can legitimately
+    # outlive a short fixed join budget on a loaded runner or a slower
+    # event-loop schedule (anyio 4.14's task pacing exposed this — the winner
+    # was still mid-cycle at the old 10s join, so the leak assert raced a
+    # live holder row). A generous deadline, not a quiet-runner assumption;
+    # a genuinely stuck thread still fails the liveness assert below.
+    deadline = time.monotonic() + 120.0
+    for _t in (t_a, t_b):
+        _t.join(timeout=max(0.0, deadline - time.monotonic()))
+    assert not any(_t.is_alive() for _t in (t_a, t_b)), (
+        "compression threads did not finish within the 120s deadline"
+    )
 
     # The invariant Damien's incident is about: the parent must NEVER end up
     # with two (or more) children — that is the transcript fork. The lock
@@ -765,7 +776,13 @@ def test_concurrent_compression_does_not_fork_session(tmp_path: Path) -> None:
         )
 
     # The lock must be released after both paths finished, regardless of
-    # whether the winner committed a child or rolled back.
+    # whether the winner committed a child or rolled back. The release lands
+    # on the DB in the winner's final finally-block, so after the threads are
+    # done it clears promptly; poll briefly for the row with a deadline so a
+    # just-missed write isn't mistaken for a leak. A true leak never clears.
+    _rel_deadline = time.monotonic() + 10.0
+    while time.monotonic() < _rel_deadline and db.get_compression_lock_holder(parent_sid) is not None:
+        time.sleep(0.05)
     assert db.get_compression_lock_holder(parent_sid) is None, (
         "Compression lock leaked: still held after both paths completed."
     )
@@ -866,7 +883,13 @@ def test_fence_cancelled_compression_leaves_lock_reacquirable(tmp_path: Path) ->
     assert summary_started.wait(timeout=2)
     assert fence.cancel_before_commit() is True
     release_summary.set()
-    worker.join(timeout=5)
+    # The cancelled unwind (fence abort → lease release) can outlive a short
+    # fixed join on a loaded runner or a slower event-loop schedule (same
+    # pacing exposure as the concurrent-fork test above — a 5s budget raced
+    # the unwind under anyio 4.14). Generous deadline; a stuck unwind still
+    # trips the liveness assert.
+    _wk_deadline = time.monotonic() + 120.0
+    worker.join(timeout=max(0.0, _wk_deadline - time.monotonic()))
     assert not worker.is_alive()
 
     # Cancelled attempt: no mutation, and — the invariant under test — the

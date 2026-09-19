@@ -64,12 +64,25 @@ jobs:
       - name: Install pinned osv-scanner
         run: |
           set -euo pipefail
-          # v2.3.8 — same version the upstream reusable workflow pinned.
-          VER=v2.3.8
-          URL="https://github.com/google/osv-scanner/releases/download/${VER}/osv-scanner_linux_amd64"
+          # v2.6.0 — verified against the release's SHA256SUMS asset before
+          # execution (every osv-scanner release publishes SHA256SUMS + SLSA
+          # provenance). The binary is fetched under its release name so
+          # `sha256sum -c` can consume the matching SUMS line directly.
+          VER=v2.6.0
+          BASE="https://github.com/google/osv-scanner/releases/download/${VER}"
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL "$URL" -o "$RUNNER_TEMP/bin/osv-scanner"
-          chmod +x "$RUNNER_TEMP/bin/osv-scanner"
+          cd "$RUNNER_TEMP/bin"
+          curl -fsSL -O "${BASE}/osv-scanner_SHA256SUMS"
+          curl -fsSL -O "${BASE}/osv-scanner_linux_amd64"
+          grep ' osv-scanner_linux_amd64$' osv-scanner_SHA256SUMS | sha256sum -c -
+          # Independent inline pin (review F1): the SUMS asset above is
+          # co-fetched from the same mutable tag path, so a tag re-point
+          # plus a replaced SUMS asset would still pass that check. This
+          # literal digest pins the binary regardless of what the fetched
+          # SUMS says.
+          echo "ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108  osv-scanner_linux_amd64" | sha256sum -c -
+          chmod +x osv-scanner_linux_amd64
+          mv osv-scanner_linux_amd64 osv-scanner
           "$RUNNER_TEMP/bin/osv-scanner" --version
 
       - name: Run scan
@@ -170,6 +183,8 @@ jobs:
               if vulns:
                   print('\n'.join(vulns[:20]), file=sys.stderr)
           except Exception:
+              # Malformed SARIF must be visible, not silently 0 (review F5).
+              print('::warning::failed to parse osv-results.sarif — reporting 0 vulnerabilities', file=sys.stderr)
               print(0)
           ")
 

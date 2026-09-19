@@ -774,7 +774,8 @@ def _kanban_write_guard(_hermetic_environment, request, monkeypatch):
                 .resolve()
             )
         # Deny-list matches PRODUCTION board paths only: ``<root>/kanban.db``,
-        # anything under ``<root>/kanban/`` and ``<root>/profiles/<name>/``.
+        # anything under ``<root>/kanban/`` and the profile-scoped boards
+        # ``<root>/profiles/<name>/kanban.db`` + ``<root>/profiles/<name>/kanban/…``.
         # A blanket "anywhere under the real root" refuse-mode mis-fires when
         # the pytest temp root itself sits under ``~/.hermes`` (conductor
         # delegate TMPDIR / ``--basetemp ~/.hermes/tmp/...``): sandboxed test
@@ -792,7 +793,15 @@ def _kanban_write_guard(_hermetic_environment, request, monkeypatch):
             is_production = (
                 parts == ("kanban.db",)
                 or (len(parts) >= 2 and parts[0] == "kanban")
-                or (len(parts) == 3 and parts[0] == "profiles")
+                # Profile-scoped boards at ANY depth (profiles/<n>/kanban.db,
+                # profiles/<n>/kanban/…): prefix-shaped, matching the choke
+                # predicate in kanban_db_connect._ensure_test_isolation.
+                # Non-board profile content stays reachable.
+                or (
+                    len(parts) >= 3
+                    and parts[0] == "profiles"
+                    and parts[2] in ("kanban", "kanban.db")
+                )
             )
         if not is_production:
             # Resolved path is NOT a production board path — safe to write.
