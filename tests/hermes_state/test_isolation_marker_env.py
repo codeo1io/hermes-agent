@@ -22,6 +22,8 @@ from pathlib import Path
 import hermes_state
 import hermes_state_guard
 
+from .conftest_state_guard import real_platform_home
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _CHILD_PROBE = r"""
@@ -58,7 +60,12 @@ def _minimal_env(**extra) -> dict:
     """A rebuilt-from-scratch child env — the residual-bypass pattern."""
     env = {
         "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", ""),
+        # The guard pins its deny root to the PASSWD home, not $HOME
+        # (a CI runner may run jobs with HOME pointed at a scratch dir —
+        # the second hermes-agent runner does exactly that). The child in
+        # these tests must aim at the production root, so pin HOME to the
+        # passwd home regardless of what this pytest process inherited.
+        "HOME": str(real_platform_home()),
         "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),  # Windows needs it
         "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
     }

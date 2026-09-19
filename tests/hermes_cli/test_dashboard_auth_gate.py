@@ -91,11 +91,19 @@ def _stub_uvicorn_run(monkeypatch):
     """Replace uvicorn.Config/Server with no-op fakes so start_server
     returns immediately (rather than blocking on the event loop). Returns the dict
     that will capture the keyword args.
+
+    Also stubs the pre-bind port probe: these tests exercise the AUTH GATE,
+    not socket binding, and the real probe binds the fixed port 9119 — which
+    a concurrently running dashboard (or a sibling CI lane on the shared
+    self-hosted runner) legitimately holds, failing the whole file with
+    SystemExit(75) for reasons unrelated to the gate.
     """
     import asyncio
     import contextlib
     import uvicorn
     captured: dict = {"kwargs": {}}
+
+    monkeypatch.setattr(web_server, "_port_bind_conflict", lambda host, port: False)
 
     class _FakeConfig:
         loaded = True
