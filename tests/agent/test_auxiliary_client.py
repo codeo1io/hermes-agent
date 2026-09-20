@@ -2778,7 +2778,8 @@ class TestAuxiliaryAuthRefreshRetry:
             assert _refresh_provider_credentials("anthropic", failed_api_key="expired-token") is True
 
         mock_refresh_oauth.assert_called_once_with("refresh-token", use_json=False)
-        mock_write.assert_called_once_with("fresh-token", "refresh-token-2", 9999999999999)
+        mock_write.assert_called_once_with(
+            "fresh-token", "refresh-token-2", 9999999999999, spent_refresh_token="refresh-token")
         stale_client.close.assert_called_once()
 
     def test_refresh_provider_credentials_remints_vertex_token_and_evicts_cache(self):

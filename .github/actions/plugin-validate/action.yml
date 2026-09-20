@@ -4,14 +4,17 @@ description: >-
   declared-vs-actually-registered capabilities) using
   `hermes plugins validate`. Drop this into your plugin repo's CI:
 
-    - uses: actions/checkout@<sha>
-    - uses: NousResearch/hermes-agent/.github/actions/plugin-validate@main
+    - uses: actions/checkout@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+    - uses: NousResearch/hermes-agent/.github/actions/plugin-validate@345cd2b057a452236de401d3534b8502a7465e8d # v2026.9.14
       with:
         path: .
 
   The caller's job owns checkout; this action installs Python + hermes-agent
   (git install — a supported CI-context install route) and runs the
-  validator against your plugin directory.
+  validator against your plugin directory. Pin the action to a release
+  commit SHA (a mutable ref lets any push to main run in your CI); the
+  `hermes-ref` input below still lets you pick the hermes-agent version
+  the validator installs.
 
 inputs:
   path:
