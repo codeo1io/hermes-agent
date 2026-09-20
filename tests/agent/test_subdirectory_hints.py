@@ -369,3 +369,40 @@ class TestExcludedDirectories:
         assert result is not None
         assert "Personal backend override" in result
         assert "Committed backend rules" not in result
+
+
+class TestHintFileEscapesWorkingTree:
+    """The directory gate (`_within_working_dir`) cannot see a hint FILE that is
+    itself a symlink out of the working tree: reading it would splice another
+    agent's (or an attacker-controlled) instructions into the session, exactly
+    what the directory check exists to prevent. Regression for upstream #116429."""
+
+    def test_symlinked_hint_file_outside_tree_is_skipped(self, tmp_path):
+        """sub/AGENTS.md symlinked to an out-of-tree file must not be injected."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "AGENTS.md").write_text("SECRET OUTSIDE INSTRUCTIONS", encoding="utf-8")
+
+        project = tmp_path / "project"
+        sub = project / "sub"
+        sub.mkdir(parents=True)
+        (project / "AGENTS.md").write_text("Root project instructions", encoding="utf-8")
+        (sub / "AGENTS.md").symlink_to(outside / "AGENTS.md")
+        assert (sub / "AGENTS.md").is_file()  # sanity: reads as a file with the target's content
+
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call("read_file", {"path": str(sub / "x.py")})
+        assert result is None or "SECRET OUTSIDE INSTRUCTIONS" not in result
+
+    def test_real_hint_file_inside_tree_still_loads_after_escape_guard(self, tmp_path):
+        """The escape guard must not break ordinary hint loading."""
+        project = tmp_path / "project"
+        sub = project / "sub"
+        sub.mkdir(parents=True)
+        (project / "AGENTS.md").write_text("Root project instructions", encoding="utf-8")
+        (sub / "AGENTS.md").write_text("SUBDIR REAL RULES", encoding="utf-8")
+
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call("read_file", {"path": str(sub / "x.py")})
+        assert result is not None
+        assert "SUBDIR REAL RULES" in result

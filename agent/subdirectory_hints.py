@@ -202,6 +202,21 @@ class SubdirectoryHintTracker:
                     continue
             except OSError:
                 continue
+            # The directory gate above cannot see the FILE itself: a checked-in
+            # `sub/AGENTS.md` symlinked to ~/.codex/AGENTS.md (or any out-of-tree
+            # target) would inject another agent's instructions — the exact leak
+            # ``_within_working_dir`` exists to prevent. Read only if the resolved
+            # target stays inside the working tree (#116429).
+            try:
+                resolved_hint = hint_path.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if not self._within_working_dir(resolved_hint):
+                logger.debug(
+                    "Skipping hint file %s — resolves to %s, outside working_dir %s",
+                    hint_path, resolved_hint, self.working_dir,
+                )
+                continue
             try:
                 content = (_read_text_with_timeout(hint_path) or "").strip()
                 if not content:
