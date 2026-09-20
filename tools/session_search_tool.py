@@ -110,12 +110,13 @@ def _resolve_lineage(db, session_id: str) -> str:
     return _resolve_to_parent(db, session_id)[0]
 
 
-def _parse_iso_bound(value: Optional[str], *, as_exclusive_end: bool = False) -> Optional[int]:
+def _parse_iso_bound(value: Optional[str]) -> Optional[int]:
     """Parse an ISO date/datetime into a UTC unix timestamp.
 
-    A date-only value (``YYYY-MM-DD``) is midnight UTC on that day. When
-    ``as_exclusive_end`` is True, that midnight is the exclusive upper bound
-    (``before=2026-07-01`` keeps June, drops July 1 00:00).
+    A date-only value (``YYYY-MM-DD``) is midnight UTC on that day; the
+    ``started_ts < before_ts`` comparison in ``_in_time_window`` is what makes
+    that midnight an exclusive upper bound (``before=2026-07-01`` keeps June,
+    drops July 1 00:00).
     """
     if value is None:
         return None
@@ -586,7 +587,7 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
         return _list_recent_sessions(db, limit, current_session_id, link_profile=profile)
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     try:
-        after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before, as_exclusive_end=True)
+        after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before)
     except ValueError as e:
         return tool_error(str(e), success=False)
     return _discover(
