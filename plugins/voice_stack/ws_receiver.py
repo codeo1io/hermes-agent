@@ -9,12 +9,15 @@ control actions to the local voice stack tools.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hmac
 import inspect
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import threading
 import time
 from collections.abc import Awaitable
@@ -22,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional
 
 try:
     from aiohttp import WSMsgType, web
+
     AIOHTTP_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only in minimal installs
     WSMsgType = None  # type: ignore[assignment]
@@ -43,7 +47,9 @@ _START_TIME = time.monotonic()
 _MESSAGE_COUNTERS: dict[str, int] = {}
 _COUNTER_LOCK = threading.Lock()
 _VOICE_ACTION_RESERVED_KEYS = {"type", "action", "args"}
-_AssistQueryHandler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
+_AssistQueryHandler = Callable[
+    [dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]
+]
 _ASSIST_QUERY_HANDLER: Optional[_AssistQueryHandler] = None
 
 
@@ -71,7 +77,9 @@ def set_assist_query_handler(handler: Optional[_AssistQueryHandler]) -> None:
     _ASSIST_QUERY_HANDLER = handler
 
 
-def receiver_status(server: Optional["HermesHAWebSocketServer"] = None) -> dict[str, Any]:
+def receiver_status(
+    server: Optional["HermesHAWebSocketServer"] = None,
+) -> dict[str, Any]:
     """Return process-local receiver health data safe for HA status probes."""
     active_connections = 0
     total_connections = 0
@@ -89,6 +97,11 @@ def receiver_status(server: Optional["HermesHAWebSocketServer"] = None) -> dict[
         "running": running,
         "uptime_seconds": round(time.monotonic() - _START_TIME, 1),
         "auth_required": bool(_configured_token()),
+        "ip_allowlist": {
+            "mode": "*" in _allowed_client_ips() and "all"
+            or (_allowed_client_ips() and "allowlist" or "loopback-only"),
+            "allowed_ips": _allowed_client_ips(),
+        },
         "active_connections": active_connections,
         "total_connections": total_connections,
         "message_counters": _message_counters_snapshot(),
@@ -96,7 +109,9 @@ def receiver_status(server: Optional["HermesHAWebSocketServer"] = None) -> dict[
     }
 
 
-def _with_request_id(payload: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+def _with_request_id(
+    payload: dict[str, Any], response: dict[str, Any]
+) -> dict[str, Any]:
     """Preserve caller request IDs for HA-side correlation."""
     if "id" in payload and "id" not in response:
         response = {**response, "id": payload["id"]}
@@ -118,6 +133,36 @@ def _json_loads_maybe(value: Any) -> dict[str, Any]:
     return {"value": value}
 
 
+def _probe_existing_receiver(host: str, port: int) -> bool:
+    """Return True when a Hermes HA receiver already answers on ``host:port``.
+
+    Every Hermes process that loads the voice_stack plugin (gateway, CLI
+    workers, cron jobs) calls ``start_ws_receiver()``, but only one process
+    can bind the port. The singleton guard is process-local, so the losers
+    used to race the bind and log ``[Errno 98] address already in use`` as a
+    startup failure. Probing ``/health`` first lets them recognize an already
+    running receiver and stand down quietly.
+    """
+    probe_host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=0.5) as sock:
+            sock.settimeout(0.5)
+            sock.sendall(
+                f"GET /health HTTP/1.1\r\nHost: {probe_host}:{port}\r\nConnection: close\r\n\r\n".encode(
+                    "ascii"
+                )
+            )
+            payload = b""
+            while len(payload) < 4096:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                payload += chunk
+            return b"hermes-ha-ws" in payload
+    except OSError:
+        return False
+
+
 def _configured_token() -> str:
     """Return the optional bearer token accepted by the HA WebSocket endpoint."""
     return (
@@ -126,6 +171,59 @@ def _configured_token() -> str:
         or os.getenv("HERMES_API_KEY")
         or ""
     ).strip()
+
+
+def _allowed_client_ips() -> list[str]:
+    """Resolve the client IP allowlist (see ``_client_allowed``).
+
+    ``HERMES_HA_WS_ALLOWED_IPS`` is a comma-separated list of exact IPs.
+    The fork default is fail-closed: with the variable unset, only loopback
+    peers are accepted (2026-09 adversarial finding: the receiver shipped
+    default-on unauthenticated on 0.0.0.0, drivable by any LAN peer). Set the
+    variable to ``*`` to explicitly opt back into accepting all sources.
+    """
+    raw = os.getenv("HERMES_HA_WS_ALLOWED_IPS", "").strip()
+    if not raw:
+        return []
+    if raw == "*":
+        return ["*"]
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _client_allowed(peer_ip: str | None) -> bool:
+    """Accept-time gate for HA WebSocket and health endpoints.
+
+    Loopback is always allowed: secondary Hermes processes (CLI workers, cron
+    jobs) probe ``/health`` from loopback to stand down from the bind race.
+    Non-loopback peers must appear in ``HERMES_HA_WS_ALLOWED_IPS``.
+    """
+    peer = (peer_ip or "").strip()
+    if not peer:
+        # No peer information (unexpected for TCP): fail closed.
+        return False
+    # Strip IPv6 zone (fe80::1%eth0) and bracket syntax.
+    peer = peer.split("%", 1)[0].strip("[]")
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    if addr.version == 6:
+        mapped = addr.ipv4_mapped
+        if mapped is not None:
+            addr = mapped
+            peer = str(mapped)
+    if addr.is_loopback:
+        return True
+    allowed = _allowed_client_ips()
+    return "*" in allowed or peer in allowed
+
+
+def _reject_forbidden(peer_ip: str | None) -> None:
+    logger.warning(
+        "Hermes HA WebSocket rejected connection from %s (IP allowlist; "
+        "set HERMES_HA_WS_ALLOWED_IPS to grant access)",
+        peer_ip or "<unknown>",
+    )
 
 
 def _auth_ok(headers: Mapping[str, str]) -> bool:
@@ -248,7 +346,16 @@ async def handle_assist_query(payload: dict[str, Any]) -> dict[str, Any]:
         extra = {
             k: v
             for k, v in result.items()
-            if k not in {"type", "ok", "text", "conversation_id", "language", "speech", "error"}
+            if k
+            not in {
+                "type",
+                "ok",
+                "text",
+                "conversation_id",
+                "language",
+                "speech",
+                "error",
+            }
         }
         return _assist_response(
             payload,
@@ -279,12 +386,15 @@ def handle_ha_ws_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if msg_type == "state_changed":
         # P0 receiver behaviour: acknowledge state pushes so HA knows Hermes
         # accepted the event. Context ingestion can be layered on this later.
-        return _with_request_id(payload, {
-            "type": "ack",
-            "ok": True,
-            "received": "state_changed",
-            "entity_id": payload.get("entity_id"),
-        })
+        return _with_request_id(
+            payload,
+            {
+                "type": "ack",
+                "ok": True,
+                "received": "state_changed",
+                "entity_id": payload.get("entity_id"),
+            },
+        )
 
     if msg_type == "ping":
         return _with_request_id(payload, {"type": "pong", "ok": True})
@@ -292,7 +402,14 @@ def handle_ha_ws_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if msg_type == "status":
         return _with_request_id(payload, {"type": "status", **receiver_status()})
 
-    return _with_request_id(payload, {"type": "error", "ok": False, "error": f"Unsupported message type: {msg_type or '<missing>'}"})
+    return _with_request_id(
+        payload,
+        {
+            "type": "error",
+            "ok": False,
+            "error": f"Unsupported message type: {msg_type or '<missing>'}",
+        },
+    )
 
 
 async def handle_ha_ws_payload_async(payload: dict[str, Any]) -> dict[str, Any]:
@@ -307,7 +424,12 @@ async def handle_ha_ws_payload_async(payload: dict[str, Any]) -> dict[str, Any]:
 class HermesHAWebSocketServer:
     """Small aiohttp WebSocket server for HA-originated Hermes messages."""
 
-    def __init__(self, host: str = DEFAULT_WS_HOST, port: int = DEFAULT_WS_PORT, path: str = DEFAULT_WS_PATH) -> None:
+    def __init__(
+        self,
+        host: str = DEFAULT_WS_HOST,
+        port: int = DEFAULT_WS_PORT,
+        path: str = DEFAULT_WS_PATH,
+    ) -> None:
         if not AIOHTTP_AVAILABLE:
             raise RuntimeError("aiohttp is required for Hermes HA WebSocket receiver")
         self.host = host
@@ -318,6 +440,7 @@ class HermesHAWebSocketServer:
         self._runner: Optional["aiohttp_web.AppRunner"] = None
         self._started = threading.Event()
         self._stopped = threading.Event()
+        self._bind_failed = threading.Event()
         self._active_connections = 0
         self._total_connections = 0
         self._connections_lock = threading.Lock()
@@ -343,14 +466,22 @@ class HermesHAWebSocketServer:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive() and self._started.is_set()
+        return (
+            self._thread is not None
+            and self._thread.is_alive()
+            and self._started.is_set()
+            and not self._bind_failed.is_set()
+        )
 
     def start(self) -> bool:
         """Start the receiver in a daemon thread. Returns False if already running."""
         if self.running:
             return False
         self._stopped.clear()
-        self._thread = threading.Thread(target=self._run_thread, name="hermes-ha-ws", daemon=True)
+        self._bind_failed.clear()
+        self._thread = threading.Thread(
+            target=self._run_thread, name="hermes-ha-ws", daemon=True
+        )
         self._thread.start()
         self._started.wait(timeout=5.0)
         return self.running
@@ -374,10 +505,31 @@ class HermesHAWebSocketServer:
         try:
             loop.run_until_complete(self._start_async())
             self._started.set()
-            logger.info("Hermes HA WebSocket receiver listening on %s:%s%s", self.host, self.port, self.path)
+            logger.info(
+                "Hermes HA WebSocket receiver listening on %s:%s%s",
+                self.host,
+                self.port,
+                self.path,
+            )
             loop.run_forever()
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                # Expected when another Hermes process won the bind race (the
+                # probe in start_ws_receiver usually catches this first, but two
+                # processes can still start simultaneously): exactly one
+                # receiver serves the port per host.
+                logger.info(
+                    "Hermes HA WebSocket receiver not started: another process already owns %s:%s",
+                    self.host,
+                    self.port,
+                )
+            else:
+                logger.warning("Hermes HA WebSocket receiver failed to start: %s", exc)
+            self._bind_failed.set()
+            self._started.set()
         except Exception as exc:
             logger.warning("Hermes HA WebSocket receiver failed to start: %s", exc)
+            self._bind_failed.set()
             self._started.set()
         finally:
             try:
@@ -406,13 +558,23 @@ class HermesHAWebSocketServer:
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
 
-    async def _handle_health(self, request: "aiohttp_web.Request") -> "aiohttp_web.Response":
+    async def _handle_health(
+        self, request: "aiohttp_web.Request"
+    ) -> "aiohttp_web.Response":
         assert web is not None
+        if not _client_allowed(request.remote):
+            _reject_forbidden(request.remote)
+            raise web.HTTPForbidden(text="Forbidden")
         return web.json_response({"type": "status", **receiver_status(self)})
 
-    async def _handle_ws(self, request: "aiohttp_web.Request") -> "aiohttp_web.WebSocketResponse":
+    async def _handle_ws(
+        self, request: "aiohttp_web.Request"
+    ) -> "aiohttp_web.WebSocketResponse":
         assert web is not None
         assert WSMsgType is not None
+        if not _client_allowed(request.remote):
+            _reject_forbidden(request.remote)
+            raise web.HTTPForbidden(text="Forbidden")
         if not _auth_ok(request.headers):
             raise web.HTTPUnauthorized(text="Invalid bearer token")
 
@@ -440,13 +602,22 @@ class HermesHAWebSocketServer:
         return ws
 
 
-def start_ws_receiver(host: Optional[str] = None, port: Optional[int] = None, path: Optional[str] = None) -> Optional[HermesHAWebSocketServer]:
+def start_ws_receiver(
+    host: Optional[str] = None, port: Optional[int] = None, path: Optional[str] = None
+) -> Optional[HermesHAWebSocketServer]:
     """Start the singleton HA WebSocket receiver if enabled."""
-    if os.getenv("HERMES_HA_WS_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+    if os.getenv("HERMES_HA_WS_ENABLED", "1").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
         logger.info("Hermes HA WebSocket receiver disabled by HERMES_HA_WS_ENABLED")
         return None
     if not AIOHTTP_AVAILABLE:
-        logger.warning("Hermes HA WebSocket receiver unavailable: aiohttp is not installed")
+        logger.warning(
+            "Hermes HA WebSocket receiver unavailable: aiohttp is not installed"
+        )
         return None
 
     resolved_host = host or os.getenv("HERMES_HA_WS_HOST", DEFAULT_WS_HOST)
@@ -457,7 +628,21 @@ def start_ws_receiver(host: Optional[str] = None, port: Optional[int] = None, pa
     with _WS_LOCK:
         if _WS_SERVER and _WS_SERVER.running:
             return _WS_SERVER
-        _WS_SERVER = HermesHAWebSocketServer(resolved_host, resolved_port, resolved_path)
+
+    if _probe_existing_receiver(resolved_host, resolved_port):
+        logger.info(
+            "Hermes HA WebSocket receiver already running on %s:%s in another process; skipping local start",
+            resolved_host,
+            resolved_port,
+        )
+        return None
+
+    with _WS_LOCK:
+        if _WS_SERVER and _WS_SERVER.running:
+            return _WS_SERVER
+        _WS_SERVER = HermesHAWebSocketServer(
+            resolved_host, resolved_port, resolved_path
+        )
         _WS_SERVER.start()
         return _WS_SERVER if _WS_SERVER.running else None
 
