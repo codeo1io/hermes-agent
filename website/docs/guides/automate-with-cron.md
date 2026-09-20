@@ -245,6 +245,7 @@ The `--deliver` flag controls where results go:
 |--------|---------|----------|
 | `origin` | `--deliver origin` | Same chat that created the job (default) |
 | `local` | `--deliver local` | Save to local file only |
+| `api_server` | `--deliver api_server` | Append output to the API-server session's transcript |
 | `telegram` | `--deliver telegram` | Your Telegram home channel |
 | `discord` | `--deliver discord` | Your Discord home channel |
 | `slack` | `--deliver slack` | Your Slack home channel |
@@ -252,6 +253,18 @@ The `--deliver` flag controls where results go:
 | Threaded | `--deliver telegram:-1001234567890:17585` | A specific Telegram topic thread |
 | Bot Chat | `--deliver bot-chat` | Inject output into this profile's canonical Bot Chat — the bot reads it and responds |
 | Bot Chat (named) | `--deliver bot-chat:research` | Another local profile's Bot Chat |
+
+### API-server transcript delivery
+
+The API server is a request/response surface with no push lane, so
+`--deliver api_server` delivers by **appending the output to the transcript
+of the api_server session the job was created from** — as a `[Cron delivery]`
+user-role message. The output is visible the next time that client polls or
+reopens the conversation, and a later turn in the session sees it in history.
+No gateway credentials are needed (it is a same-process transcript write),
+but there is no home fallback: the target only resolves when the job's origin
+is an api_server session, so `--deliver api_server` on a job created from
+Telegram or the CLI will not resolve a delivery target.
 
 ### Bot Chat delivery
 

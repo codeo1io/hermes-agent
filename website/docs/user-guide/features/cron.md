@@ -15,7 +15,7 @@ Cron jobs can:
 - schedule one-shot or recurring tasks
 - pause, resume, edit, trigger, and remove jobs
 - attach zero, one, or multiple skills to a job
-- deliver results back to the origin chat, local files, or configured platform targets
+- deliver results back to the origin chat, local files, or configured platform targets — and, for jobs created from the API server, into that session's transcript (`api_server`)
 - run in fresh agent sessions with the normal static tool list
 - run in **no-agent mode** — a script on a schedule, its stdout delivered verbatim, zero LLM involvement (see the [no-agent mode](#no-agent-mode-script-only-jobs) section below)
 - fire on **external events** — a webhook route with `cron_job` set fires the job the moment something happens (a PR gets feedback, a service posts an alert) instead of waiting for the next scheduled tick. See [Event-Triggered Cron Jobs](/user-guide/messaging/webhooks#event-triggered-cron-jobs).
@@ -84,7 +84,8 @@ validates that the job's configuration can actually produce a successful run:
 - attached skills are ready (no missing required environment variables,
   commands, or credential files),
 - delivery platform targets are known and have gateway credentials configured
-  (`local`/`origin` targets are never checked).
+  (`local`/`origin` targets are never checked; `api_server` is transcript-based
+  and needs no gateway credentials).
 
 When validation fails, the job's `last_status` becomes `blocked_config`, ONE
 alert is delivered (it is not repeated every tick), and **no LLM call is
