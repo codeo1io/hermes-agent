@@ -1518,7 +1518,16 @@ def _assert_second_attempt_stripped(call_args_list):
 class TestRedactedReasoningResendOnce:
     """Redacted thinking blobs are sealed to the issuing model/flow — replaying
     them elsewhere fails with an encrypted-content ValidationException. Drop
-    the redacted blocks and resend once (#115865)."""
+    the redacted blocks and resend once (#115865).
+
+    Coverage note (2026-09-20): the streaming variant of this recovery
+    (``call_converse_stream``) lives only in the PLUGIN-COMPAT block of
+    bedrock_adapter.py — revert-scheduled, and in-tree tests must not depend
+    on compat pointers (scripts/check_compat_pointers.py). The recovery is
+    pinned here on the real non-streaming path (``call_converse``). The real
+    streaming loop (``chat_completion_helpers._bedrock_converse_call``) does
+    NOT yet carry the redacted retry — genuine upstream gap, not covered here.
+    """
 
     def test_call_converse_strips_redacted_blocks_and_resends_once(self):
         from agent.bedrock_adapter import call_converse
@@ -1545,21 +1554,3 @@ class TestRedactedReasoningResendOnce:
                 )
         assert client.converse.call_count == 1
 
-    def test_call_converse_stream_strips_redacted_blocks_and_resends_once(self):
-        from agent.bedrock_adapter import call_converse_stream
-        client = MagicMock()
-        client.converse_stream.side_effect = [Exception(REDACTED_REJECTION), {"stream": [
-            {"messageStart": {"role": "assistant"}},
-            {"contentBlockStart": {"contentBlockIndex": 0, "start": {}}},
-            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "done"}}},
-            {"contentBlockStop": {"contentBlockIndex": 0}},
-            {"messageStop": {"stopReason": "end_turn"}},
-            {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}},
-        ]}]
-        with patch("agent.bedrock_adapter._get_bedrock_runtime_client",
-                   return_value=client):
-            response = call_converse_stream(
-                region="us-east-1", model="test-model", messages=_redacted_history(),
-            )
-        assert response.choices[0].message.content == "done"
-        _assert_second_attempt_stripped(client.converse_stream.call_args_list)
