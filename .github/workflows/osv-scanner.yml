@@ -47,8 +47,8 @@ permissions:
 jobs:
   scan:
     name: Scan lockfiles
-    # Inlined from google/osv-scanner-action's reusable workflow (v2.3.8,
-    # pinned 9a4987089): that workflow's jobs run on GitHub-hosted
+    # Inlined from google/osv-scanner-action's reusable workflow (that
+    # workflow's tree, pinned 9a4987089; binary bumped to v2.6.0 below): that workflow's jobs run on GitHub-hosted
     # (ubuntu-latest) runners — unreachable by runs-on conversion and
     # forbidden by org policy (self-hosted only, no paid tiers). This inline
     # version runs the same pinned osv-scanner binary on the self-hosted
@@ -64,11 +64,20 @@ jobs:
       - name: Install pinned osv-scanner
         run: |
           set -euo pipefail
-          # v2.3.8 — same version the upstream reusable workflow pinned.
-          VER=v2.3.8
-          URL="https://github.com/google/osv-scanner/releases/download/${VER}/osv-scanner_linux_amd64"
+          # v2.6.0 (newest stable with published checksums; the briefly-listed
+          # v2.9.x was withdrawn upstream — releases are NOT immutable, which is
+          # exactly why the binary below is digest-verified against the pin).
+          VER=v2.6.0
+          BASE="https://github.com/google/osv-scanner/releases/download/${VER}"
+          EXPECTED="ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108"
           mkdir -p "$RUNNER_TEMP/bin"
-          curl -fsSL "$URL" -o "$RUNNER_TEMP/bin/osv-scanner"
+          curl -fsSL "$BASE/osv-scanner_SHA256SUMS" -o "$RUNNER_TEMP/osv-scanner_SHA256SUMS"
+          # Verify BOTH the published manifest entry and the downloaded bytes.
+          grep -x "${EXPECTED}  osv-scanner_linux_amd64" "$RUNNER_TEMP/osv-scanner_SHA256SUMS" \
+            || { echo "::error::osv-scanner_SHA256SUMS no longer lists the pinned digest — upstream release changed"; exit 1; }
+          curl -fsSL "$BASE/osv-scanner_linux_amd64" -o "$RUNNER_TEMP/bin/osv-scanner"
+          echo "${EXPECTED}  $RUNNER_TEMP/bin/osv-scanner" | sha256sum -c - \
+            || { echo "::error::osv-scanner binary digest mismatch"; exit 1; }
           chmod +x "$RUNNER_TEMP/bin/osv-scanner"
           "$RUNNER_TEMP/bin/osv-scanner" --version
 
