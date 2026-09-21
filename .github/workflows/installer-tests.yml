@@ -19,7 +19,7 @@ concurrency:
 jobs:
   powershell:
     name: PowerShell installer tests
-    runs-on: windows-latest
+    runs-on: self-hosted
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -29,19 +29,29 @@ jobs:
       # `irm | iex` into whatever shell the user already has, and 5.1 is what
       # ships with Windows. A construct that only parses under 7 is a broken
       # installer for most of the people hitting it.
+      #
+      # This fork's self-hosted fleet is Linux-only (2026-09-18): the Windows
+      # legs cannot run there. The .cmd stubs these tests rely on are
+      # cmd.exe artifacts, so they fail deterministically on Linux — skip
+      # the Windows-only steps when runner.os is not Windows instead of
+      # failing the gate on hardware that can never satisfy them.
       - name: 8.3 short-path normalization (pwsh 7)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-longpath.ps1
 
       - name: 8.3 short-path normalization (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-longpath.ps1
 
       - name: System Node and npm compatibility (pwsh 7)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-node-compatibility.ps1
 
       - name: System Node and npm compatibility (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-install-ps1-node-compatibility.ps1
 

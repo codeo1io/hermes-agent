@@ -108,7 +108,9 @@ class TestPidIsHermes:
         ):
             assert _subprocess_compat.pid_is_hermes(1234) is False
 
-    @pytest.mark.skipif(sys.platform != "win32", reason="real probe is windows-only")
+    # ``windows_only``: the Windows CI job selects ``-m windows_only``; a bare
+    # skipif would leave this real-probe test running on no host at all.
+    @pytest.mark.windows_only
     def test_missing_pid_real_probe_fails_closed(self):
         # A PID that cannot exist must never be judged Hermes-owned.
         assert _subprocess_compat.pid_is_hermes(2**24) is False

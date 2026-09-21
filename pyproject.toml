@@ -57,11 +57,11 @@ dependencies = [
   # self-heal path for lean/broken installs — keep the pin below and the
   # lazy pin in lockstep.
   "firecrawl-anydoc==0.2.4",
-  # Bumped from 2.12.5 to 2.13.4 to pull in pydantic-core 2.46.4.
+  # Bumped from 2.12.5 to 2.13.4 (now 2.13.5 patch) to pull in pydantic-core 2.46.4.
   # pydantic-core 2.41.5 (pulled by 2.12.5) segfaults when the OpenAI SDK's
   # Responses API resource is exercised from a non-main thread, which is the
   # codex_responses dispatch in agent/chat_completion_helpers.py:_call.
-  "pydantic==2.13.4",
+  "pydantic==2.13.5",
   # Interactive CLI (prompt_toolkit is used directly by cli.py)
   "prompt_toolkit==3.0.52",
   # Cron scheduler (built-in feature — scheduled cron/interval jobs use croniter).
@@ -218,7 +218,7 @@ modal = ["modal==1.3.4"]
 daytona = ["daytona==0.155.0"]
 vercel = ["vercel==0.7.2"]
 hindsight = ["hindsight-client==0.6.1"]
-dev = ["debugpy==1.8.20", "pytest==9.1.1", "pytest-asyncio==1.3.0", "mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1", "ty==0.0.21", "ruff==0.15.10", "setuptools==83.0.0"]  # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
+dev = ["debugpy==1.8.20", "pytest==9.1.1", "pytest-asyncio==1.3.0", "mcp==2.2.0", "httpx2==2.13.0", "starlette==1.3.1", "ty==0.0.21", "ruff==0.15.10", "radon==6.0.1", "setuptools==83.0.0"]  # radon: evals/codebase_navigability/static_metrics.py imports it directly and crashes without it  # starlette: CVE-2026-48710; setuptools: 83 (torch >=2.13 requires setuptools 83)
 messaging = ["python-telegram-bot[webhooks]==22.8", "discord.py[voice]==2.7.1", "aiohttp==3.14.3", "brotlicffi==1.2.0.2", "slack-bolt==1.30.0", "slack-sdk==3.44.1", "qrcode==7.4.2"]  # aiohttp 3.14.3: prior CVEs + GHSA-cq5v-8q36-5273/GHSA-mfx4-hv73-q22v/GHSA-mq44-7p77-q5h7
 cron = []  # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt==1.30.0", "slack-sdk==3.44.1", "aiohttp==3.14.3"]
@@ -283,14 +283,19 @@ pty = []
 # extra that exposes a Starlette-backed server surface so pip/uv can't resolve
 # a vulnerable pre-1.0.1 transitive. Bump in lockstep with uv.lock.
 #
-# mcp 2.0.0 implements MCP revision 2026-07-28 and moved its own HTTP stack
-# from `httpx` to `httpx2`. httpx2 arrives transitively, but tools/mcp_tool.py
-# and tools/mcp_oauth_manager.py import it by name to build the client objects
+# mcp 2.2.0 still implements MCP revision 2026-07-28 (unchanged since 2.0.0)
+# and adds origin-bound redirect handling for streamable-http transports
+# (PR #3397: redirects are followed only within the endpoint's origin), plus
+# the FastMCP import-warning backport from 2.0.1. The SDK's own HTTP stack is
+# `httpx2`. httpx2 arrives transitively, but tools/mcp_tool.py and
+# tools/mcp_oauth_manager.py import it by name to build the client objects
 # they hand to the SDK, so it is pinned here explicitly rather than left to
-# resolution. Hermes' own `httpx[socks]==0.28.1` in [dependencies] is
+# resolution — 2.13.0 covers all 10 open httpx2 advisories (incl. HIGH
+# GHSA-7mj9-2mp8-4m2p SOCKS-TLS and GHSA-8xx6-hgc6-gc2m decompression).
+# Hermes' own `httpx[socks]==0.28.1` in [dependencies] is
 # unaffected — the two distributions install side by side under different
 # module names.
-mcp = ["mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
+mcp = ["mcp==2.2.0", "httpx2==2.13.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
 # Backwards-compatible no-op alias. Relay is a core dependency on supported
 # wheel targets and intentionally unavailable on other platforms.
 nemo-relay = []
@@ -301,7 +306,7 @@ teams = ["microsoft-teams-apps==2.0.13.4", "aiohttp==3.14.3"]  # aiohttp 3.14.3:
 # The cua-driver binary itself is installed via `hermes tools` post-setup
 # (curl install script); this extra just pins the MCP client used to talk
 # to it, which is already provided by the `mcp` extra.
-computer-use = ["mcp==2.0.0", "httpx2==2.7.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
+computer-use = ["mcp==2.2.0", "httpx2==2.13.0", "starlette==1.3.1"]  # starlette: CVE-2026-48710
 acp = ["agent-client-protocol==0.9.0"]
 # mistral: Voxtral STT + TTS. Pinned to an exact verified-clean version.
 # The `mistralai` PyPI project was quarantined 2026-05-12 after the malicious
@@ -531,6 +536,11 @@ google-auth-httplib2 = false
 google-auth-oauthlib = false
 google-cloud-pubsub = false
 h2 = false
+# httpcore2/mcp-types: temporary exceptions for the 2026-09-19 security floor
+# (httpx2 2.13.0 needs httpcore2 2.13.0; mcp 2.2.0 pins mcp-types==2.2.0 — both
+# published 2026-09-14, inside the 14-day cutoff). Same shape as the h2 entry
+# above: remove once the releases age past the cutoff.
+httpcore2 = false
 hindsight-client = false
 honcho-ai = false
 httplib2 = false
@@ -543,6 +553,7 @@ markdown = false
 maturin = false
 mautrix = false
 mcp = false
+mcp-types = false
 mem0ai = false
 microsoft-teams-apps = false
 mistralai = false
@@ -574,6 +585,9 @@ pyyaml = false
 qrcode = false
 requests = false
 rich = false
+# radon==6.0.1 (2023-03-26) predates any cutoff; whitelisted to satisfy the
+# exact-pin whitelist contract (test_exact_pinned_deps_exempt_from_exclude_newer).
+radon = false
 ruamel-yaml = false
 ruff = false
 sentencepiece = false
