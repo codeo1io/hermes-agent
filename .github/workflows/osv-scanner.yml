@@ -49,13 +49,13 @@ jobs:
     name: Scan lockfiles
     # Inlined from google/osv-scanner-action's reusable workflow (v2.3.8,
     # pinned 9a4987089): that workflow's jobs run on GitHub-hosted
-    # (ubuntu-latest) runners — unreachable by runs-on conversion and
-    # forbidden by org policy (self-hosted only, no paid tiers). This inline
-    # version runs the same pinned osv-scanner binary on the self-hosted
+    # (ubuntu-latest) runners — reachable after the self-hosted-only policy was lifted, but kept inlined:
+    # this fork runs the pinned binary directly (no third-party reusable workflow). This inline
+    # version runs the same pinned osv-scanner binary on the GitHub-hosted
     # pool and uploads the same SARIF artifact ("OSV Scanner SARIF file" /
     # osv-results.sarif) so the downstream emit-status job and the CodeQL
     # upload path are unchanged.
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -123,7 +123,7 @@ jobs:
 
   emit-status:
     name: Emit review status
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     # Downloads one small SARIF artifact and runs two inline python snippets —
     # minutes of work. Bound it so a wedged artifact download can't hold a
     # runner for GitHub's 6-hour default (the only unbounded job left in
