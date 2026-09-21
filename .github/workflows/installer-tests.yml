@@ -19,7 +19,7 @@ concurrency:
 jobs:
   powershell:
     name: PowerShell installer tests
-    runs-on: self-hosted
+    runs-on: windows-latest
     timeout-minutes: 15
     steps:
       - name: Checkout code

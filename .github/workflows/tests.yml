@@ -152,7 +152,7 @@ jobs:
           key: test-durations-${{ github.run_id }}
 
   e2e:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout code
