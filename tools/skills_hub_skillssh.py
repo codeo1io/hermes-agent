@@ -134,7 +134,7 @@ class SkillsShSource(SkillSource):
         # Step 1: sitemap index -> per-skill sitemap URLs.
         index_xml = _xml(self.SITEMAP_INDEX_URL, 20)
         skill_sitemap_urls = [m.group(1).strip() for m in self._SITEMAP_LOC_RE.finditer(index_xml or "")
-                              if "sitemap-skills" in m.group(1)]
+                              if "sitemap-skills" in m.group(1) and is_safe_url(m.group(1).strip())]
         if not skill_sitemap_urls:
             return self._featured_skills(limit)
 

@@ -2175,6 +2175,25 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
             f"Provider '{provider_id}' is not an external-process provider.",
             provider=provider_id, code="invalid_provider")
 
+    if provider_id == "pi-rpc":
+        # Pi speaks its native JSONL RPC protocol directly — no ACP bridge.
+        command = os.getenv("HERMES_PI_BIN", "").strip() or "pi"
+        resolved_command = shutil.which(command)
+        if not resolved_command:
+            raise AuthError(
+                f"Could not find the pi binary '{command}'. Install pi or set HERMES_PI_BIN.",
+                provider=provider_id,
+                code="missing_pi_binary",
+            )
+        return {
+            "provider": provider_id,
+            "api_key": "pi-rpc",
+            "base_url": "pi://rpc",
+            "command": resolved_command,
+            "args": ["--mode", "rpc", "--no-session"],
+            "source": "process",
+        }
+
     command, args, base_url, resolved_command, command_env_vars = _external_process_spec(pconfig)
     if not resolved_command and not base_url.startswith("acp+tcp://"):
         _hint = " or set " + "/".join(command_env_vars) if command_env_vars else ""

@@ -9,7 +9,9 @@ import contextlib
 import copy
 import json
 import logging
+import os
 import re
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -2414,13 +2416,29 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 middleware_trace=_tool_middleware_trace,
             )
             return result
+    elif function_name == "delegate_session":
+        def _execute(next_args: dict) -> Any:
+            from tools.delegate_session_tool import delegate_session as _delegate_session
+            return _delegate_session(
+                action=next_args.get("action") or "start",
+                session_id=next_args.get("session_id"),
+                goal=next_args.get("goal"),
+                context=next_args.get("context"),
+                message=next_args.get("message"),
+                timeout=next_args.get("timeout"),
+                parent_agent=agent,
+            )
     else:
         def _execute(next_args: dict) -> Any:
             dispatch_kwargs = dict(
                 tool_call_id=tool_call_id, session_id=agent.session_id or "",
                 turn_id=getattr(agent, "_current_turn_id", "") or "",
                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
-                enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                enabled_tools=(
+                    list(valid_tool_names)
+                    if (valid_tool_names := getattr(agent, "valid_tool_names", None))
+                    else None
+                ),
                 skip_pre_tool_call_hook=True, skip_tool_request_middleware=True,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),

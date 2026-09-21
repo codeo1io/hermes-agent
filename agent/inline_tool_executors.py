@@ -135,6 +135,25 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
     return result
 
 
+def _delegate_session(agent, args: dict, ctx: InlineToolContext) -> Any:
+    return _call_tool(
+        "tools.delegate_session_tool",
+        "delegate_session",
+        args,
+        (
+            ("action", "action", "start"),
+            ("session_id", "session_id"),
+            ("goal", "goal"),
+            ("context", "context"),
+            ("message", "message"),
+            ("timeout", "timeout"),
+            ("wait_seconds", "wait_seconds"),
+            ("backend", "backend"),
+        ),
+        parent_agent=agent,
+    )
+
+
 _read_preview = _callback_tool(
     "tools.read_preview_tool", "read_preview_tool", "read_preview_callback",
     ("start", "start"), ("count", "count"),
@@ -240,6 +259,7 @@ INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
     "manage_connections": _manage_connections,
     "setup_mcp": _setup_mcp_shim,
     "delegate_task": lambda agent, args, ctx: agent._dispatch_delegate_task(args),
+    "delegate_session": _delegate_session,
 }
 
 # ``invoke_tool`` (concurrent path) consults the memory manager right after these three

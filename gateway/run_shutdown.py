@@ -1507,6 +1507,7 @@ class GatewayShutdownMixin:
         """Active work minus wedged turns — what the restart wait waits on."""
         return max(0, self._active_work_count() - self._wedged_agent_count())
 
+
     def _describe_active_work(self) -> list:
         """One dict per in-flight work unit the restart wait is holding for, so an observer
         (``hermes update``, ``hermes gateway status``) can name it instead of printing a bare count.
@@ -1545,12 +1546,58 @@ class GatewayShutdownMixin:
             units.extend({"kind": kind, "pid": os.getpid()} for _ in range(count))
         return units
 
+    def _raise_if_restart_requester_gone(self) -> None:
+        """Abort a planned-stop restart whose requesting process died mid-wait.
+
+        Only the CLI process that wrote the planned-stop marker performs a plain (non-service,
+        non-detached) restart: it waits out this drain, then starts the replacement. If it is
+        gone (terminal timeout, SSH drop) nothing will ever restart the gateway — the drain
+        would shed new runs for the full cap and then exit cleanly, which service managers
+        treat as deliberate. Cancelling resumes serving instead.
+
+        ``via_service`` restarts are completed by the service manager itself and their usual
+        requesters (updater SIGUSR1, control-socket pause-for-update) write no marker — so with
+        no live marker they never cancel. A *live* marker, though, names a concrete stopper
+        process that took responsibility for this pending stop; when that process dies the
+        restart is orphaned in the plain-restart sense even under a via_service request:
+        nobody performs the service restart, and the surviving marker would classify the
+        eventual exit as operator-initiated — a clean exit nothing revives. So a via_service
+        request opts back into this probe exactly when a live marker exists. Detached restarts
+        keep the unconditional skip: the detached helper performs them and no stopper waits
+        out the drain (2026-09-15: via_service request + marker stopper killed by a terminal
+        timeout shed 503s for the whole drain cap).
+        """
+        if self._restart_via_service or self._restart_detached:
+            if self._restart_detached:
+                return
+            from gateway.status import live_planned_stop_marker_present
+            try:
+                if not live_planned_stop_marker_present():
+                    return
+            except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+                return
+        from gateway.status import planned_stop_stopper_alive
+        try:
+            gone = not planned_stop_stopper_alive()
+        except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+            return
+        if gone:
+            logger.warning(
+                "Planned-stop requester is gone; cancelling the pending restart and resuming "
+                "service (orphaned planned-stop marker)"
+            )
+            raise _RestartRequesterGone()
+
     async def _await_active_work_before_restart(self) -> bool:
         """Wait for in-flight work before ``stop()`` so the requesting turn isn't force-interrupted.
 
         Wedged turns are excluded (restart is their remedy). True when drained to zero, False when the
-        cap elapsed or only wedged work remains (caller proceeds to ``stop()``).
+        cap elapsed or only wedged work remains (caller proceeds to ``stop()``). Raises
+        ``_RestartRequesterGone`` when the process that requested a plain planned-stop
+        restart died mid-wait: only it ever performs that restart, so waiting would strand
+        the gateway draining with nothing left to revive it.
         """
+        self._raise_if_restart_requester_gone()
         active = self._active_work_count()
         if active <= 0:
             return True
@@ -1595,6 +1642,7 @@ class GatewayShutdownMixin:
                 )
                 self._scale_to_zero_status("draining", "restart wait: status mark failed")
                 last_status_at = now
+                self._raise_if_restart_requester_gone()
             await asyncio.sleep(0.1)
         if self._active_work_count() > 0:
             logger.warning(
@@ -1602,6 +1650,7 @@ class GatewayShutdownMixin:
                 "proceeding to stop()/drain which will interrupt them", self._active_work_count(),
             )
             return False
+        self._raise_if_restart_requester_gone()
         logger.info("Restart deferred wait complete — active work drained; proceeding to stop()")
         return True
 
@@ -1619,7 +1668,22 @@ class GatewayShutdownMixin:
         self._mark_api_runs_shutdown_requested()
 
         async def _run_restart() -> None:
-            await self._await_active_work_before_restart()
+            try:
+                await self._await_active_work_before_restart()
+            except _RestartRequesterGone:
+                # Orphaned planned stop: nobody is left to perform the restart. Clear the
+                # marker and resume serving instead of draining to a clean exit nothing revives.
+                # NOTE: import the marker-path helper, NOT the plugin-compat pointer
+                # ``clear_planned_stop_marker`` (scripts/check_compat_pointers.py forbids
+                # in-tree use of gateway.status compat names; the block is revert-scheduled).
+                with _log_suppressed(logging.WARNING, "Failed to clear orphaned planned-stop marker: %s"):
+                    from gateway.status import _get_planned_stop_marker_path
+                    _get_planned_stop_marker_path().unlink(missing_ok=True)
+                self._restart_requested = False
+                self._restart_task_started = False
+                self._draining = False
+                self._scale_to_zero_status("running", "stale-stop resume: status mark failed")
+                return
             # Detached helper only AFTER the after-turn wait, or its drain_timeout+5 deadline fires mid-turn.
             if detached:
                 with _log_suppressed(logging.ERROR, "Failed to launch detached gateway restart helper: %s"):

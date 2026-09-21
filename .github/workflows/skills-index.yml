@@ -2,14 +2,21 @@ name: Build Skills Index
 
 on:
   schedule:
-    # Run twice daily: 6 AM and 6 PM UTC
-    - cron: "0 6,18 * * *"
+    # Run daily at 6 AM UTC
+    - cron: "0 6 * * *"
   workflow_dispatch: # Manual trigger
   push:
     branches: [main]
     paths:
       - "scripts/build_skills_index.py"
       - ".github/workflows/skills-index.yml"
+
+# One run per branch (per workflow for schedules): a newer push to the
+# same branch supersedes and cancels the run in flight (U104). Schedules
+# key on the workflow alone - there is no branch to key on.
+concurrency:
+  group: github.workflow-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -74,7 +81,7 @@ jobs:
   trigger-deploy:
     needs: build-index
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 15
     environment: trusted-automation
     steps:

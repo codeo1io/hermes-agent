@@ -30,7 +30,12 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "telegram", "discord", "slack", "whatsapp", "signal",
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
     "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
-    "qqbot", "yuanbao"})
+    "qqbot", "yuanbao",
+    # Stateful transcript surface, not a push channel: delivers by appending
+    # to the target session's transcript (_deliver_to_api_server_transcript),
+    # like the kanban wake lane. Needs no gateway credentials (same-process
+    # SQLite), so the credential gate must not block it.
+    "api_server"})
 
 # Gateway platforms whose adapter declares ``supports_async_delivery = False`` (request/response
 # only, ``send()`` is a stub) — a cron report can never reach them, so they are never a
@@ -670,6 +675,19 @@ def _resolve_single_delivery_target(
             "_resolved_from": "explicit",  # mirror-eligible only under attach_to_session opt-in
         }
     platform_name = deliver_value
+    # Bare "api_server" is a transcript address, not a home-channel platform: the
+    # target is the ORIGIN session id (chat_id IS the session id for this
+    # surface; _deliver_to_api_server_transcript appends there). No env/home
+    # fallback exists — with no origin the target does not resolve.
+    if platform_name.lower() == "api_server":
+        if origin and str(origin.get("platform") or "").lower() == "api_server":
+            return {
+                "platform": platform_name,
+                "chat_id": str(origin["chat_id"]),
+                "thread_id": None,
+                "_resolved_from": "home",  # mirror-eligible primary conversation
+            }
+        return None
     home_provenance = None if from_broadcast else "home"
     if origin and origin.get("platform") == platform_name:
         chat_id = _get_home_target_chat_id(platform_name)
@@ -2028,6 +2046,19 @@ def _deliver_result(
                     delivery_errors.append(bot_chat_error)
                 if receipt and receipt["status"] == "ambiguous":
                     unverified_targets.append(bot_chat_error)
+            continue
+
+        # api_server targets are transcript conversations, not push channels:
+        # send() is a permanent stub on this platform, so deliver by appending
+        # to the target session's transcript — the same visibility model the
+        # kanban wake lane uses. The output becomes visible when the client
+        # next polls history. The target chat_id for an api_server origin IS
+        # the raw session id.
+        if target["platform"] == "api_server":
+            api_err = _deliver_to_api_server_transcript(
+                job, target.get("chat_id") or "", content)
+            if api_err:
+                delivery_errors.append(api_err)
             continue
 
         t = _prepare_target_delivery(

@@ -56,6 +56,14 @@ class _TinyImageHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/404":
             self.send_response(404)
             self.end_headers()
+        elif self.path == "/redirect-metadata":
+            self.send_response(302)
+            self.send_header("Location", "http://169.254.169.254/latest/meta-data/")
+            self.end_headers()
+        elif self.path == "/redirect-loop":
+            self.send_response(302)
+            self.send_header("Location", "/redirect-loop")
+            self.end_headers()
         elif self.path == "/no-type-with-url-ext.jpg":
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
