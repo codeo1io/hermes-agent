@@ -49,7 +49,6 @@ _OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
 _CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
 
-
 def _getenv(name: str, default: str = "") -> str:
     """Profile-scoped os.getenv for credential reads (fail-closed on unscoped reads when multiplexing)."""
     val = _get_secret(name, default)
@@ -76,7 +75,7 @@ def anthropic_route_is_oauth(base_url: Any, credential: Any, *, provider: Option
     pointed at the native host carries the same identity, while third-party Anthropic-protocol
     endpoints never do (Claude Code headers and tool-name transforms 401/403 there). ``credential``
     is a static string or a ``key_cmd``/per-request callable token source; a callable is
-            materialized once for the shape test (``CommandTokenSource`` caches, so this never double-mints)
+    materialized once for the shape test (``CommandTokenSource`` caches, so this never double-mints)
     and a mint failure classifies as non-OAuth — the wire client surfaces the real error.
     """
     text = str(base_url or "").strip()
@@ -130,6 +129,9 @@ def _commit_private_json(path: Path, payload: Any, what: str) -> None:
 # reached its store. Two scopes: process-local (OrderedDict) and a durable sidecar next to the shared singleton
 # file so OTHER processes fail closed too. Non-reversible digests; never cleared.
 _SPENT_ROTATION_LOCK = threading.Lock()
+# Fingerprints of Claude Code refresh tokens the endpoint rejected terminally: the WARNING fires once per token
+# per process and later attempts skip the POST (a re-login rotates the token, so a new one is tried normally).
+_DEAD_REFRESH_TOKEN_FINGERPRINTS: set = set()
 _SPENT_ROTATION_FINGERPRINTS: "OrderedDict[str, None]" = OrderedDict()
 _SPENT_ROTATION_MAX_TRACKED = 64
 _SPENT_ROTATION_SIDECAR_COMMENT = (
@@ -373,10 +375,47 @@ def is_claude_code_token_valid(creds: Dict[str, Any]) -> bool:
 # ── OAuth token endpoint ──
 
 
+# OAuth ``error`` codes (RFC 6749 §5.2 + the provider's reuse detection) after which replaying the
+# same refresh token can never succeed; only a fresh login recovers.
+_OAUTH_GRANT_DEAD_CODES = frozenset({"invalid_grant", "invalid_token", "refresh_token_reused"})
+
+
+class AnthropicOAuthError(ValueError):
+    """Token endpoint rejected the request. ``code`` is the OAuth ``error`` field of the response body."""
+
+    def __init__(self, status: int, code: str, description: str, *, what: str) -> None:
+        self.status = status
+        self.code = code
+        detail = f" ({description})" if description else ""
+        super().__init__(f"Anthropic token {what} failed: HTTP {status} {code or 'error'}{detail}")
+
+    @property
+    def relogin_required(self) -> bool:
+        return self.status in (400, 401) and self.code in _OAUTH_GRANT_DEAD_CODES
+
+
+def is_terminal_anthropic_refresh_error(exc: BaseException) -> bool:
+    """True when retrying the same Anthropic refresh token cannot succeed (dead grant)."""
+    return isinstance(exc, AnthropicOAuthError) and exc.relogin_required
+
+
+def _oauth_http_error(exc: Any, *, what: str) -> AnthropicOAuthError:
+    """``urllib.error.HTTPError`` -> structured error carrying the body's OAuth ``error`` code."""
+    code, description = "", ""
+    try:
+        payload = json.loads(exc.read().decode() or "{}")
+        code = str(payload.get("error") or "")
+        description = str(payload.get("error_description") or "")
+    except Exception:
+        pass
+    return AnthropicOAuthError(int(exc.code), code, description, what=what)
+
+
 def _post_oauth_token(
     data: bytes, *, content_type: str, timeout: int, what: str, user_agent: str = _OAUTH_TOKEN_USER_AGENT
 ) -> Dict[str, Any]:
     """POST to the token endpoints in order; raise the last error if all fail."""
+    import urllib.error
     import urllib.request
     last_error = None
     for endpoint in _OAUTH_TOKEN_URLS:
@@ -386,6 +425,11 @@ def _post_oauth_token(
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            last_error = _oauth_http_error(exc, what=what)
+            logger.debug("Anthropic token %s failed at %s: %s", what, endpoint, last_error)
+            if last_error.relogin_required:
+                break  # a dead grant is dead at every endpoint; do not replay it
         except Exception as exc:
             last_error = exc
             logger.debug("Anthropic token %s failed at %s: %s", what, endpoint, exc)
@@ -442,12 +486,22 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
             # Another process may have spent this token and lost the commit; its sidecar verdict is authoritative.
             if is_rotation_consumed_uncommitted(refresh_token, source_path=cred_path):
                 logger.debug("Refresh token was already consumed by an uncommitted rotation "
-                             "- refusing to replay it; re-run 'claude setup-token'")
+                             "- refusing to replay it; run 'hermes auth add anthropic'")
+                return None
+            fingerprint = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()[:32]
+            if fingerprint in _DEAD_REFRESH_TOKEN_FINGERPRINTS:
+                logger.debug("Claude Code refresh token was already rejected as terminally invalid - not replaying it")
                 return None
             try:
                 refreshed = refresh_anthropic_oauth_pure(refresh_token, use_json=False)
             except Exception as e:
-                logger.debug("Failed to refresh Claude Code token: %s", e)
+                if is_terminal_anthropic_refresh_error(e):
+                    _DEAD_REFRESH_TOKEN_FINGERPRINTS.add(fingerprint)
+                    logger.warning(
+                        "Claude Code OAuth refresh token is terminally invalid (%s); Hermes cannot use this "
+                        "login. Run 'hermes auth add anthropic' to give Hermes its own login.", e)
+                else:
+                    logger.debug("Failed to refresh Claude Code token: %s", e)
                 return None
             # The POST spent ``refresh_token``; this write is the commit step. On failure, fail closed and
             # mark the pre-rotation pair as spent.
@@ -460,7 +514,7 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
                 logger.error(
                     "Anthropic OAuth refresh rotated the single-use token but could not "
                     "commit it to %s (%s) — treating the refresh as failed; "
-                    "re-run 'claude setup-token' to reauthenticate",
+                    "run 'hermes auth add anthropic' to give Hermes its own login",
                     cred_path, e,
                 )
                 mark_rotation_consumed_uncommitted(
@@ -567,7 +621,7 @@ def _resolve_claude_code_token_from_credentials(creds: Optional[Dict[str, Any]] 
     logger.debug("Claude Code credentials expired — attempting refresh")
     refreshed = _refresh_oauth_token(creds)
     if not refreshed:
-        logger.debug("Token refresh failed — re-run 'claude setup-token' to reauthenticate")
+        logger.debug("Token refresh failed — run 'hermes auth add anthropic' to give Hermes its own login")
     return refreshed or None
 
 
@@ -613,17 +667,44 @@ def _resolve_anthropic_pool_token(*, skip_borrowed: bool = False) -> Optional[st
     return None
 
 
-def resolve_anthropic_token() -> Optional[str]:
-    """Resolve an Anthropic token from all sources in priority order (see module docstring)."""
+def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Optional[str]:
+    """Return *token* unless the pool holds an active cooldown for it on *model*.
+
+    Only model-aware callers (the API-call paths) are gated: diagnostics that
+    resolve a token without a model (usage display, model discovery) keep it.
+    """
+    if not token or not model:
+        return token or None
+    try:
+        from agent.credential_pool import load_pool
+        if load_pool("anthropic").token_is_blocked(token, model=model):
+            return None
+    except Exception:
+        # Credential discovery must remain available when the pool store is
+        # unavailable or malformed.
+        logger.debug("Failed to check Anthropic model cooldown", exc_info=True)
+    return token
+
+
+def resolve_anthropic_token(*, model: Optional[str] = None) -> Optional[str]:
+    """Resolve an Anthropic token from all sources in priority order (see module docstring).
+
+    With *model*, a token the credential pool has benched for that model resolves to ``None``
+    instead of being handed straight back to the caller that just saw it rate-limited."""
     _read_creds = functools.cache(read_claude_code_credentials)  # read the file at most once per resolve
     token = _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     if token:
-        return _prefer_refreshable_claude_code_token(token, _read_creds()) or token
+        return _available_anthropic_token(
+            _prefer_refreshable_claude_code_token(token, _read_creds()) or token, model,
+        )
     api_key = _first_env("ANTHROPIC_API_KEY")  # an explicit API key must not be shadowed by discovered OAuth creds
     if api_key:
-        return api_key
+        return _available_anthropic_token(api_key, model)
     # The pool's claude_code row mirrors the same externally owned refresh grant.
-    return _resolve_anthropic_pool_token(skip_borrowed=True) or _resolve_claude_code_token_from_credentials(_read_creds())
+    return _available_anthropic_token(
+        _resolve_anthropic_pool_token(skip_borrowed=True) or _resolve_claude_code_token_from_credentials(_read_creds()),
+        model,
+    )
 
 
 def run_oauth_setup_token() -> Optional[str]:
