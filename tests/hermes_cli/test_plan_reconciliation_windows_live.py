@@ -21,7 +21,7 @@ import pytest
 
 # ``windows_only`` rather than ``skipif(sys.platform != "win32")``: the Windows CI job
 # selects ``-m windows_only``, so a bare skipif left this live E2E running on no host.
-pytestmark = pytest.mark.windows_only
+pytestmark = [pytest.mark.windows_only, pytest.mark.spawns_gateway_lookalike]
 
 
 def test_plan_reconciliation_live_windows(tmp_path, monkeypatch):
