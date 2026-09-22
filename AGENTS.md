@@ -214,7 +214,7 @@ hermes-agent/
 ├── evals/                # Offline benchmarks (codebase_navigability/, compaction/, ...)
 ├── scripts/              # run_tests.sh, release.py, check_compat_pointers.py, ci/
 ├── website/              # Docusaurus docs (developer-guide/ holds the long-form area docs)
-└── tests/                # Pytest suite (~39k tests / ~3.7k files, Sep 2026)
+└── tests/                # Pytest suite (~39k tests / ~4.2k files; counts drift — filesystem is canonical)
 ```
 
 **User state:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (secrets only),

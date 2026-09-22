@@ -25,6 +25,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
@@ -65,6 +66,29 @@ def _is_oauth_token(key: str) -> bool:
     if not key or key.startswith("sk-ant-api"):
         return False
     return key.startswith(("sk-ant-", "eyJ", "cc-"))
+
+
+def anthropic_route_is_oauth(base_url: Any, credential: Any, *, provider: Optional[str] = None) -> bool:
+    """Claude Code OAuth identity for one Anthropic Messages route (#114967).
+
+    The route qualifies when it is the ``anthropic`` provider itself or its host is exactly
+    ``api.anthropic.com`` (an empty base_url is the native default) — a named custom provider
+    pointed at the native host carries the same identity, while third-party Anthropic-protocol
+    endpoints never do (Claude Code headers and tool-name transforms 401/403 there). ``credential``
+    is a static string or a ``key_cmd``/per-request callable token source; a callable is
+            materialized once for the shape test (``CommandTokenSource`` caches, so this never double-mints)
+    and a mint failure classifies as non-OAuth — the wire client surfaces the real error.
+    """
+    text = str(base_url or "").strip()
+    native_host = not text or (urlparse(text).hostname or "").lower().rstrip(".") == "api.anthropic.com"
+    if not (native_host or (provider or "").strip().lower() == "anthropic"):
+        return False
+    if callable(credential) and not isinstance(credential, str):
+        try:
+            credential = credential()
+        except Exception:  # noqa: BLE001 — classification must never raise
+            return False
+    return isinstance(credential, str) and _is_oauth_token(credential)
 
 
 class CredentialPersistError(RuntimeError):
@@ -307,8 +331,12 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
 
 
 def claude_code_credentials_path() -> Path:
-    """Claude Code's shared OAuth file; every profile reads/writes this same path."""
-    return Path.home() / ".claude" / ".credentials.json"
+    """Claude Code's shared OAuth file; every profile reads/writes this same path. Honours ``CLAUDE_CONFIG_DIR``
+    like the Claude CLI itself (blank = unset, as in ``hermes_cli.foreign_sessions``). The supported opt-out of
+    borrowing the login is ``auth.adopt_external_logins: false`` in config.yaml."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    root = Path(override).expanduser() if override else Path.home() / ".claude"
+    return root / ".credentials.json"
 
 
 def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
@@ -319,7 +347,13 @@ def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
 def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
     """Read refreshable Claude Code OAuth credentials (Keychain and/or file). When both exist: prefer the only
     non-expired one (Claude Code 2.1.x refreshes one source but not the other), else the later ``expiresAt`` so a
-    refresh uses the freshest refreshToken. ~/.claude.json primaryApiKey is deliberately excluded."""
+    refresh uses the freshest refreshToken. ~/.claude.json primaryApiKey is deliberately excluded.
+
+    This is the only reader of the borrowed login, so ``auth.adopt_external_logins: false`` is enforced here:
+    every resolver, pool seed/sync and 401 refresher then sees "no Claude Code login" and never touches the file."""
+    from agent.credential_sources import adopt_external_logins_enabled
+    if not adopt_external_logins_enabled():
+        return None
     kc_creds = _read_claude_code_credentials_from_keychain()
     file_creds = _read_claude_code_credentials_from_file()
     if not (kc_creds and file_creds):

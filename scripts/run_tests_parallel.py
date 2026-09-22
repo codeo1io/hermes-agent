@@ -505,6 +505,16 @@ def _run_one_file_once(
     # leak writes into a directory nobody reads.
     env = os.environ.copy()
     temproot = tempfile.mkdtemp(prefix="r-", dir=_runner_scratch_root())
+    # Throwaway HOME/HERMES_HOME: isolate the subprocess from the host
+    # user's real ~/.hermes (the runner host doubles as a production
+    # Hermes gateway machine — a leaky fixture once rewrote the live
+    # gateway's config.yaml, 2026-09-15 outage). Defined BEFORE the
+    # subprocess launches so the finally-block cleanup below can't hit
+    # an unbound name (the rewrite dropped the creation but kept the
+    # rmtree, crashing every successful run with NameError).
+    home_root = tempfile.mkdtemp(prefix="hermes-pytest-home-")
+    env["HOME"] = home_root
+    env["HERMES_HOME"] = os.path.join(home_root, ".hermes")
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
     # Every tempfile.* call inside the test process lands in the same per-run root, so the
     # parent's cleanup of ``temproot`` removes them too instead of leaving them in /tmp.

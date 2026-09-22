@@ -4455,9 +4455,9 @@ class GatewayRunner(
                 raise ProfileRouteRejected(matched.name)
             return matched.profile
         logger.debug(
-            "No profile route matched: platform=%s chat_id=%s thread_id=%s parent_chat_id=%s",
+            "No profile route matched: platform=%s chat_id=%s thread_id=%s parent_chat_id=%s user_id=%s",
             source.platform.value, source.chat_id,
-            getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None))
+            getattr(source, "thread_id", None), getattr(source, "parent_chat_id", None), source.user_id)
         return None
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> "Path":

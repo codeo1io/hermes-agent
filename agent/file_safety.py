@@ -245,6 +245,11 @@ def build_write_approval_paths(home: str) -> set[str]:
 # deliberately NOT here (#45947): read-denied, but the user may ask to edit them.
 _HERMES_PROTECTED_SUBPATHS = ("state.db", "sessions", "mcp-tokens", "pairing", "vault", "browser-profile")
 
+# Read-denied directories that are also secret material, so writes are blocked
+# too. Kept as its own tuple (not derived from _READ_DENIED_DIRS) so adding a
+# read-only *convenience* deny later cannot silently become a write deny.
+_WRITE_DENIED_SECRET_DIRS = ("vault", "browser-profile")
+
 
 def _classify_write_denial(path: str) -> Optional[str]:
     """Return ``'credential'``, ``'safe_root'``, ``'nt_namespace'``, or ``None`` if writes are allowed."""
@@ -269,6 +274,15 @@ def _classify_write_denial(path: str) -> Optional[str]:
 
     for base in _hermes_dirs():
         for sub in _HERMES_PROTECTED_SUBPATHS:
+            with suppress(Exception):
+                if _is_under(resolved, os.path.realpath(os.path.join(str(base), sub))):
+                    return "credential"
+
+        # vault/ (key + ciphertext side by side) and browser-profile/ (copied
+        # cookies / Login Data) are secret stores, not control files, so the
+        # #45947 relaxation does not cover them. mcp-tokens/ is already in
+        # _HERMES_PROTECTED_SUBPATHS.
+        for sub in _WRITE_DENIED_SECRET_DIRS:
             with suppress(Exception):
                 if _is_under(resolved, os.path.realpath(os.path.join(str(base), sub))):
                     return "credential"
