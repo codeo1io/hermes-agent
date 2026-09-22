@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-22T06:21:18Z","summary":"re-dispatch after envelope timeout: reusing valid 868ed09a suite+A/B evidence; verifying tree identity then emitting","touched":[]}
+{"step":2,"ts":"2026-09-22T06:22:47Z","summary":"phase_result JSON written+validated to result channel; digest verbatim 8a179433; zero-regression proven","touched":["/home/agent/.hermes/conductor-delegate-spool-infra-deploy/delegate/8f0d981deb084922aaafeaecfd2a698d.json"]}

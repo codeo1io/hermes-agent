@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-22T05:21:18Z","summary":"full_tests start: sanctioned full-suite run via scripts/run_tests.sh (full_command is forbidden xdist pattern)","touched":[]}
+{"step":2,"ts":"2026-09-22T06:16:45Z","summary":"full suite done: 48819 passed/33 failed/387 skipped 2664.9s; 27 failing files, none batch surfaces; stash A/B starting","touched":[]}

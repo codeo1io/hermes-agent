@@ -27,7 +27,7 @@ def homes(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
     monkeypatch.setattr(gm, "_live_gateway_pid", lambda home: None)
-    monkeypatch.setattr(gm, "_installed_service", lambda home: None)
+    monkeypatch.setattr(gm, "_installed_services", lambda home: [])
     return root, root / "profiles" / "worker"
 
 

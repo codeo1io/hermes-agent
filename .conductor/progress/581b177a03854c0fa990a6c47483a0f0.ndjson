@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-22T07:19:24Z","summary":"dispatch verified: port tree @ ad562a8b0b clean; digest matches 5bb2b732","touched":[]}
+{"step":2,"ts":"2026-09-22T07:20:49Z","summary":"seam fix applied; targeted 4-file battery green","touched":["tests/hermes_cli/test_profile_credential_collisions.py"]}

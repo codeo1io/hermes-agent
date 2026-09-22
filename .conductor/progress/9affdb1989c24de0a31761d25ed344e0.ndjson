@@ -1,0 +1,6 @@
+{"step":1,"ts":"2026-09-22T06:57:50Z","summary":"tree state: HEAD bcf55bba==digest base; 15 M + 2 untracked tests + .conductor/; stash empty","touched":[]}
+{"step":2,"ts":"2026-09-22T06:57:55Z","summary":"digest recomputed over tree == dispatch digest 900d36cb… byte-for-byte (verbatim declared)","touched":[]}
+{"step":3,"ts":"2026-09-22T06:58:00Z","summary":"post-anchor scan: ZERO files newer than 06:48:41 anywhere incl .conductor/ — nothing changed after last validated write","touched":[]}
+{"step":4,"ts":"2026-09-22T06:58:05Z","summary":"durable records read (full-suite 868ed09a Summary, targeted log, det18, erratum snapshot, review findings); 7e99d848 /tmp log pruned — covered by emission+digest chain","touched":[]}
+{"step":5,"ts":"2026-09-22T06:58:10Z","summary":"consolidated probe log written /tmp/release_integrity_9affdb19.log (57 lines, no suite run)","touched":["/tmp/release_integrity_9affdb19.log"]}
+{"step":6,"ts":"2026-09-22T06:58:15Z","summary":"phase_result JSON written to result channel 9affdb1989c24de0a31761d25ed344e0.json; scope release-integrity, outcome passed","touched":["/home/agent/.hermes/conductor-delegate-spool-infra-deploy/delegate/9affdb1989c24de0a31761d25ed344e0.json"]}
