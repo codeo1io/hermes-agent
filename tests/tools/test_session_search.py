@@ -17,6 +17,7 @@ import pytest
 
 from hermes_state import SessionDB
 from tools.session_search_tool import (
+    _EXCLUDE_SESSION_IDS_CAP,
     SESSION_SEARCH_SCHEMA,
     _format_timestamp,
     _is_compacted_message,
@@ -1312,3 +1313,31 @@ class TestDiscoverySessionExclusion:
         sids = [r["session_id"] for r in excluded["results"]]
         assert "s_child" not in sids
         assert "s_root" not in sids
+
+    def test_exclude_cap_truncation_is_surfaced_in_output(self, db):
+        # Regression for the silent-truncate class: with more distinct ids than
+        # _EXCLUDE_SESSION_IDS_CAP the response must SAY so, because the ids past the
+        # cap (here: s_newest) still apply and can resurface in results.
+        _seed_modpack_sessions(db)
+        filler = [f"s_filler_{i}" for i in range(_EXCLUDE_SESSION_IDS_CAP)]
+        result = json.loads(session_search(
+            query="modpack",
+            limit=5,
+            exclude_session_ids=filler + ["s_newest"],
+            db=db,
+        ))
+        assert result["success"] is True
+        assert "capped at" in result["note"]
+        assert "s_newest" in [r["session_id"] for r in result["results"]]
+
+    def test_exclude_within_cap_emits_no_note(self, db):
+        _seed_modpack_sessions(db)
+        result = json.loads(session_search(
+            query="modpack",
+            limit=5,
+            exclude_session_ids=["s_newest"],
+            db=db,
+        ))
+        assert result["success"] is True
+        assert "note" not in result
+        assert "s_newest" not in [r["session_id"] for r in result["results"]]

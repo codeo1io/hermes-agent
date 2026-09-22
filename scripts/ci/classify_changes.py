@@ -103,6 +103,17 @@ _PY_RELEVANT_CONTRACT_FILES = {
     "apps/desktop/src/lib/desktop-slash-registry.json",
 }
 
+# Cross-language contract files in the OTHER direction: Python sources a vitest
+# suite pins against (the relay-deliver-budget mirror reads these to detect drift
+# between TS constants and backend defaults, #93911). A Python-only PR would
+# otherwise skip the js-tests lane and the mirror drifts green-on-PR/red-on-main —
+# the exact inverse of _PY_RELEVANT_CONTRACT_FILES above.
+_JS_RELEVANT_CONTRACT_FILES = {
+    # apps/desktop/src/plugins/hermes-bots/relay-deliver-budget.test.ts
+    "tools/bot_relay.py",
+    "hermes_cli/config_defaults.py",
+}
+
 # CI-sensitive files: eslint config, workflow files, composite actions.
 # Changes here can influence what code the autofix job executes and pushes to
 # main, so they require explicit maintainer review (ci-reviewed label).
@@ -228,7 +239,7 @@ def classify(files: list[str]) -> dict[str, bool]:
     python = any(not _py_irrelevant(f) for f in files)
     python_prod = any(not _py_irrelevant(f) and not _py_test_only(f) for f in files)
     frontend = any(
-        f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES
+        f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES or f in _JS_RELEVANT_CONTRACT_FILES
         for f in files
     )
     deps = any(f == "pyproject.toml" for f in files)

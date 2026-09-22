@@ -370,15 +370,7 @@ Cron job prompts run in completely fresh sessions with no memory of prior conver
 
 ### Use Docker for Safety
 
-On a shared team bot, use Docker as the terminal backend so agent commands run in a container instead of on your host:
-
-```bash
-# In ~/.hermes/.env
-TERMINAL_ENV=docker
-TERMINAL_DOCKER_IMAGE=nikolaik/python-nodejs:python3.11-nodejs20
-```
-
-Or in `~/.hermes/config.yaml`:
+On a shared team bot, use Docker as the terminal backend so agent commands run in a container instead of on your host. Set it in `~/.hermes/config.yaml` — behavioral config belongs there, not `.env` (which is for secrets only):
 
 ```yaml
 terminal:

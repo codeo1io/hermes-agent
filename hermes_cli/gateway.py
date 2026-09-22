@@ -1499,6 +1499,18 @@ def _print_served_ingress_urls(profile: str | None = None) -> None:
             print(line)
 
 
+def _print_duplicate_credential_warnings() -> None:
+    """The migrate preflight's duplicate-credential findings, so ``gateway status`` explains a parked
+    or racing bot (and why the fleet will not fold) with the same words as ``migrate --dry-run``."""
+    with contextlib.suppress(Exception):
+        from hermes_cli.gateway_migrate import duplicate_credential_findings
+        lines = duplicate_credential_findings()
+        if lines:
+            print()
+            for line in lines:
+                print(f"⚠ {line}")
+
+
 def _print_other_profiles_gateway_status() -> None:
     """Print other profiles' running gateways at the bottom of ``hermes gateway status``."""
     try:
@@ -6370,6 +6382,7 @@ def _cmd_status(args):
             print("  hermes gateway run      # Run in foreground")
             _print_lines(*_STATUS_STOPPED_HINTS[_status_host_kind()])
 
+    _print_duplicate_credential_warnings()
     _print_other_profiles_gateway_status()
 
 

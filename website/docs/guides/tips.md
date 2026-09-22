@@ -181,12 +181,13 @@ Messaging sessions persist until an explicit `/new` or `/reset`. Context compres
 
 ### Use Docker for Untrusted Code
 
-When working with untrusted repositories or running unfamiliar code, use Docker or Daytona as your terminal backend. Set `TERMINAL_ENV=docker` in your `.env`. Destructive commands inside a container can't harm your host system.
+When working with untrusted repositories or running unfamiliar code, use Docker or Daytona as your terminal backend. Destructive commands inside a container can't harm your host system. Set the backend in `config.yaml` — this is behavioral config, not a secret, so `.env` is the wrong home for it (a stale `TERMINAL_ENV` left in `.env` is actively cleaned up as legacy state and can flip the backend back mid-session):
 
-```bash
-# In your .env:
-TERMINAL_ENV=docker
-TERMINAL_DOCKER_IMAGE=hermes-sandbox:latest
+```yaml
+# In ~/.hermes/config.yaml:
+terminal:
+  backend: docker
+  docker_image: hermes-sandbox:latest
 ```
 
 ### Avoid Windows Encoding Pitfalls

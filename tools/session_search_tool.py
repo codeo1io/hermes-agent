@@ -11,7 +11,7 @@ No LLM calls — every shape returns actual DB messages.
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from hermes_state_common import _BOUNDARY_END_REASONS
 
@@ -110,12 +110,12 @@ def _resolve_lineage(db, session_id: str) -> str:
     return _resolve_to_parent(db, session_id)[0]
 
 
-def _parse_iso_bound(value: Optional[str], *, as_exclusive_end: bool = False) -> Optional[int]:
+def _parse_iso_bound(value: Optional[str]) -> Optional[int]:
     """Parse an ISO date/datetime into a UTC unix timestamp.
 
-    A date-only value (``YYYY-MM-DD``) is midnight UTC on that day. When
-    ``as_exclusive_end`` is True, that midnight is the exclusive upper bound
-    (``before=2026-07-01`` keeps June, drops July 1 00:00).
+    A date-only value (``YYYY-MM-DD``) is midnight UTC on that day. Callers apply
+    the result as an exclusive end (``before=2026-07-01`` keeps June, drops July 1
+    00:00 — the SQL comparison is ``started_ts < before_ts``).
     """
     if value is None:
         return None
@@ -157,17 +157,25 @@ def _in_time_window(started_ts: Optional[int], after_ts: Optional[int], before_t
     return (after_ts is None or started_ts >= after_ts) and (before_ts is None or started_ts < before_ts)
 
 
-def _normalize_exclude_session_ids(raw: Any) -> List[str]:
-    """Deduped, stripped session ids from a str or list, capped at ``_EXCLUDE_SESSION_IDS_CAP``."""
+def _normalize_exclude_session_ids(raw: Any) -> Tuple[List[str], Optional[str]]:
+    """Deduped, stripped session ids from a str or list, capped at ``_EXCLUDE_SESSION_IDS_CAP``.
+
+    Returns ``(ids, note)``; ``note`` is set only when the input carried more distinct
+    valid ids than the cap, so the caller can tell the agent that later ids still apply —
+    silently truncating would let an "already inspected" session resurface unnoticed.
+    """
     items = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple)) else []
     out: List[str] = []
     for item in items:
         sid = item.strip() if isinstance(item, str) else ""
         if sid and sid not in out:
+            if len(out) >= _EXCLUDE_SESSION_IDS_CAP:
+                return out, (
+                    f"exclude_session_ids capped at {_EXCLUDE_SESSION_IDS_CAP}: only the first "
+                    f"{_EXCLUDE_SESSION_IDS_CAP} ids are applied — sessions listed later can "
+                    "still appear in results.")
             out.append(sid)
-        if len(out) >= _EXCLUDE_SESSION_IDS_CAP:
-            break
-    return out
+    return out, None
 
 
 def _excluded_lineage_roots(db, exclude_session_ids: List[str]) -> set[str]:
@@ -332,7 +340,8 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
 def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort: Optional[str],
               detail: str, current_session_id: str = None, link_profile: str = None,
               after_ts: Optional[int] = None, before_ts: Optional[int] = None,
-              exclude_session_ids: Optional[List[str]] = None) -> str:
+              exclude_session_ids: Optional[List[str]] = None,
+              exclude_note: Optional[str] = None) -> str:
     """Discovery shape: FTS5 plus adaptive or full result hydration."""
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None
     excluded_roots = _excluded_lineage_roots(db, exclude_session_ids or [])
@@ -404,7 +413,8 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             results.append(entry)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
+    note_kwargs = {"note": exclude_note} if exclude_note else {}
+    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), **note_kwargs, link_hint=(
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "
@@ -586,15 +596,16 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
         return _list_recent_sessions(db, limit, current_session_id, link_profile=profile)
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     try:
-        after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before, as_exclusive_end=True)
+        after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before)
     except ValueError as e:
         return tool_error(str(e), success=False)
+    exclude_ids, exclude_note = _normalize_exclude_session_ids(exclude_session_ids)
     return _discover(
         db=db, query=query.strip(), limit=limit, sort=sort_norm if sort_norm in ("newest", "oldest") else None,
         role_filter=([r.strip() for r in role_filter.split(",") if r.strip()] or None) if isinstance(role_filter, str) else None,
         detail="full" if isinstance(detail, str) and detail.strip().lower() == "full" else "adaptive",
         current_session_id=current_session_id, link_profile=profile, after_ts=after_ts, before_ts=before_ts,
-        exclude_session_ids=_normalize_exclude_session_ids(exclude_session_ids))
+        exclude_session_ids=exclude_ids, exclude_note=exclude_note)
 
 
 def session_search(query: str = "", role_filter: str = None, limit: int = 3, db=None,
