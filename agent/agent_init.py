@@ -721,7 +721,7 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # must use their own key or Anthropic credentials leak to third-party endpoints.
     # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
     _is_native_anthropic = agent.provider == "anthropic"
-    effective_key = api_key or (resolve_anthropic_token() if _is_native_anthropic else None) or ""
+    effective_key = api_key or (resolve_anthropic_token(model=getattr(agent, "model", None)) if _is_native_anthropic else None) or ""
 
     # MiniMax OAuth tokens live ~15 min and the SDK freezes api_key at construction, so use a
     # callable provider: build_anthropic_client mints a fresh bearer per request (re-reading
@@ -739,14 +739,13 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
 
     agent.api_key = effective_key
     agent._anthropic_api_key = effective_key
-    # OAuth only for native Anthropic: third-party anthropic_messages providers must never
-    # trip OAuth paths — those inject Claude-Code identity headers → 401/403.
-    # Only mark the session as OAuth-authenticated when the token genuinely belongs to native Anthropic.
-    # Third-party providers (MiniMax, Kimi, GLM, LiteLLM proxies) that accept the Anthropic protocol must
-    # never trip OAuth code paths — doing so injects Claude-Code identity headers and system prompts that
+    # OAuth only for native Anthropic routes (the anthropic provider, or a custom provider whose host
+    # is exactly api.anthropic.com, incl. a key_cmd callable token — #114967). Third-party
+    # providers (MiniMax, Kimi, GLM, LiteLLM proxies) that accept the Anthropic protocol must never
+    # trip OAuth code paths — doing so injects Claude-Code identity headers and system prompts that
     # cause 401/403 on their endpoints. See #1739.
-    from agent.anthropic_credentials import _is_oauth_token as _is_oat
-    agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
+    from agent.anthropic_credentials import anthropic_route_is_oauth
+    agent._is_anthropic_oauth = anthropic_route_is_oauth(base_url, effective_key, provider=agent.provider)
     agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
     if not agent.quiet_mode:
         print(f"🤖 AI Agent initialized with model: {agent.model} (Anthropic native)")
