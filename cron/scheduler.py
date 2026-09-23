@@ -3214,7 +3214,7 @@ def _launch_external_cron_worker(job: dict, *, _handoff_attempt: int = 0) -> boo
     with _running_lock:
         _restart_safe_waiter_job_ids.add(job_id)
 
-    def _worker_exited_before_ack(process, returncode: int) -> str:
+    def _worker_exited_before_ack() -> str:
         """Classify a pre-ack worker exit against the durable ledger.
 
         Returns ``"terminal"`` (the worker recorded an outcome — trust it),
@@ -3293,7 +3293,7 @@ def _launch_external_cron_worker(job: dict, *, _handoff_attempt: int = 0) -> boo
             )
         returncode = process.poll()
         if returncode is not None:
-            disposition = _worker_exited_before_ack(process, returncode)
+            disposition = _worker_exited_before_ack()
             if disposition == "never_adopted" and attempt == 0:
                 # Pre-adoption death under load (busy ledger at adopt time):
                 # the ledger proves no side effect ran. Retry the SAME tick on

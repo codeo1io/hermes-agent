@@ -1574,6 +1574,15 @@ stt:
 #     model: ""
 #     voice: "default"
 
+# Native vision embeds (vision_analyze results, browser screenshots on vision-capable
+# main models) ride conversation history and are re-sent on every later API call.
+# vision:
+#   # Byte budget for one embedded image, clamped to 64 KiB..4 MiB (the clamp
+#   # keeps one setting from turning every later request into a multi-megabyte
+#   # resend or a useless thumbnail). Raise it for dense phone screenshots of
+#   # tables the model calls "unreadable" at the 256 KiB default.
+#   embed_target_bytes: 262144
+
 # "Hey Hermes" hands-free wake word (off by default; toggle with /wake).
 # Full engine/provider options inherit from DEFAULT_CONFIG in
 # hermes_cli/config_defaults.py — only capture placement is documented here.
