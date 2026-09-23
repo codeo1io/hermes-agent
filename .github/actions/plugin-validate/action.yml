@@ -5,7 +5,7 @@ description: >-
   `hermes plugins validate`. Drop this into your plugin repo's CI:
 
     - uses: actions/checkout@<sha>
-    - uses: NousResearch/hermes-agent/.github/actions/plugin-validate@main
+    - uses: NousResearch/hermes-agent/.github/actions/plugin-validate@400f11bd35fae0da91c396a1424315da81729982 # pinned 2026-09-23 (upstream main at pin time; re-pin deliberately when validator changes matter)
       with:
         path: .
 
