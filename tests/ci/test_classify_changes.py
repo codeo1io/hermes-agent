@@ -113,6 +113,23 @@ CASES = {
         ["apps/desktop/src/lib/desktop-slash-registry.json"],
         _lanes(python=True, frontend=True),
     ),
+    # Mirror direction of the contract cases above: these Python sources are
+    # regexed by apps/desktop/src/plugins/hermes-bots/relay-deliver-budget.test.ts
+    # (#93911), so a backend-only PR touching them must still run the JS lane.
+    "bot-relay source → python + frontend": (
+        ["tools/bot_relay.py"],
+        _lanes(python=True, scan=True, frontend=True),
+    ),
+    "bot-mode defaults → python + frontend": (
+        ["hermes_cli/config_defaults.py"],
+        _lanes(python=True, scan=True, frontend=True),
+    ),
+    # ...but the mapping is exact, not globbed: ordinary backend code stays
+    # frontend-free.
+    "gateway source → python only": (
+        ["gateway/run.py"],
+        _lanes(python=True, scan=True),
+    ),
     # The published CIMD document is asserted about by the Python suite, so a
     # lone edit there must not skip the lane that would catch a bad edit.
     "cimd document → python + site": (

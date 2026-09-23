@@ -69,6 +69,17 @@ import sys
 _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
 # Shipped page outside those packages, exercised by the desktop Electron suite.
 _FRONTEND_FILES = {"scripts/desktop-update/ui.html"}
+# Mirror direction of _PY_RELEVANT_CONTRACT_FILES: backend sources a vitest suite
+# pins. relay-deliver-budget.test.ts (#93911) regexes these two files to hold the
+# bot-relay deadline budget (TURN_ATTEMPT_TIMEOUT_SECONDS vs bot_mode
+# .turn_wait_seconds) to the JS side's arithmetic. A Python-only PR touching either
+# must still run the JS lane (js-tests gates on frontend) or the mirror goes green
+# on main by omission — exactly the drift the cross-language contracts above guard
+# in the other direction.
+_FRONTEND_RELEVANT_BACKEND_FILES = {
+    "tools/bot_relay.py",
+    "hermes_cli/config_defaults.py",
+}
 _ROOT_NPM = {"package.json", "package-lock.json"}  # shifts every package's tree
 _DOCKER_META = ("docker/", ".hadolint.yml", "Dockerfile") # docker setup
 _NIX_PATHS = ("nix/",) # nix files
@@ -229,6 +240,7 @@ def classify(files: list[str]) -> dict[str, bool]:
     python_prod = any(not _py_irrelevant(f) and not _py_test_only(f) for f in files)
     frontend = any(
         f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES
+        or f in _FRONTEND_RELEVANT_BACKEND_FILES
         for f in files
     )
     deps = any(f == "pyproject.toml" for f in files)
