@@ -653,7 +653,7 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
     # Suffix quality: pro/max/plus/turbo (0) > no suffix / omni / flash / mini (1). "sol" is the
     # flagship tier of the GPT-5.6 series (sol > terra > luna); without it `/model gpt` would
     # tiebreak alphabetically onto luna, the cheapest. Revisit if a vendor ships a non-flagship "-sol".
-    suffix_rank = 0 if suffix in ("pro", "max", "plus", "turbo", "sol") else 1
+    suffix_rank = 0 if suffix in ("pro", "max", "plus", "turbo", "sol", "astra") else 1
     return version_key + (suffix_rank, suffix) + date_key
 
 
