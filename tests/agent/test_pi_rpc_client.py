@@ -151,6 +151,74 @@ def test_run_session_prompt_reconciles_more_complete_final_assistant_text(tmp_pa
     client.close()
 
 
+
+def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continues(tmp_path):
+    script = tmp_path / "fake-pi-progress"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        for i in range(6):\n"
+        + "            time.sleep(0.04)\n"
+        + "            send({'type':'message_update','assistantMessageEvent':{'type':'thinking_delta','delta':'tick'}})\n"
+        + "        send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'done'}})\n"
+        + "        send({'type':'agent_settled'})\n"
+        + "    elif typ == 'get_last_assistant_text':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'text':'done'}})\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+        + "    elif typ == 'abort':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://progress-test",
+        persistent_session=True,
+    )
+    started = time.monotonic()
+    result = client.run_session_prompt("go", timeout_seconds=0.08)
+    elapsed = time.monotonic() - started
+    assert elapsed > 0.20
+    assert result["text"] == "done"
+    client.close()
+
+
+def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
+    script = tmp_path / "fake-pi-stall"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        time.sleep(1)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://stall-test",
+        persistent_session=True,
+    )
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="stalled after .* without observable progress"):
+        client.run_session_prompt("go", timeout_seconds=0.08)
+    assert time.monotonic() - started < 0.8
+    client.close()
+
+
 # ------------------------------------------------- answer text mapping
 
 @pytest.mark.parametrize(
