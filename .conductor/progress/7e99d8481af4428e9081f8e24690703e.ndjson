@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-22T06:44:24Z","summary":"re-emit attempt 7e99d848: verify tree unchanged + evidence logs intact + re-derive digest","touched":[]}
+{"step":2,"ts":"2026-09-22T06:46:41Z","summary":"prior attempt edits did not persist (verified); tag v2026.9.21 deref d337b736aa1 verified; applying 6 fixes now","touched":[]}

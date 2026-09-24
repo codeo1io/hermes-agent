@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-22T04:28:34Z","summary":"pool scoped to rm-001..032 minus cycle-1-closed; seams verified (classifier :98, lockguard, sentinel, tests dirs)","touched":[".conductor/progress/cd90b7f79d9644fdba3f03766a8063b3.ndjson"]}
+{"step":2,"ts":"2026-09-22T04:31:05Z","summary":"batch artifact + result JSON written; batch=rm-022,021,029,028+019,032 (+rm-030 stretch)","touched":[".conductor/prioritize/cd90b7f79d9644fdba3f03766a8063b3-batch.md","/home/agent/.hermes/conductor-delegate-spool-infra-deploy/delegate/cd90b7f79d9644fdba3f03766a8063b3.json"]}

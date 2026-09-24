@@ -1,0 +1,3 @@
+{"step":2,"ts":"2026-09-22T07:25:00Z","event":"full_suite_launched_detached","runner":"scripts/run_tests.sh","log":"/tmp/full_suite_4aa910d0.log"}
+{"step":4,"ts":"2026-09-22T08:15:11Z","event":"solo_rerun_nocollection_plus_cron_cluster"}
+{"step":5,"ts":"2026-09-22T08:16:44Z","event":"phase_result_emitted","status":"succeeded","suite":"55415/53/502 in 2835.7s"}
