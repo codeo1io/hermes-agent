@@ -749,6 +749,14 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    # Choke parity with init_db (wave-12, 2026-09-24 fix-queue item 97): the
+    # guard must fire on EVERY entry into the DB layer, not only the explicit
+    # init path. A test-context process that lazily imports and calls connect()
+    # directly — the wave-9 CI-leak shape init_db's guard was added for, and
+    # the wave-12 e2e regression's spawned pytest children — reaches the live
+    # board here unguarded when this call is missing, because connect()'s own
+    # auto-init fast path re-runs the schema script on a missing file.
+    _ensure_test_isolation(path)
     from agent.delegation_context import kanban_path_is_fenced
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
@@ -1274,8 +1282,25 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     ``add_comment``) opt in — helpers with post-commit side effects
     (``complete_task`` & co.) must never run under an open outer transaction,
     since those side effects would fire while the outer txn can still roll back.
+
+    Wave-8 write-boundary choke (2026-09-18): the test-isolation guard fires on
+    externally-opened conns too — a raw sqlite3.connect to the live board must
+    not become a write path for dispatcher helpers (create_task / claim_task /
+    _set_worker_pid). Sourced from the conn's own DB file, not a resolved board
+    path: the choke matches the production files only, so sandboxed fixtures
+    pass untouched.
     """
     _kb._assert_not_delegated_child_mutation(_main_db_file(conn))
+    if not _KANBAN_GUARD_BYPASS and not os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
+        try:
+            from hermes_state_guard import _in_test_context
+
+            if _in_test_context():
+                _ensure_test_isolation(Path(_main_db_file(conn) or "kanban.db"))
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # guard machinery unavailable: connect()-time choke still holds
     if getattr(conn, "in_transaction", False):
         if not allow_nested:
             raise RuntimeError(

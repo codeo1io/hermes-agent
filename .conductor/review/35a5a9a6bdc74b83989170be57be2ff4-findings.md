@@ -3,7 +3,7 @@
 Target: uncommitted cycle-2 batch (rm-022, rm-021, rm-029, rm-028+rm-019, rm-032, stretch rm-030) + the
 compound step's ROADMAP.md cycle-log/lessons/cycle-3-seeding updates, in worktree
 conductor/run-b45c23b895be (base bcf55bbaed). Review method: in-thread adversarial pass (no subagents,
-per delegate constraints); every claim re-derived from the tree, the preserved /tmp logs, and the
+per delegate constraints); every claim re-derived from the tree, the preserved /tmp logs, and the  <!-- no-tmp: ok — historical forensics citation of pre-check run artifacts, not a live path -->
 upstream git objects — not from the emissions' own words.
 
 ## VERDICT: APPROVE — batch is sound to ship; findings below are evidence-hygiene and acceptance-wording
@@ -46,7 +46,7 @@ issues, none blocking. Zero-regression verdict independently confirmed; security
   1 failed (honcho) ✓. 33 = 18 deterministic + 14 flakes + 1 order flake ✓. Zero batch-surface failures ✓.
 - Validation digest re-derived NOW: validation:v1:8a1794332c548d2c9835218dd68ecfbb3cd521f91661c38267bb1567bd1030a5
   == dispatch digest (tree byte-identical through implement/test/compound/review; review modified no tracked file).
-- Compound additions-only proof re-verified: /tmp/ROADMAP.pre-compound.md md5 038eaaf49e9bc479c9a398135d7a7800
+- Compound additions-only proof re-verified: /tmp/ROADMAP.pre-compound.md md5 038eaaf49e9bc479c9a398135d7a7800  <!-- no-tmp: ok — historical forensics citation of pre-check run artifacts, not a live path -->
   @ 29,698 bytes; head -c 29698 ROADMAP.md reproduces it; 265 lines; git diff ROADMAP.md = 109(+)/0(-); 32 rm-ids unchanged.
 - Diff arithmetic consistent: implement 262(+) + compound 25 = current 287().
 
@@ -55,13 +55,13 @@ issues, none blocking. Zero-regression verdict independently confirmed; security
 1. MEDIUM — ROADMAP.md:258 (cycle-2 lessons): the "deterministic set clusters" enumeration mislabels 12
    pass-solo LOAD FLAKES as deterministic (delegate_capacity_interrupt ×3, zombie_process_cleanup,
    tui_gateway ×3, moa_loop_mode, pi_rpc_client, sequential_tool_interrupt, session_hygiene,
-   transcription_tools — every one is in /tmp/flaky_candidate_files.txt and absent from the base-failing
+   transcription_tools — every one is in /tmp/flaky_candidate_files.txt and absent from the base-failing  <!-- no-tmp: ok — historical forensics citation of pre-check run artifacts, not a live path -->
    set), omits the genuinely deterministic tests/tools/test_delegate.py::test_mixed_composite_is_subtracted_at_child_assembly,
    and drops profiles_sidebar_cache + relay_shared_metrics from the accounting; enumerated total 29 ≠ 18.
    The zero-regression VERDICT is unaffected (A/B evidence is correct), but the durable lesson is wrong in
    detail and ROADMAP.md:262 seeds cycle 3 with the error ("delegation-lifecycle cluster … 5 tests" is
    really 2 deterministic + 3 flakes). Cycle 3 must re-derive the deterministic set from
-   /tmp/base_ab_868ed09a.log, not from this lesson.
+   /tmp/base_ab_868ed09a.log, not from this lesson.  <!-- no-tmp: ok — historical forensics citation of pre-check run artifacts, not a live path -->
 2. LOW — ROADMAP.md:171 (rm-021 acceptance) vs hermes_cli/gateway.py:6385: acceptance says "detected at
    gateway serve time"; the port (faithful to upstream 54817f463b + ed69aa9e6e, which also never wired a
    serve-time check) surfaces only via `gateway status` and doctor. The compound log words this accurately

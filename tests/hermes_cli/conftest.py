@@ -20,6 +20,30 @@ def all_assignees_spawnable(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _backdate_fresh_cards_past_dispatch_min_age(request):
+    """Make same-breath create→dispatch tests immune to the wave-12 min-age gate.
+
+    ``_lane_rows`` hides rows younger than ``_DISPATCH_MIN_AGE_SECONDS``
+    (2026-09-24 fix-queue item 97: transient create→delete churn must never be
+    claimable, after the gateway spawned real workers for ghost rows that a
+    lane deleted seconds later). Dispatcher tests create their card and assert
+    a spawn on the SAME tick, so stamp every card this test creates as already
+    past the gate: no sleeps, no per-file edits, deterministic.
+
+    Opt out with ``@pytest.mark.dispatch_min_age_real`` — the gate's own
+    regression tests use it to exercise live timestamps.
+    """
+    if request.node.get_closest_marker("dispatch_min_age_real"):
+        yield
+        return
+    import os as _os
+
+    _os.environ["HERMES_KANBAN_DISPATCH_MIN_AGE"] = "0"
+    yield
+    _os.environ.pop("HERMES_KANBAN_DISPATCH_MIN_AGE", None)
+
+
+@pytest.fixture(autouse=True)
 def _suppress_concurrent_hermes_gate(request, monkeypatch):
     """Default ``_detect_concurrent_hermes_instances`` to ``[]`` for every test.
 
