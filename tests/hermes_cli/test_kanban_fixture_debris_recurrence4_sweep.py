@@ -186,26 +186,40 @@ def _host_artifact_failures(results: list[tuple[str, int, str]]) -> list[tuple[s
     )
 
     def _failure_blocks(stdout: str) -> dict[str, str]:
-        """Map each FAILED test id to the traceback of ITS OWN failure
-        section. ``pytest -q`` prints failures as ``_<id>`` headers followed
-        by the traceback, so a failure is choke-explained only when the
-        guard's file+message tokens appear between its header and the next
-        failure header — never because a sibling failure choked."""
+        """Map each failure's TEST NAME to the traceback of ITS OWN failure
+        section. ``pytest -q`` prints failure sections as
+        ``___________ <bare test name> ___________`` headers (name only, no
+        file/:: path) followed by that failure's traceback, so a failure is
+        choke-explained only when the guard's file+message tokens appear
+        between its own header and the next header — never because a
+        sibling failure choked."""
         blocks: dict[str, str] = {}
-        current_id: str | None = None
+        current_name: str | None = None
         lines: list[str] = []
         for line in stdout.splitlines():
             if line.startswith("____") and line.endswith("____"):
-                if current_id is not None:
-                    blocks[current_id] = "\n".join(lines)
-                # header shape: ____ test_file.py::test_name ____
-                current_id = line.strip("_").strip()
+                if current_name is not None:
+                    blocks[current_name] = "\n".join(lines)
+                current_name = line.strip("_").strip()
                 lines = []
-            elif current_id is not None:
+            elif current_name is not None:
                 lines.append(line)
-        if current_id is not None:
-            blocks[current_id] = "\n".join(lines)
+        if current_name is not None:
+            blocks[current_name] = "\n".join(lines)
         return blocks
+
+    def _block_for(test_id: str, blocks: dict[str, str]) -> str:
+        name = test_id.rsplit("::", 1)[-1]
+        block = blocks.get(name)
+        if block is not None:
+            return block
+        # Parametrized ids can render slightly differently between the
+        # FAILED summary line and the section header; fall back to a
+        # longest-header containment match on the bare name.
+        for header, body in blocks.items():
+            if header and (header in name or name.startswith(header)):
+                return body
+        return ""
 
     out = []
     for fname, code, stdout in results:
@@ -218,7 +232,7 @@ def _host_artifact_failures(results: list[tuple[str, int, str]]) -> list[tuple[s
             test_id = line[len("FAILED "):].split(" - ")[0].strip()
             if any(a in line for a in artifact_tests):
                 continue
-            block = blocks.get(test_id, "")
+            block = _block_for(test_id, blocks)
             if any(all(s in block for s in sig) for sig in choke_signatures):
                 continue
             unknown.append(line)
@@ -314,13 +328,13 @@ def test_host_artifact_failures_classifies_per_failure_not_per_lane():
     )
 
     choked = (
-        "__________ tests/hermes_cli/test_kanban_boards.py::test_x __________\n"
+        "__________ test_x _______________________________\n"
         "hermes_cli/kanban_db_connect.py:733: RuntimeError: kanban "
         "test-isolation guard: test attempted to open the production kanban "
         "DB (under real Hermes root /home/agent/.hermes)\n"
     )
     unrelated = (
-        "__________ tests/hermes_cli/test_kanban_boards.py::test_y __________\n"
+        "__________ test_y _______________________________\n"
         "E       AssertionError: boom\n"
     )
     stdout = (
@@ -357,7 +371,7 @@ def test_host_artifact_failures_classifies_per_failure_not_per_lane():
     )
     # A live-system guard choke (state DB family) is also per-failure known.
     state_choke = (
-        "__________ tests/hermes_cli/test_kanban_boards.py::test_z __________\n"
+        "__________ test_z _______________________________\n"
         "hermes_state.py:206: RuntimeError: live-system guard: test "
         "attempted to open production state.db (under real Hermes root "
         "/home/agent/.hermes)\n"
@@ -367,3 +381,17 @@ def test_host_artifact_failures_classifies_per_failure_not_per_lane():
     assert not _host_artifact_failures(
         [("tests/hermes_cli/test_kanban_boards.py", 1, state_choke)]
     )
+    # Cross-contamination guard: two failures where BOTH blocks exist — the
+    # choke block's tokens must not excuse the unrelated failure even when
+    # the guard text also appears in the unrelated block's tail (it does
+    # not here; this pins that blocks stay isolated).
+    mixed_order = (
+        f"{unrelated}{choked}"
+        "=========================== short test summary info ============\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::test_y\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::test_x\n"
+    )
+    flagged = _host_artifact_failures(
+        [("tests/hermes_cli/test_kanban_boards.py", 1, mixed_order)]
+    )
+    assert flagged and "test_y" in flagged[0][2]
