@@ -229,9 +229,9 @@ def _marker_root(cwd: Path) -> Optional[Path]:
         pass
     # The canonical temp roots must be skipped even when TMPDIR points elsewhere
     # (self-hosted CI runners set a deep TMPDIR but anchor pytest temproots at
-    # /tmp): a stray manifest under /tmp — exactly what the docstring promises
-    # to ignore — would otherwise flip every session rooted under it.
-    for canonical in ("/tmp", "/var/tmp"):
+    # the system root): a stray manifest there — exactly what the docstring
+    # promises to ignore — would otherwise flip every session rooted under it.
+    for canonical in ("/tmp", "/var/tmp"):  # no-tmp: ok — the canonical roots ARE the semantic here
         try:
             skip.add(Path(canonical).resolve())
         except OSError:
