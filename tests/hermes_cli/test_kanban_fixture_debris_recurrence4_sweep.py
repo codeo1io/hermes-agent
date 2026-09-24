@@ -91,10 +91,11 @@ def _run_sweep_files(env: dict[str, str], *, per_file: bool) -> list[tuple[str, 
     actually matters, and what CI runs); when False, all files share one
     process (the naive topology a bare ``pytest tests/`` invocation gets).
 
-    Returns [(file, returncode, stdout_tail)] so callers can distinguish
+    Returns [(file, returncode, stdout)] so callers can distinguish
     "the lane failed" from "fixture rows leaked" — host-specific
     pre-existing failures (e.g. no systemd user bus) must not be conflated
-    with the leak invariant.
+    with the leak invariant. The FULL stdout is kept: per-failure
+    classification (below) needs each failure's own traceback, not a tail.
     """
     out: list[tuple[str, int, str]] = []
     groups: list[list[str]] = (
@@ -109,7 +110,7 @@ def _run_sweep_files(env: dict[str, str], *, per_file: bool) -> list[tuple[str, 
             text=True,
             timeout=900,
         )
-        out.append((" ".join(group), result.returncode, result.stdout[-500:]))
+        out.append((" ".join(group), result.returncode, result.stdout))
     return out
 
 
@@ -172,19 +173,57 @@ def _host_artifact_failures(results: list[tuple[str, int, str]]) -> list[tuple[s
         "TestWorkerSpawnEnv::test_default_spawn_sets_env_vars",
         "test_dispatcher_spawn_injects_kanban_paths_without_stale_session",
     )
-    # The base's own connect-time choke (RuntimeError in kanban_db_connect)
-    # refusing HERMES_HOME under the real root is the containment working,
-    # not a lane defect — any failure output carrying it is explainable.
-    choke_signature = ("kanban_db_connect.py", "RuntimeError", "real root")
+    # The base's own connect-time choke (RuntimeError raised by the kanban or
+    # state live-system guard refusing a production path under the real root)
+    # is the containment working, not a lane defect — but only for the
+    # failure it actually explains. Matched PER FAILURE (round-1 review):
+    # the previous lane-wide ``not all(s in tail ...)`` test excused EVERY
+    # unknown failure in any lane that merely showed one guard choke
+    # anywhere in its output.
+    choke_signatures = (
+        ("kanban_db_connect.py", "kanban test-isolation guard"),
+        ("hermes_state.py", "live-system guard"),
+    )
+
+    def _failure_blocks(stdout: str) -> dict[str, str]:
+        """Map each FAILED test id to the traceback of ITS OWN failure
+        section. ``pytest -q`` prints failures as ``_<id>`` headers followed
+        by the traceback, so a failure is choke-explained only when the
+        guard's file+message tokens appear between its header and the next
+        failure header — never because a sibling failure choked."""
+        blocks: dict[str, str] = {}
+        current_id: str | None = None
+        lines: list[str] = []
+        for line in stdout.splitlines():
+            if line.startswith("____") and line.endswith("____"):
+                if current_id is not None:
+                    blocks[current_id] = "\n".join(lines)
+                # header shape: ____ test_file.py::test_name ____
+                current_id = line.strip("_").strip()
+                lines = []
+            elif current_id is not None:
+                lines.append(line)
+        if current_id is not None:
+            blocks[current_id] = "\n".join(lines)
+        return blocks
+
     out = []
-    for fname, code, tail in results:
+    for fname, code, stdout in results:
         if code == 0:
             continue
-        failed_lines = [l for l in tail.splitlines() if l.startswith("FAILED ")]
-        known = [l for l in failed_lines if any(a in l for a in artifact_tests)]
-        unknown = [l for l in failed_lines if l not in known]
-        if unknown and not all(s in tail for s in choke_signature):
-            out.append((fname, code, tail))
+        blocks = _failure_blocks(stdout)
+        failed_lines = [l for l in stdout.splitlines() if l.startswith("FAILED ")]
+        unknown = []
+        for line in failed_lines:
+            test_id = line[len("FAILED "):].split(" - ")[0].strip()
+            if any(a in line for a in artifact_tests):
+                continue
+            block = blocks.get(test_id, "")
+            if any(all(s in block for s in sig) for sig in choke_signatures):
+                continue
+            unknown.append(line)
+        if unknown:
+            out.append((fname, code, "\n".join(unknown)))
     return out
 
 
@@ -261,4 +300,70 @@ def test_pre_existing_forensics_cards_are_the_only_signature_rows(debris_topolog
     assert not unknown, (
         f"live board carries unexpected fixture-signature rows outside the "
         f"known forensics cards: {unknown} — re-baseline deliberately"
+    )
+
+
+# ── per-failure choke classification (round-1 review, item a) ────────────────
+
+def test_host_artifact_failures_classifies_per_failure_not_per_lane():
+    """A guard choke explains only the failure whose OWN traceback carries
+    it. The pre-2026-09-24 lane-wide ``not all(s in tail ...)`` test excused
+    every unknown failure in any lane that showed one choke anywhere."""
+    from tests.hermes_cli.test_kanban_fixture_debris_recurrence4_sweep import (
+        _host_artifact_failures,
+    )
+
+    choked = (
+        "__________ tests/hermes_cli/test_kanban_boards.py::test_x __________\n"
+        "hermes_cli/kanban_db_connect.py:733: RuntimeError: kanban "
+        "test-isolation guard: test attempted to open the production kanban "
+        "DB (under real Hermes root /home/agent/.hermes)\n"
+    )
+    unrelated = (
+        "__________ tests/hermes_cli/test_kanban_boards.py::test_y __________\n"
+        "E       AssertionError: boom\n"
+    )
+    stdout = (
+        f"{choked}{unrelated}"
+        "=========================== short test summary info ============\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::test_x\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::test_y\n"
+    )
+    results = [("tests/hermes_cli/test_kanban_boards.py", 1, stdout)]
+
+    # Both failures present: the unknown one must surface.
+    assert _host_artifact_failures(results), "unrelated failure must not be excused"
+    # Only the choke failure: the lane is explainable, nothing surfaces.
+    choke_only = (
+        f"{choked}"
+        "=========================== short test summary info ============\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::test_x\n"
+    )
+    assert not _host_artifact_failures(
+        [("tests/hermes_cli/test_kanban_boards.py", 1, choke_only)]
+    )
+    # Passing lanes are never flagged.
+    assert not _host_artifact_failures(
+        [("tests/hermes_cli/test_kanban_boards.py", 0, "")]
+    )
+    # The dispatcher spawn-env artifact tests stay excused by id.
+    artifact_only = (
+        "=========================== short test summary info ============\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::"
+        "TestWorkerSpawnEnv::test_default_spawn_sets_env_vars\n"
+    )
+    assert not _host_artifact_failures(
+        [("tests/hermes_cli/test_kanban_boards.py", 1, artifact_only)]
+    )
+    # A live-system guard choke (state DB family) is also per-failure known.
+    state_choke = (
+        "__________ tests/hermes_cli/test_kanban_boards.py::test_z __________\n"
+        "hermes_state.py:206: RuntimeError: live-system guard: test "
+        "attempted to open production state.db (under real Hermes root "
+        "/home/agent/.hermes)\n"
+        "=========================== short test summary info ============\n"
+        "FAILED tests/hermes_cli/test_kanban_boards.py::test_z\n"
+    )
+    assert not _host_artifact_failures(
+        [("tests/hermes_cli/test_kanban_boards.py", 1, state_choke)]
     )
