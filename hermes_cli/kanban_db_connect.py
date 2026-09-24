@@ -1282,8 +1282,25 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     ``add_comment``) opt in — helpers with post-commit side effects
     (``complete_task`` & co.) must never run under an open outer transaction,
     since those side effects would fire while the outer txn can still roll back.
+
+    Wave-8 write-boundary choke (2026-09-18): the test-isolation guard fires on
+    externally-opened conns too — a raw sqlite3.connect to the live board must
+    not become a write path for dispatcher helpers (create_task / claim_task /
+    _set_worker_pid). Sourced from the conn's own DB file, not a resolved board
+    path: the choke matches the production files only, so sandboxed fixtures
+    pass untouched.
     """
     _kb._assert_not_delegated_child_mutation(_main_db_file(conn))
+    if not _KANBAN_GUARD_BYPASS and not os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
+        try:
+            from hermes_state_guard import _in_test_context
+
+            if _in_test_context():
+                _ensure_test_isolation(Path(_main_db_file(conn) or "kanban.db"))
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # guard machinery unavailable: connect()-time choke still holds
     if getattr(conn, "in_transaction", False):
         if not allow_nested:
             raise RuntimeError(
