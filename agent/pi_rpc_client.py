@@ -264,6 +264,13 @@ class PiRPCClient:
         self._reasoning_parts: list[str] = []
         self._settled = threading.Event()
         self._process_exited_error: str | None = None
+        # Delegate turns have no absolute wall-clock lifetime.  The timeout
+        # supplied by delegate_session is an inactivity/stall threshold: every
+        # unsolicited Pi event during an active turn refreshes this timestamp.
+        self._turn_activity_lock = threading.Lock()
+        self._turn_active = False
+        self._last_turn_activity = time.monotonic()
+        self._last_turn_activity_at = time.time()
         self.text_streamed = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -471,7 +478,14 @@ class PiRPCClient:
         except Exception:
             pass
         finally:
-            code = proc.poll()
+            # EOF on stdout can beat SIGCHLD/reaping: poll() then returns None and
+            # callers see "exited with code None" for a clean exit. Wait briefly for
+            # the real code (bounded — a child that closed stdout but still runs must
+            # not wedge the reader).
+            try:
+                code = proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                code = proc.poll()
             error = f"pi rpc process exited with code {code}"
             self._process_exited_error = error
             with self._pending_lock:
@@ -511,6 +525,21 @@ class PiRPCClient:
             raise TimeoutError(f"pi did not answer command {command.get('type')!r}")
         return slot[0] or {}
 
+    def _mark_turn_activity(self) -> None:
+        with self._turn_activity_lock:
+            if self._turn_active:
+                self._last_turn_activity = time.monotonic()
+                self._last_turn_activity_at = time.time()
+
+    @property
+    def last_turn_activity_at(self) -> float:
+        with self._turn_activity_lock:
+            return self._last_turn_activity_at
+
+    def _turn_inactive_for(self) -> float:
+        with self._turn_activity_lock:
+            return max(0.0, time.monotonic() - self._last_turn_activity)
+
     def _dispatch(self, msg: dict) -> None:
         msg_type = msg.get("type")
 
@@ -526,6 +555,12 @@ class PiRPCClient:
                 entry[1][0] = msg
                 entry[0].set()
             return
+
+        # Responses to our own control/poll RPCs are deliberately excluded:
+        # only unsolicited Pi turn events prove the delegated work is making
+        # progress.  This prevents a wedged agent that can still answer
+        # get_state from living forever.
+        self._mark_turn_activity()
 
         if msg_type == "extension_ui_request":
             # Interactive dialogs can wait for user/Hermes input for minutes.
@@ -749,44 +784,71 @@ class PiRPCClient:
             self._settled = threading.Event()
             self.text_streamed = False
             started = time.monotonic()
-            response = self._request_pi(
-                {"type": "prompt", "message": message}, timeout=timeout_seconds
-            )
-            if not response.get("success"):
-                raise RuntimeError(response.get("error") or "pi prompt rejected")
-            self._settled.wait(timeout_seconds)
-            if not self._settled.is_set():
+            # There is deliberately no absolute wall-clock turn deadline.
+            # timeout_seconds is the maximum inactivity window. Any
+            # unsolicited Pi turn event refreshes _last_turn_activity, so a
+            # productive multi-hour turn remains alive while a genuinely
+            # wedged turn is still bounded.
+            stall_timeout = max(0.05, float(timeout_seconds or _DEFAULT_TIMEOUT_SECONDS))
+            with self._turn_activity_lock:
+                self._turn_active = True
+                self._last_turn_activity = time.monotonic()
+                self._last_turn_activity_at = time.time()
+            try:
+                # Prompt acknowledgement is a transport operation, not the
+                # delegated turn itself. Keep that handshake bounded.
+                response = self._request_pi(
+                    {"type": "prompt", "message": message},
+                    timeout=min(30.0, max(1.0, stall_timeout)),
+                )
+                if not response.get("success"):
+                    raise RuntimeError(response.get("error") or "pi prompt rejected")
+
+                poll_interval = min(1.0, max(0.02, stall_timeout / 4.0))
+                while not self._settled.wait(poll_interval):
+                    if self._process_exited_error:
+                        raise RuntimeError(self._process_exited_error)
+                    inactive_for = self._turn_inactive_for()
+                    if inactive_for < stall_timeout:
+                        continue
+                    try:
+                        self._send_pi({"type": "abort"})
+                    except Exception:
+                        pass
+                    self._settled.wait(min(10.0, max(0.1, stall_timeout)))
+                    raise TimeoutError(
+                        "pi session turn stalled after "
+                        f"{stall_timeout:.0f}s without observable progress"
+                    )
+
+                if self._process_exited_error:
+                    raise RuntimeError(self._process_exited_error)
+                # Pi can emit an early text_delta (setting text_streamed=True) and
+                # later settle with a more complete final assistant message that is
+                # available only through get_last_assistant_text.  Always reconcile
+                # that canonical final text after settle; otherwise callers can lose
+                # structured trailers such as Conductor's phase_result JSON.
+                captured_text = "".join(self._text_parts)
                 try:
-                    self._send_pi({"type": "abort"})
+                    last = self._request_pi({"type": "get_last_assistant_text"})
+                    text = (last.get("data") or {}).get("text")
+                    if isinstance(text, str) and text:
+                        if not captured_text.strip() or len(text) > len(captured_text):
+                            self._text_parts = [text]
+                            captured_text = text
                 except Exception:
                     pass
-                self._settled.wait(10)
-                raise TimeoutError(f"pi session turn timed out after {timeout_seconds:.0f}s")
-            if self._process_exited_error:
-                raise RuntimeError(self._process_exited_error)
-            # Pi can emit an early text_delta (setting text_streamed=True) and
-            # later settle with a more complete final assistant message that is
-            # available only through get_last_assistant_text.  Always reconcile
-            # that canonical final text after settle; otherwise callers can lose
-            # structured trailers such as Conductor's phase_result JSON.
-            captured_text = "".join(self._text_parts)
-            try:
-                last = self._request_pi({"type": "get_last_assistant_text"})
-                text = (last.get("data") or {}).get("text")
-                if isinstance(text, str) and text:
-                    if not captured_text.strip() or len(text) > len(captured_text):
-                        self._text_parts = [text]
-                        captured_text = text
-            except Exception:
-                pass
-            state = self.get_state(timeout=min(30.0, timeout_seconds))
-            return {
-                "success": True,
-                "text": captured_text,
-                "reasoning": "".join(self._reasoning_parts),
-                "duration_s": round(time.monotonic() - started, 1),
-                "state": state,
-            }
+                state = self.get_state(timeout=min(30.0, max(1.0, stall_timeout)))
+                return {
+                    "success": True,
+                    "text": captured_text,
+                    "reasoning": "".join(self._reasoning_parts),
+                    "duration_s": round(time.monotonic() - started, 1),
+                    "state": state,
+                }
+            finally:
+                with self._turn_activity_lock:
+                    self._turn_active = False
 
     # -- run ------------------------------------------------------------------
 

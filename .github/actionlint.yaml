@@ -5,6 +5,7 @@
 # it means a workflow drifted back onto GitHub-hosted runners.
 self-hosted-runner:
   labels:
-    - self-hosted
-    - infra
-    - autonomy
+    - ubuntu-latest-96-core
+    - ubuntu-latest-32-core
+    - ubuntu-latest-32-arm-core
+    - windows-latest-32-core

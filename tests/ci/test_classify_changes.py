@@ -80,6 +80,18 @@ def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_
 CASES = {
     "docs-only → nothing heavy": (["README.md", "docs/guide.md"], _lanes()),
     "python source → python": (["run_agent.py"], _lanes(python=True, scan=True)),
+    # Cross-language contract in the inverse direction: Python sources the
+    # vitest relay-deliver-budget mirror reads (#93911). A Python-only PR
+    # must still run the frontend lane or the mirror drifts green-on-PR/
+    # red-on-main — this is the _JS_RELEVANT_CONTRACT_FILES seam.
+    "bot_relay.py → python + frontend (vitest mirror)": (
+        ["tools/bot_relay.py"],
+        _lanes(python=True, scan=True, frontend=True),
+    ),
+    "config_defaults.py → python + frontend (vitest mirror)": (
+        ["hermes_cli/config_defaults.py"],
+        _lanes(python=True, scan=True, frontend=True),
+    ),
     # pyproject.toml declares the pytest markers the OS lanes select on, so it
     # also re-arms the desktop_updater integration tests (fail-open).
     "dep manifest → python": (["pyproject.toml"], _lanes(python=True, scan=True, deps=True, uv_lock=True, desktop_updater=True)),
@@ -112,23 +124,6 @@ CASES = {
     "desktop slash-registry JSON → python + frontend": (
         ["apps/desktop/src/lib/desktop-slash-registry.json"],
         _lanes(python=True, frontend=True),
-    ),
-    # Mirror direction of the contract cases above: these Python sources are
-    # regexed by apps/desktop/src/plugins/hermes-bots/relay-deliver-budget.test.ts
-    # (#93911), so a backend-only PR touching them must still run the JS lane.
-    "bot-relay source → python + frontend": (
-        ["tools/bot_relay.py"],
-        _lanes(python=True, scan=True, frontend=True),
-    ),
-    "bot-mode defaults → python + frontend": (
-        ["hermes_cli/config_defaults.py"],
-        _lanes(python=True, scan=True, frontend=True),
-    ),
-    # ...but the mapping is exact, not globbed: ordinary backend code stays
-    # frontend-free.
-    "gateway source → python only": (
-        ["gateway/run.py"],
-        _lanes(python=True, scan=True),
     ),
     # The published CIMD document is asserted about by the Python suite, so a
     # lone edit there must not skip the lane that would catch a bad edit.

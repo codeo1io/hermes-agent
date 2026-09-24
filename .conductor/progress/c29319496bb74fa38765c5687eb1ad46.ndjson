@@ -1,0 +1,1 @@
+{"step":2,"ts":"2026-09-22T04:41:12Z","summary":"rm-022 lockguard fcntl tolerance ported; red-on-base proven (2 fail), green post-fix (7 pass)","touched":["hermes_state_lockguard.py","tests/hermes_state/test_lockguard_fcntl_tolerance.py"]}

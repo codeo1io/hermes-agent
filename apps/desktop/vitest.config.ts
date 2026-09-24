@@ -6,6 +6,8 @@ const reactUi: TestProjectConfiguration = {
   test: {
     name: 'ui',
     environment: 'jsdom',
+    // Keep padding regressions observable instead of mocking the stylesheet away.
+    css: { include: [/status-stack\.css$/] },
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     globals: true,
@@ -25,7 +27,13 @@ const electronNative: TestProjectConfiguration = {
     // ignores the same pattern so they run in exactly one runner.
     include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}', 'e2e/**/*.unit.test.ts'],
     // These use node:test and have dedicated npm scripts, not Vitest suites.
-    exclude: ['scripts/run-short-session-hang-repro.test.mjs', 'scripts/tasks-scroll.test.mjs']
+    exclude: ['scripts/run-short-session-hang-repro.test.mjs', 'scripts/tasks-scroll.test.mjs'],
+    // Same rationale as the ui project's 15s: on the shared self-hosted
+    // runner (sibling conductor suites hold load 40-100) the 5s default
+    // produced a rotating cast of timeout failures — a different random
+    // subset of tests each run, while the tree itself is unchanged. 15s
+    // gives contention headroom without masking genuinely hung tests.
+    testTimeout: 15_000
   }
 }
 

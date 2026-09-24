@@ -151,7 +151,7 @@ Gateway unreachable from hop 1 (scale-to-zero wake still booting, restart
 window, api_server disabled) → the dashboard returns **503** and NAS retries
 (non-2xx = retryable, below); the store CAS de-dupes the eventual double fire.
 There is deliberately no in-dashboard execution fallback. The verifier is
-`plugins/cron/chronos/verify.py`.
+`plugins/cron_providers/chronos/verify.py`.
 
 - **Auth:** `Authorization: Bearer <NAS-minted JWT>`. The agent verifies:
   - signature against the NAS JWKS (`cron.chronos.nas_jwks_url`),
@@ -218,6 +218,20 @@ credentials. For hosted agents NAS sets these at provision time:
 If `callback_url` / `portal_url` is blank or the agent has no Nous login,
 `is_available()` returns False and the resolver falls back to the built-in
 in-process ticker — cron never loses its trigger.
+
+**Identity rejection at runtime (`403 invalid_client`).** `is_available()` is
+config-only, so it cannot tell whether the stored Nous token is the identity NAS
+maps to a provisioned instance (hop 1 above). When `provision` answers 403
+`invalid_client` — the token in `auth.json` is a plain `hermes-cli` user login
+rather than the `hermes-cli-vps` bootstrap session or an `agent:*` client — the
+rejection is deterministic for the life of that credential: every arm, re-arm
+and `list` would fail the same way, and a `hermes auth` re-login makes it
+permanent (it *replaces* the bootstrap session; only NAS can re-mint one). The
+provider therefore logs ONE warning naming that remedy, stops calling NAS, and
+starts the built-in ticker for the rest of the process so jobs keep firing on
+time instead of only through the late misfire sweep
+(`cron.misfire_grace_minutes`). Transient failures (5xx, transport) do not
+degrade; the next reconcile retries them.
 
 ## Escape hatch (not default)
 

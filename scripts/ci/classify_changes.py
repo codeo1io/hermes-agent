@@ -69,17 +69,6 @@ import sys
 _FRONTEND = ("ui-tui/", "web/", "apps/")  # TS typecheck-matrix packages
 # Shipped page outside those packages, exercised by the desktop Electron suite.
 _FRONTEND_FILES = {"scripts/desktop-update/ui.html"}
-# Mirror direction of _PY_RELEVANT_CONTRACT_FILES: backend sources a vitest suite
-# pins. relay-deliver-budget.test.ts (#93911) regexes these two files to hold the
-# bot-relay deadline budget (TURN_ATTEMPT_TIMEOUT_SECONDS vs bot_mode
-# .turn_wait_seconds) to the JS side's arithmetic. A Python-only PR touching either
-# must still run the JS lane (js-tests gates on frontend) or the mirror goes green
-# on main by omission — exactly the drift the cross-language contracts above guard
-# in the other direction.
-_FRONTEND_RELEVANT_BACKEND_FILES = {
-    "tools/bot_relay.py",
-    "hermes_cli/config_defaults.py",
-}
 _ROOT_NPM = {"package.json", "package-lock.json"}  # shifts every package's tree
 _DOCKER_META = ("docker/", ".hadolint.yml", "Dockerfile") # docker setup
 _NIX_PATHS = ("nix/",) # nix files
@@ -112,6 +101,17 @@ _PY_RELEVANT_CONTRACT_FILES = {
     "apps/shared/src/gateway-contract.openrpc.json",
     # tests/hermes_cli/test_desktop_slash_registry.py
     "apps/desktop/src/lib/desktop-slash-registry.json",
+}
+
+# Cross-language contract files in the OTHER direction: Python sources a vitest
+# suite pins against (the relay-deliver-budget mirror reads these to detect drift
+# between TS constants and backend defaults, #93911). A Python-only PR would
+# otherwise skip the js-tests lane and the mirror drifts green-on-PR/red-on-main —
+# the exact inverse of _PY_RELEVANT_CONTRACT_FILES above.
+_JS_RELEVANT_CONTRACT_FILES = {
+    # apps/desktop/src/plugins/hermes-bots/relay-deliver-budget.test.ts
+    "tools/bot_relay.py",
+    "hermes_cli/config_defaults.py",
 }
 
 # CI-sensitive files: eslint config, workflow files, composite actions.
@@ -239,8 +239,7 @@ def classify(files: list[str]) -> dict[str, bool]:
     python = any(not _py_irrelevant(f) for f in files)
     python_prod = any(not _py_irrelevant(f) and not _py_test_only(f) for f in files)
     frontend = any(
-        f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES
-        or f in _FRONTEND_RELEVANT_BACKEND_FILES
+        f.startswith(_FRONTEND) or f in _ROOT_NPM or f in _FRONTEND_FILES or f in _JS_RELEVANT_CONTRACT_FILES
         for f in files
     )
     deps = any(f == "pyproject.toml" for f in files)

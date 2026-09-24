@@ -38,9 +38,11 @@ class FakePiClient:
         self.is_closed = False
         self.messages = []
         self.steers = []
+        self.turn_timeouts = []
         self.started_turn = threading.Event()
         self.release_turn = threading.Event()
         self.block_turns = False
+        self.last_turn_activity_at = time.time()
         self._proc = None
         self.__class__.instances.append(self)
 
@@ -54,6 +56,8 @@ class FakePiClient:
 
     def run_session_prompt(self, message, *, timeout_seconds=900.0):
         self.messages.append(message)
+        self.turn_timeouts.append(timeout_seconds)
+        self.last_turn_activity_at = time.time()
         self.started_turn.set()
         if self.block_turns:
             assert self.release_turn.wait(timeout=5)
@@ -1045,6 +1049,47 @@ def test_wait_seconds_is_separate_from_turn_timeout(monkeypatch):
 
     client.release_turn.set()
     wait_for_status(parent, sid, "idle")
+
+
+def test_turn_timeout_is_not_clamped_to_3600():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    payload(
+        ds.delegate_session(
+            action="send",
+            session_id=sid,
+            message="long task",
+            timeout=7200,
+            parent_agent=parent,
+        )
+    )
+    wait_for_status(parent, sid, "idle")
+    assert client.turn_timeouts[-1] == 7200
+
+
+def test_timeout_schema_has_no_absolute_upper_bound():
+    timeout_schema = ds.DELEGATE_SESSION_SCHEMA["parameters"]["properties"]["timeout"]
+    assert timeout_schema["minimum"] == 10
+    assert "maximum" not in timeout_schema
+    assert "inactivity" in timeout_schema["description"]
+    assert "not an absolute" in timeout_schema["description"]
+
+
+def test_status_exposes_backend_activity_timestamp():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    status = payload(
+        ds.delegate_session(
+            action="status",
+            session_id=started["session_id"],
+            parent_agent=parent,
+        )
+    )
+    assert isinstance(status["last_activity_at"], float)
+    assert status["last_activity_at"] > 0
 
 
 def test_check_requirements_accepts_opencode_only(monkeypatch, tmp_path):

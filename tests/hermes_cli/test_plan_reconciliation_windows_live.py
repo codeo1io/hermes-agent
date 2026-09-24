@@ -19,7 +19,9 @@ sys.path.insert(0, str(WORKTREE))
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="live Windows E2E")
+# ``windows_only`` rather than ``skipif(sys.platform != "win32")``: the Windows CI job
+# selects ``-m windows_only``, so a bare skipif left this live E2E running on no host.
+pytestmark = [pytest.mark.windows_only, pytest.mark.spawns_gateway_lookalike]
 
 
 def test_plan_reconciliation_live_windows(tmp_path, monkeypatch):
@@ -28,8 +30,17 @@ def test_plan_reconciliation_live_windows(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     # Real live process standing in for a manual gateway
+    # The live command line must look like a gateway runtime (``run``/``restart``
+    # subcommand) or the #109680 phantom-gateway guard correctly rejects the record:
+    # identity is proven from the LIVE process, not the persisted file. Mutating
+    # sys.argv INSIDE a ``python -c`` script cannot do this — the OS-level cmdline
+    # stays ``python -c <script>`` and the matcher tokenizes the real cmdline — so
+    # the stand-in is a script literally named ``hermes`` invoked with the real argv
+    # ``gateway run``.
+    stand_in = tmp_path / "hermes"
+    stand_in.write_text("import time; time.sleep(120)\n", encoding="utf-8")
     child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)"],
+        [sys.executable, str(stand_in), "gateway", "run"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:

@@ -527,6 +527,8 @@ def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
+    client = record.get("client")
+    last_activity_at = getattr(client, "last_turn_activity_at", None)
     out = {
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
@@ -537,6 +539,11 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        "last_activity_at": (
+            float(last_activity_at)
+            if isinstance(last_activity_at, (int, float))
+            else record.get("updated_at")
+        ),
         "pending_question": _pending_payload(record),
         "error": record.get("error") or None,
     }
@@ -782,7 +789,10 @@ def delegate_session(
         )
     if backend is not None and str(backend).strip().lower() not in _KNOWN_BACKENDS:
         return tool_error(f"Unknown backend {backend!r}. Use 'pi' or 'opencode'.")
-    effective_timeout = float(max(10, min(int(timeout or 900), 3600)))
+    # timeout is a stall/inactivity threshold, not a total turn lifetime.
+    # A healthy delegated turn may run for arbitrarily long as long as the
+    # backend continues to produce observable progress.
+    effective_timeout = float(max(10, int(timeout or 900)))
     try:
         effective_wait = max(
             0.0, min(float(120 if wait_seconds is None else wait_seconds), 3600.0)
@@ -1220,8 +1230,11 @@ DELEGATE_SESSION_SCHEMA = {
             "timeout": {
                 "type": "integer",
                 "minimum": 10,
-                "maximum": 3600,
-                "description": "Maximum seconds allowed for each delegate turn (default 900).",
+                "description": (
+                    "Maximum seconds of delegate inactivity before the turn is "
+                    "considered stalled (default 900). This is not an absolute "
+                    "turn runtime limit."
+                ),
             },
             "wait_seconds": {
                 "type": "number",

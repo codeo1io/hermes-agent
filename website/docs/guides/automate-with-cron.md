@@ -6,17 +6,17 @@ description: "Real-world automation patterns using Hermes cron — monitoring, r
 
 # Automate Anything with Cron
 
-The [daily briefing bot tutorial](/guides/daily-briefing-bot) covers the basics. This guide goes further — five real-world automation patterns you can adapt for your own workflows.
+The [daily briefing bot tutorial](./daily-briefing-bot.md) covers the basics. This guide goes further — five real-world automation patterns you can adapt for your own workflows.
 
-For the full feature reference, see [Scheduled Tasks (Cron)](/user-guide/features/cron).
+For the full feature reference, see [Scheduled Tasks (Cron)](../user-guide/features/cron.md).
 
 :::info Key Concept
 Cron jobs run in fresh agent sessions with no memory of your current chat. Prompts must be **completely self-contained** — include everything the agent needs to know.
 :::
 
 :::tip Don't need the LLM? You have two zero-token options.
-- **Recurring watchdog** where the script already produces the exact message (memory alerts, disk alerts, heartbeats): use [script-only cron jobs](/guides/cron-script-only). Same scheduler, no LLM. You can ask Hermes to set one up for you in chat — the `cronjob` tool knows when to pick `no_agent=True` and writes the script for you.
-- **One-shot from a script that's already running** (CI step, post-commit hook, deploy script, externally-scheduled monitor): use [`hermes send`](/guides/pipe-script-output) to pipe stdout or a file straight to Telegram / Discord / Slack / etc. without setting up a cron entry.
+- **Recurring watchdog** where the script already produces the exact message (memory alerts, disk alerts, heartbeats): use [script-only cron jobs](./cron-script-only.md). Same scheduler, no LLM. You can ask Hermes to set one up for you in chat — the `cronjob_manage` tool knows when to pick `no_agent=True` and writes the script for you.
+- **One-shot from a script that's already running** (CI step, post-commit hook, deploy script, externally-scheduled monitor): use [`hermes send`](./pipe-script-output.md) to pipe stdout or a file straight to Telegram / Discord / Slack / etc. without setting up a cron entry.
 :::
 
 ---
@@ -245,6 +245,7 @@ The `--deliver` flag controls where results go:
 |--------|---------|----------|
 | `origin` | `--deliver origin` | Same chat that created the job (default) |
 | `local` | `--deliver local` | Save to local file only |
+| `api_server` | `--deliver api_server` | Append output to the API-server session's transcript |
 | `telegram` | `--deliver telegram` | Your Telegram home channel |
 | `discord` | `--deliver discord` | Your Discord home channel |
 | `slack` | `--deliver slack` | Your Slack home channel |
@@ -252,6 +253,18 @@ The `--deliver` flag controls where results go:
 | Threaded | `--deliver telegram:-1001234567890:17585` | A specific Telegram topic thread |
 | Bot Chat | `--deliver bot-chat` | Inject output into this profile's canonical Bot Chat — the bot reads it and responds |
 | Bot Chat (named) | `--deliver bot-chat:research` | Another local profile's Bot Chat |
+
+### API-server transcript delivery
+
+The API server is a request/response surface with no push lane, so
+`--deliver api_server` delivers by **appending the output to the transcript
+of the api_server session the job was created from** — as a `[Cron delivery]`
+user-role message. The output is visible the next time that client polls or
+reopens the conversation, and a later turn in the session sees it in history.
+No gateway credentials are needed (it is a same-process transcript write),
+but there is no home fallback: the target only resolves when the job's origin
+is an api_server session, so `--deliver api_server` on a job created from
+Telegram or the CLI will not resolve a delivery target.
 
 ### Bot Chat delivery
 
@@ -289,4 +302,4 @@ Things to know:
 
 ---
 
-*For the complete cron reference — all parameters, edge cases, and internals — see [Scheduled Tasks (Cron)](/user-guide/features/cron).*
+*For the complete cron reference — all parameters, edge cases, and internals — see [Scheduled Tasks (Cron)](../user-guide/features/cron.md).*

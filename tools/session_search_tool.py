@@ -10,8 +10,10 @@ No LLM calls — every shape returns actual DB messages.
 
 import json
 import logging
+import re
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from hermes_state_common import _BOUNDARY_END_REASONS
 
@@ -27,11 +29,22 @@ _HIDDEN_SESSION_SOURCES = ("kanban", "subagent", "tool")
 # Demoting — not excluding — keeps cron content reachable when it's the only match, while interactive
 # sessions always win when both match.
 _DEMOTED_SESSION_SOURCES = ("cron",)
+
+# Read-shape per-message content cap. #69334 capped discovery bookends (1200) and
+# scroll windows (4000) but left ``_read_session`` returning whole messages, so a
+# single archived tool result stored as a message could come back verbatim - one
+# read returned 74K chars and took a request from ~50K to ~89K tokens in a step.
+# Bounding message COUNT (head/tail) is not enough when content per message is
+# unbounded; the agent can scroll around a message for detail (#114344).
+_READ_MAX_CONTENT = 2000
 # FTS rows scanned before dedup-by-lineage — well above the distinct sessions a query
 # returns, so interactive matches buried under cron hits survive the demotion pass.
 _DISCOVER_SCAN_LIMIT = 300
 # exclude_session_ids: ids already inspected this task; capped so a runaway list can't fan out lineage walks.
 _EXCLUDE_SESSION_IDS_CAP = 20
+# Relative time bounds: "7d" / "24h" / "2w" = now minus N hours/days/weeks.
+_RELATIVE_BOUND_RE = re.compile(r"^(\d+)\s*(h|d|w)$", re.IGNORECASE)
+_RELATIVE_UNIT_SECONDS = {"h": 3600, "d": 86400, "w": 604800}
 # Raw FTS rows are only a plan input; the response hydrates its own window/bookends.
 _DISCOVER_SEARCH_FIELDS = ("id", "session_id", "role", "snippet", "source", "model", "session_started")
 # Compaction handoff summaries (agent/context_compressor.py); excluded from bookends.
@@ -110,22 +123,26 @@ def _resolve_lineage(db, session_id: str) -> str:
     return _resolve_to_parent(db, session_id)[0]
 
 
-def _parse_iso_bound(value: Optional[str], *, as_exclusive_end: bool = False) -> Optional[int]:
-    """Parse an ISO date/datetime into a UTC unix timestamp.
+def _parse_iso_bound(value: Optional[str]) -> Optional[int]:
+    """Parse an ISO date/datetime OR a relative duration into a UTC unix timestamp.
 
-    A date-only value (``YYYY-MM-DD``) is midnight UTC on that day. When
-    ``as_exclusive_end`` is True, that midnight is the exclusive upper bound
-    (``before=2026-07-01`` keeps June, drops July 1 00:00).
-    """
+    ISO: a date-only value (``YYYY-MM-DD``) is midnight UTC on that day (the SQL
+    ``before`` predicate is exclusive, so ``before=2026-07-01`` keeps June and drops
+    July 1 00:00). Relative: ``"7d"``, ``"24h"``, ``"2w"`` = now minus N
+    hours/days/weeks, so ``after="7d"`` is the last week and ``before="7d"`` is
+    everything older than a week.    """
     if value is None:
         return None
     text = str(value).strip()
     if not text:
         return None
+    if rel := _RELATIVE_BOUND_RE.match(text):
+        return int(time.time()) - int(rel.group(1)) * _RELATIVE_UNIT_SECONDS[rel.group(2).lower()]
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        raise ValueError(f"invalid ISO timestamp: {value!r}") from None
+        raise ValueError(f"invalid time bound: {value!r} (expected ISO date/datetime like "
+                         "2026-07-01, or a relative duration like 7d, 24h, 2w)") from None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return int(parsed.timestamp())
@@ -157,17 +174,25 @@ def _in_time_window(started_ts: Optional[int], after_ts: Optional[int], before_t
     return (after_ts is None or started_ts >= after_ts) and (before_ts is None or started_ts < before_ts)
 
 
-def _normalize_exclude_session_ids(raw: Any) -> List[str]:
-    """Deduped, stripped session ids from a str or list, capped at ``_EXCLUDE_SESSION_IDS_CAP``."""
+def _normalize_exclude_session_ids(raw: Any) -> Tuple[List[str], Optional[str]]:
+    """Deduped, stripped session ids from a str or list, capped at ``_EXCLUDE_SESSION_IDS_CAP``.
+
+    Returns ``(ids, note)``; ``note`` is set only when the input carried more distinct
+    valid ids than the cap, so the caller can tell the agent that later ids still apply —
+    silently truncating would let an "already inspected" session resurface unnoticed.
+    """
     items = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple)) else []
     out: List[str] = []
     for item in items:
         sid = item.strip() if isinstance(item, str) else ""
         if sid and sid not in out:
+            if len(out) >= _EXCLUDE_SESSION_IDS_CAP:
+                return out, (
+                    f"exclude_session_ids capped at {_EXCLUDE_SESSION_IDS_CAP}: only the first "
+                    f"{_EXCLUDE_SESSION_IDS_CAP} ids are applied — sessions listed later can "
+                    "still appear in results.")
             out.append(sid)
-        if len(out) >= _EXCLUDE_SESSION_IDS_CAP:
-            break
-    return out
+    return out, None
 
 
 def _excluded_lineage_roots(db, exclude_session_ids: List[str]) -> set[str]:
@@ -276,14 +301,17 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
         lambda: db.get_anchored_view(session_id, anchor_id, window=5, bookend=3), {},
         "get_anchored_view failed for title match %s/%s", session_id, anchor_id)
     title = session_meta.get("title") or title_query
-    def shape(key, fallback, anchor=None):
-        return [_shape_message(m, anchor_id=anchor) for m in (view.get(key) or fallback)]
+    # Same caps as FTS hits (_bookend / _hydrate_hit): a title match is a discovery entry too.
+    def shape(key, fallback, anchor=None, max_content_len=1200):
+        return [_shape_message(m, anchor_id=anchor, max_content_len=max_content_len)
+                for m in (view.get(key) or fallback)]
     return {**_discovery_entry(
         lineage_root, session_id=session_id, when=_format_timestamp(session_meta.get("started_at")),
         source=session_meta.get("source", "unknown"), model=session_meta.get("model") or "unknown",
         title=title, matched_role="session_title", match_message_id=anchor_id,
         snippet=f"Session title matched: {title}",
-        bookend_start=shape("bookend_start", messages[:3]), messages=shape("window", messages[:5], anchor_id),
+        bookend_start=shape("bookend_start", messages[:3]),
+        messages=shape("window", messages[:5], anchor_id, max_content_len=4000),
         bookend_end=shape("bookend_end", messages[-3:]), messages_before=view.get("messages_before", 0),
         messages_after=view.get("messages_after", max(len(messages) - 5, 0)), detail="full"),
         "_lineage_root": lineage_root}
@@ -332,11 +360,14 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
 def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort: Optional[str],
               detail: str, current_session_id: str = None, link_profile: str = None,
               after_ts: Optional[int] = None, before_ts: Optional[int] = None,
-              exclude_session_ids: Optional[List[str]] = None) -> str:
+              exclude_session_ids: Optional[List[str]] = None,
+              exclude_note: Optional[str] = None) -> str:
     """Discovery shape: FTS5 plus adaptive or full result hydration."""
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None
     excluded_roots = _excluded_lineage_roots(db, exclude_session_ids or [])
     title_result = _title_match_result(db, query, current_lineage_root)
+    # FTS rows are time-bounded in SQL (_search_filter_clauses); the title match bypasses that
+    # query, so it is the one place the window is re-checked in Python.
     if title_result:
         title_sid, title_root = title_result["session_id"], title_result.get("_lineage_root") or title_result["session_id"]
         title_started = _coerce_started_ts((_get_session_meta(db, title_root) or _get_session_meta(db, title_sid)).get("started_at"))
@@ -373,11 +404,6 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         raw_sid, resolved_sid = r["session_id"], _resolve_lineage(db, r["session_id"])
         if raw_sid in excluded_roots or resolved_sid in excluded_roots:
             continue
-        started_ts = _coerce_started_ts(r.get("session_started"))
-        if started_ts is None:
-            started_ts = _coerce_started_ts(_get_session_meta(db, raw_sid).get("started_at"))
-        if not _in_time_window(started_ts, after_ts, before_ts):
-            continue
         # Skip the current session lineage — UNLESS the hit's transcript has left live context. Three
         # sub-cases: Legacy compression rotation: the FTS hit lives in a session that itself ended with
         # end_reason='compression'. That session's content has been replaced by a summary in the
@@ -404,7 +430,8 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
             results.append(entry)
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
-    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), link_hint=(
+    note_kwargs = {"note": exclude_note} if exclude_note else {}
+    return _discover_payload(db, query, detail, results, sessions_searched=len(seen_sessions), **note_kwargs, link_hint=(
         "When referring the user to a session, write its `link` value "
         "verbatim inline mid-sentence (it renders as a titled link) — never "
         "as markdown, in backticks, on its own line, or next to the "
@@ -434,7 +461,7 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
                       session_id)
     if err:
         return err
-    shaped = [_shape_message(m) for m in rows]
+    shaped = [_shape_message(m, max_content_len=_READ_MAX_CONTENT) for m in rows]
     total, truncated = len(shaped), len(shaped) > head + tail
     return _ok(mode="read", session_id=session_id, link=_session_link(session_id, link_profile),
                session_meta=_session_meta_block(meta), message_count=total, truncated=truncated,
@@ -586,15 +613,16 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
         return _list_recent_sessions(db, limit, current_session_id, link_profile=profile)
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
     try:
-        after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before, as_exclusive_end=True)
+        after_ts, before_ts = _parse_iso_bound(after), _parse_iso_bound(before)
     except ValueError as e:
         return tool_error(str(e), success=False)
+    exclude_ids, exclude_note = _normalize_exclude_session_ids(exclude_session_ids)
     return _discover(
         db=db, query=query.strip(), limit=limit, sort=sort_norm if sort_norm in ("newest", "oldest") else None,
         role_filter=([r.strip() for r in role_filter.split(",") if r.strip()] or None) if isinstance(role_filter, str) else None,
         detail="full" if isinstance(detail, str) and detail.strip().lower() == "full" else "adaptive",
         current_session_id=current_session_id, link_profile=profile, after_ts=after_ts, before_ts=before_ts,
-        exclude_session_ids=_normalize_exclude_session_ids(exclude_session_ids))
+        exclude_session_ids=exclude_ids, exclude_note=exclude_note)
 
 
 def session_search(query: str = "", role_filter: str = None, limit: int = 3, db=None,
@@ -691,17 +719,18 @@ SESSION_SEARCH_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Discovery shape only. Inclusive lower bound on session start "
-                    "time (ISO date or datetime, e.g. 2026-06-01). Use only when the "
-                    "user names a time frame. sort is a ranking bias, not a bound."
+                    "time. ISO date/datetime (e.g. 2026-06-01) or relative duration "
+                    "(7d, 24h, 2w = within the last N). Use only when the user names "
+                    "a time frame. sort is a ranking bias, not a bound."
                 ),
             },
             "before": {
                 "type": "string",
                 "description": (
                     "Discovery shape only. Exclusive upper bound on session start "
-                    "time (ISO date or datetime, e.g. 2026-07-01). A date-only value "
-                    "is midnight UTC that day. Use only when the user names a time "
-                    "frame."
+                    "time. ISO date/datetime (a date-only value is midnight UTC that "
+                    "day) or relative duration (7d = older than a week). Use only "
+                    "when the user names a time frame."
                 ),
             },
             "exclude_session_ids": {
