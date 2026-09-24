@@ -193,6 +193,22 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
 # leaves in its own log (``KANBAN_WORKER_EXIT_TRAILER``).
 _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
+
+# Min age (seconds) a row must reach before the dispatcher may claim it
+# (wave-12 ghost-dispatch, 2026-09-24 fix-queue item 97). See _lane_rows.
+# Operators/tests may zero it with HERMES_KANBAN_DISPATCH_MIN_AGE=0 (the
+# test suite's autouse fixture does; the value is clamped >= 0).
+_DISPATCH_MIN_AGE_SECONDS = 300
+
+
+def _dispatch_min_age_seconds() -> int:
+    raw = os.environ.get("HERMES_KANBAN_DISPATCH_MIN_AGE")
+    if raw is None:
+        return _DISPATCH_MIN_AGE_SECONDS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DISPATCH_MIN_AGE_SECONDS
 _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 
 # Windows has no ``waitpid(-1)``: a child's exit code is only recoverable
@@ -2220,10 +2236,23 @@ def _tick_spawn_budget(
 
 
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
-    """Unclaimed rows of one lane in dispatch order."""
+    """Unclaimed rows of one lane in dispatch order.
+
+    Min-age gate (2026-09-24 wave-12, fix-queue item 97): a row younger than
+    one dispatch tick is invisible here, so create→delete churn that lives and
+    dies INSIDE a single tick interval (lane cleanup after a hand-merge, a
+    crashing creator, or a run whose rows are deleted on landing) can never be
+    claimed — the dispatcher would spawn a real worker for a row that is gone
+    seconds later, leaving the worker to honestly refuse ("task not found")
+    after burning a spawn slot. 300s comfortably exceeds the tick interval and
+    any plausible creator commit window; a genuinely backlogged board still
+    dispatches every row on a later tick, so nothing waits longer than one
+    extra tick.
+    """
     return conn.execute(
         "SELECT id, assignee FROM tasks "
         f"WHERE status = '{status}' AND claim_lock IS NULL "
+        f"AND created_at <= {int(time.time()) - _dispatch_min_age_seconds()} "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
 

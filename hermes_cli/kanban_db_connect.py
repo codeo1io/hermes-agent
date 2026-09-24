@@ -749,6 +749,14 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
+    # Choke parity with init_db (wave-12, 2026-09-24 fix-queue item 97): the
+    # guard must fire on EVERY entry into the DB layer, not only the explicit
+    # init path. A test-context process that lazily imports and calls connect()
+    # directly — the wave-9 CI-leak shape init_db's guard was added for, and
+    # the wave-12 e2e regression's spawned pytest children — reaches the live
+    # board here unguarded when this call is missing, because connect()'s own
+    # auto-init fast path re-runs the schema script on a missing file.
+    _ensure_test_isolation(path)
     from agent.delegation_context import kanban_path_is_fenced
     if kanban_path_is_fenced(path):
         # Reads must not enter schema/backfill write transactions. Never create a
