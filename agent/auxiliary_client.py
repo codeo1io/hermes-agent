@@ -2614,8 +2614,10 @@ def _relay_sync_completion(
             name=provider_name, model_name=model_name, metadata=metadata,
             defer_logical_completion=True,
         ),
-        aux_task=metadata["auxiliary_task"], metadata=metadata, client=client, kwargs=kwargs,
-        provider=provider_name, model=model_name, api_mode=metadata["api_mode"],
+        # Defensive reads: the hooks are observer-only and must never break an
+        # auxiliary call when a (stubbed or partial) metadata dict lacks keys.
+        aux_task=metadata.get("auxiliary_task", ""), metadata=metadata, client=client, kwargs=kwargs,
+        provider=provider_name, model=model_name, api_mode=metadata.get("api_mode", "chat_completions"),
     )
 
 
@@ -2640,8 +2642,8 @@ async def _relay_async_completion(
             kwargs, callback, name=provider_name, model_name=model_name,
             metadata=metadata, defer_logical_completion=True,
         ),
-        aux_task=metadata["auxiliary_task"], metadata=metadata, client=client, kwargs=kwargs,
-        provider=provider_name, model=model_name, api_mode=metadata["api_mode"],
+        aux_task=metadata.get("auxiliary_task", ""), metadata=metadata, client=client, kwargs=kwargs,
+        provider=provider_name, model=model_name, api_mode=metadata.get("api_mode", "chat_completions"),
     )
 
 
@@ -2667,8 +2669,9 @@ def _relay_sync_stream(
             model_name=model_name, finalizer=dict, metadata=metadata,
             completed_response_predicate=lambda value: hasattr(value, "choices"),
         ),
-        aux_task=metadata["auxiliary_task"], metadata=metadata, client=client, kwargs=kwargs,
-        provider=provider_name, model=model_name, api_mode=metadata["api_mode"], streaming=True,
+        aux_task=metadata.get("auxiliary_task", ""), metadata=metadata, client=client, kwargs=kwargs,
+        provider=provider_name, model=model_name, api_mode=metadata.get("api_mode", "chat_completions"),
+        streaming=True,
     )
 
 
