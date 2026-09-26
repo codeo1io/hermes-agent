@@ -86,12 +86,18 @@ class MCPServerRunMixin:
                     if self._rpc_lock.locked() or any(not t.done() for t in self._inflight_tasks):
                         continue
                     try:
-                        async with self._rpc_lock:
-                            await self._keepalive_probe()
+                        await self._keepalive_probe()
                     except Exception as exc:
                         root = _errors._unwrap_exception_group(exc)
                         logger.warning("MCP server '%s' keepalive failed, triggering reconnect (state: connected → "
                                        "degraded): %s: %s", self.name, type(root).__name__, root)
+                        # Mark the current session unusable before requesting
+                        # reconnect. Without this, callers can observe _ready
+                        # still set and enter the stale session during the
+                        # transport teardown window, producing another
+                        # ClosedResourceError before the replacement session is
+                        # published (3fdf12c920; dropped in the sibling split).
+                        self._ready.clear()
                         self.mark_suspect(f"keepalive failed: {type(root).__name__}: {root}")
                         self._reconnect_event.set()
                         break

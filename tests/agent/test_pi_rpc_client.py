@@ -111,9 +111,15 @@ def test_run_session_prompt_fails_fast_when_pi_exits_before_settled(tmp_path):
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     client = PiRPCClient(acp_command=str(script), base_url="pi://exit-test", persistent_session=True)
+    # Pay interpreter boot + handshake up front: the bound below must measure EXIT
+    # DETECTION, not spawn latency — a spawned-under-load interpreter boot is
+    # multi-second and would make the fails-fast bound assume a quiet runner.
+    client.start()
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="pi rpc process exited with code 7"):
         client.run_session_prompt("boom", timeout_seconds=30)
+    # Boot already paid; only prompt round-trip + exit detection remain. A client
+    # that waited out the 30s prompt timeout instead of detecting the exit blows this.
     assert time.monotonic() - started < 2.0
     client.close()
 
@@ -389,10 +395,17 @@ def test_question_timeout_auto_answers(fake_pi, clean_registry, monkeypatch):
 
 # ---------------------------------------------------------------- provider
 
-def test_pi_rpc_provider_resolves_without_acp_env(monkeypatch):
+def test_pi_rpc_provider_resolves_without_acp_env(monkeypatch, tmp_path):
     from hermes_cli.runtime_provider import resolve_runtime_provider
     monkeypatch.delenv("HERMES_COPILOT_ACP_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_COPILOT_ACP_ARGS", raising=False)
+    # Hermetic on hosts without a real ``pi`` install (CI runners): the provider
+    # only needs SOME executable at the resolved path, so point HERMES_PI_BIN at
+    # a stub. The assertion under test is ACP-env independence, not pi presence.
+    stub = tmp_path / "pi"
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("HERMES_PI_BIN", str(stub))
     r = resolve_runtime_provider(requested="pi-rpc")
     assert r is not None
 
