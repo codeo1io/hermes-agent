@@ -22,8 +22,6 @@ on:
 permissions:
   contents: read
   pull-requests: write # needed by lint (PR comment) + supply-chain review_status
-  actions: read # needed by osv-scanner (SARIF upload)
-  security-events: write # needed by osv-scanner (SARIF upload)
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -37,7 +35,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 1
     outputs:
       python: ${{ steps.classify.outputs.python }}
@@ -215,10 +213,6 @@ jobs:
       mcp_catalog: ${{ needs.detect.outputs.mcp_catalog == 'true' }}
       supply_chain: ${{ needs.supply-chain.outputs.critical_findings == 'true' }}
 
-  osv-scanner:
-    name: OSV scan
-    uses: ./.github/workflows/osv-scanner.yml
-
   # ─────────────────────────────────────────────────────────────────────
   # Gate: runs after everything. ``if: always()`` ensures it reports a
   # status even when some deps were skipped. Only actual ``failure``
@@ -250,13 +244,16 @@ jobs:
       - profile-artifact-check
       - supply-chain
       - review-labels
-      - osv-scanner
+      # OSV runs weekly against main (osv-scanner.yml schedule), not per PR:
+      # every PR was reporting the same repo-wide baseline of pinned-dep CVEs
+      # in its review comment, and the SARIF upload tripped GitHub's
+      # per-installation API rate limit during merge trains.
       # The image build runs in its own workflow (docker.yml) and reports
       # its own check. It was never required here, because it is too slow
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: always()
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -299,7 +296,7 @@ jobs:
     name: CI timing report
     needs: [all-checks-pass]
     if: always()
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code

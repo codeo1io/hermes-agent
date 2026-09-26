@@ -5,11 +5,11 @@ name: Skills Index Freshness Check
 # stale OR the file disappears entirely OR a major source has collapsed,
 # this workflow opens a GitHub issue so we hear about it before users do.
 #
-# Triggered daily; workflow_dispatch remains available for ad hoc freshness checks.
+# Triggered every 4 hours so we catch a stuck cron within one tick.
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 permissions:
@@ -19,7 +19,7 @@ permissions:
 jobs:
   check-freshness:
     if: github.repository == 'NousResearch/hermes-agent'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: trusted-automation
     steps:

@@ -2,7 +2,7 @@ name: Windows venv-holder live E2E
 
 # ON-DEMAND ONLY (fleet-update #91277, venv-holder consolidation work).
 #
-# Runs the live venv-suite on the self-hosted Linux runner; the Windows-
+# Runs the live venv-suite on a cloud Windows runner; the Windows-
 # spawns actual processes with realistic Hermes argv shapes and drives the
 # REAL detection/classification/exemption code against the live process
 # table — the coverage that cannot exist on the Linux lanes and that the
@@ -26,8 +26,8 @@ concurrency:
 
 jobs:
   venv-holder-e2e:
-    name: venv-holder live E2E (self-hosted Linux)
-    runs-on: self-hosted
+    name: venv-holder live E2E (Windows)
+    runs-on: windows-latest
     timeout-minutes: 25
     steps:
       - name: Checkout code
@@ -60,7 +60,7 @@ jobs:
             tests/hermes_cli/test_venv_holder_windows_live.py \
             tests/hermes_cli/test_taskkill_identity_windows_live.py \
             tests/hermes_cli/test_git_trampoline_windows_live.py \
-            "tests/hermes_cli/test_managed_uv.py::TestWindowsRuntimeSelfLock" \
+            tests/hermes_cli/test_managed_uv_windows_cutover.py \
             -o addopts= -v -p no:cacheprovider
 
       - name: Run Telegram CLOSE-WAIT reconnect live E2E (#87057)
