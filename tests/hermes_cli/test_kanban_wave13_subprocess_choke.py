@@ -184,12 +184,43 @@ def _run_probe(live: Path, mode: str, tmp_path: Path) -> dict:
 
 
 def _live_probe_rows(live: Path) -> list[tuple]:
+    """Read-only probe of the live board for the wave-13 fingerprint. Empty
+    boards created-but-never-initialized by an earlier process on the host
+    (GitHub runners end up with a zero-page ``~/.hermes/kanban.db``) count as
+    "no debris": sqlite opens the file fine but the schema never existed."""
     conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
     try:
+        has_tasks = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()
+        if not has_tasks:
+            return []
         return conn.execute(
             "SELECT id, title, assignee FROM tasks WHERE title IN (?,?,?,?)",
             _WAVE13_TITLES,
         ).fetchall()
+    finally:
+        conn.close()
+
+
+def _live_board_is_real(live: Path) -> bool:
+    """A real board has the schema (a bare file created by an unrelated
+    process is not a board this regression can fingerprint)."""
+    try:
+        return bool(_live_probe_rows(live) is not None) and _has_tasks(live)
+    except sqlite3.OperationalError:
+        return False
+
+
+def _has_tasks(live: Path) -> bool:
+    conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
+    try:
+        return (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+            ).fetchone()
+            is not None
+        )
     finally:
         conn.close()
 
@@ -217,9 +248,10 @@ def test_subprocess_predicate_refuses_live_board(wave13_topology):
 def test_subprocess_open_paths_refuse_live_board(wave13_topology):
     """connect() / connect_closing() / init_db() — every DB-layer entry —
     refuse the live board from a spawned pytest child, before any sqlite
-    touch. Skips only on hosts with no live board (CI runners)."""
+    touch. Skips on hosts with no live board (or only a bare never-initialized
+    file, e.g. GitHub runners)."""
     root, live, tmp_path = wave13_topology
-    if not live.exists():
+    if not _live_board_is_real(live):
         pytest.skip("no live board on this host (not the runner machine)")
     before = _live_probe_rows(live)
     report = _run_probe(live, "open", tmp_path)
@@ -239,7 +271,7 @@ def test_subprocess_write_helpers_never_reach_live_board(wave13_topology):
     child on the live board, the child reports CHOKED-MISSING and this fails
     WITHOUT the probe writing a single row."""
     root, live, tmp_path = wave13_topology
-    if not live.exists():
+    if not _live_board_is_real(live):
         pytest.skip("no live board on this host (not the runner machine)")
     before = _live_probe_rows(live)
     report = _run_probe(live, "write", tmp_path)
