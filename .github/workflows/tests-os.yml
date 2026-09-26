@@ -58,10 +58,10 @@ jobs:
       matrix:
         include:
           - name: macOS-only tests
-            runner: self-hosted
+            runner: macos-latest
             marker: macos_only
           - name: Windows-only tests
-            runner: self-hosted
+            runner: windows-latest
             marker: windows_only
     steps:
       - name: Checkout code
