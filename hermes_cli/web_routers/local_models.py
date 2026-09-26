@@ -751,22 +751,29 @@ async def local_models_quickstart(body: QuickstartBody):
     job["total_bytes"] = download_bytes or None
 
     def _run():
-        if need_runtime:
-            _step(job, "installing-runtime", "Installing the local engine")
-            binaries.ensure_runtime_installed(tag, backend, progress=_runtime_progress_hook(job))
-        if need_download:
-            # The runtime leg repurposed the byte counters for its own stages — reset them to the model plan.
-            job["done_bytes"] = 0
-            job["total_bytes"] = download_bytes
+        try:
+            if need_runtime:
+                _step(job, "installing-runtime", "Installing the local engine")
+                binaries.ensure_runtime_installed(tag, backend, progress=_runtime_progress_hook(job))
+            if need_download:
+                # The runtime leg repurposed the byte counters for its own stages — reset them to the model plan.
+                job["done_bytes"] = 0
+                job["total_bytes"] = download_bytes
             _run_download_plan(job, download_plan, entry.display_name)
-        # Activate: same sequence as /activate's job body.
-        _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
-                       fail_detail="The local server could not start — open Local Models for details",
-                       skip_msg="quickstart rescan check skipped")
-        _assign_default(job, variant.model_id)
+            # Activate: same sequence as /activate's job body.
+            _ensure_server(job, _set_runtime_enabled(True), variant.model_id,
+                           fail_detail="The local server could not start — open Local Models for details",
+                           skip_msg="quickstart rescan check skipped")
+            _assign_default(job, variant.model_id)
+        finally:
+            # Free the single-flight lock BEFORE any terminal job status is set
+            # (both the success ``_finish`` below and _spawn_job's error path):
+            # once a client sees the job done/errored, a follow-up quickstart must
+            # not 409 against a lock that only the thread's exit would release.
+            _QUICKSTART_LOCK.release()
         _finish(job, f"{entry.display_name} is ready — new chats use it")
 
-    _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s", on_exit=_QUICKSTART_LOCK.release)
+    _spawn_job(job, "lr-quickstart", _run, fail_msg="quickstart failed: %s")
     return {"job_id": job["job_id"], "model_id": entry.id, "display_name": entry.display_name,
             "needs_runtime": need_runtime, "needs_download": need_download, "download_bytes": download_bytes}
 

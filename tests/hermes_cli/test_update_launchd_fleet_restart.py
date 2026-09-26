@@ -197,7 +197,7 @@ class TestProbeLaunchdDomainForLabel:
 
 class TestGetServicePidsScoping:
     def _wire(self, monkeypatch):
-        monkeypatch.setattr(gw, "is_macos", lambda: True)
+        monkeypatch.setattr(gw, "is_macos", lambda: True)  # os-marker: ok — launchd plumbing is stubbed end-to-end; host-independent scoping logic only
         monkeypatch.setattr(gw, "supports_systemd_services", lambda: False)
         monkeypatch.setattr(gw, "get_launchd_label", lambda: "ai.hermes.gateway")
         monkeypatch.setattr(
