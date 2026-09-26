@@ -33,7 +33,7 @@ name: Install & Update E2E
 # after it ships, and would pin an "oldest" that nobody still runs.
 #
 # Triggers:
-#   * daily, so upstream drift (a new uv, a Node bump, a PyPI change)
+#   * every 12 hours, so upstream drift (a new uv, a Node bump, a PyPI change)
 #     surfaces on a schedule rather than in someone's review cycle;
 #   * when a release tag is created -- the moment the set of versions users can
 #     update FROM changes, and the moment a broken updater would strand them;
@@ -63,8 +63,8 @@ on:
         type: string
         default: ''
   schedule:
-    # Daily at 07:20 UTC, off the hour to avoid the top-of-hour runner crunch.
-    - cron: '20 7 * * *'
+    # Every 12 hours, off the hour to avoid the top-of-hour runner crunch.
+    - cron: '20 7,19 * * *'
   push:
     tags:
       # Release tags only: the repo also carries backup/* and one-off tags.
@@ -84,7 +84,7 @@ jobs:
   # OS's matrix so all combos cover the same set.
   pick-releases:
     name: Pick release tags
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       tags: ${{ steps.pick.outputs.tags }}
@@ -136,7 +136,7 @@ jobs:
   generate-matrix:
     name: Expand combinations
     needs: pick-releases
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       linux: ${{ steps.gen.outputs.linux }}
@@ -223,7 +223,7 @@ jobs:
   # looks it up by that name.
   leg-player:
     name: Upload leg player
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -248,7 +248,7 @@ jobs:
     name: Result chart
     if: always()
     needs: [leg-player, pick-releases, linux, windows, macos]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
