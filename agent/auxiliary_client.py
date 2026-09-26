@@ -2725,9 +2725,11 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
         real_client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra)
         return CodexAuxiliaryClient(real_client, model), model
     if custom_mode == "anthropic_messages":
-        # Third-party Anthropic-compatible gateway — never OAuth (that's api.anthropic.com only).
+        # OAuth identity only when the host is exactly api.anthropic.com (key_cmd callable included,
+        # #114967); third-party Anthropic-compatible gateways never get it.
         try:
             from agent.anthropic_adapter import build_anthropic_client
+            from agent.anthropic_credentials import anthropic_route_is_oauth
             real_client = build_anthropic_client(custom_key, custom_base)
         except ImportError:
             logger.warning(
@@ -2735,7 +2737,8 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
                 "anthropic SDK is not installed — falling back to OpenAI-wire."
             )
             return _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra), model
-        return AnthropicAuxiliaryClient(real_client, model, custom_key, custom_base, is_oauth=False), model
+        return AnthropicAuxiliaryClient(real_client, model, custom_key, custom_base,
+                                        is_oauth=anthropic_route_is_oauth(custom_base, custom_key)), model
     # URL-based anthropic detection for custom endpoints without explicit api_mode.
     _fallback_client = _create_openai_client(api_key=custom_key, base_url=_clean_base, **_extra)
     return _maybe_wrap_anthropic(_fallback_client, model, custom_key, custom_base, custom_mode), model
