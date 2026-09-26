@@ -7,6 +7,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:  # manual full-history rescan without the empty-commit retrigger
   schedule:
     - cron: "31 3 * * *"  # daily off-peak full-history rescan
 
@@ -15,4 +16,6 @@ permissions:
 
 jobs:
   private-leak:
-    uses: codeo1io/.github/.github/workflows/private-leak-sentinel.yaml@main
+    # SHA-pinned per the repo's dependency-pinning policy (#9801); @main here was the
+    # last mutable ref in the tree (supply-chain control point on self-hosted runners).
+    uses: codeo1io/.github/.github/workflows/private-leak-sentinel.yaml@7d47ab484a937c5742ddcb3b69399495e8342beb # codeo1io/.github main @ 2026-09-22 (repo publishes no tags)
