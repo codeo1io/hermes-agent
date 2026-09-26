@@ -443,7 +443,7 @@ def test_multiple_absolute_paths_split_on_pathsep(tmp_path: Path) -> None:
     assert "Discovered 2 test files" in proc.stdout, proc.stdout
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="drive-letter paths")
+@pytest.mark.windows_only
 def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
     """An absolute ``--paths`` value stays one root on Windows.
 
