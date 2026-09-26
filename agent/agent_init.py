@@ -744,9 +744,11 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # Only mark the session as OAuth-authenticated when the token genuinely belongs to native Anthropic.
     # Third-party providers (MiniMax, Kimi, GLM, LiteLLM proxies) that accept the Anthropic protocol must
     # never trip OAuth code paths — doing so injects Claude-Code identity headers and system prompts that
-    # cause 401/403 on their endpoints. See #1739.
-    from agent.anthropic_credentials import _is_oauth_token as _is_oat
-    agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
+    # cause 401/403 on their endpoints. See #1739. #114967: a ``key_cmd`` callable token keeps its
+    # OAuth identity on native routes — ``anthropic_route_is_oauth`` materializes it once for the
+    # shape test instead of the old ``isinstance(str)`` guard that silently dropped the identity.
+    from agent.anthropic_credentials import anthropic_route_is_oauth
+    agent._is_anthropic_oauth = anthropic_route_is_oauth(base_url, effective_key, provider=agent.provider)
     agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
     if not agent.quiet_mode:
         print(f"🤖 AI Agent initialized with model: {agent.model} (Anthropic native)")

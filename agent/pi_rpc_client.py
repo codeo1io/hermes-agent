@@ -471,7 +471,14 @@ class PiRPCClient:
         except Exception:
             pass
         finally:
-            code = proc.poll()
+            # EOF on stdout can beat SIGCHLD/reaping: poll() then returns None and
+            # callers see "exited with code None" for a clean exit. Wait briefly for
+            # the real code (bounded — a child that closed stdout but still runs must
+            # not wedge the reader).
+            try:
+                code = proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                code = proc.poll()
             error = f"pi rpc process exited with code {code}"
             self._process_exited_error = error
             with self._pending_lock:
