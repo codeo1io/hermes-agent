@@ -429,7 +429,13 @@ override-dependencies = [
   # Remove this line when alibabacloud-tea-openapi lifts the cap.
   "cryptography>=50,<51",
 ]
-exclude-newer = "14 days"
+# Absolute supply-chain cutoff, NOT a rolling window: a rolling span (the old
+# `"14 days"`) slides with calendar time, so `uv lock --check` failed on an
+# UNCHANGED tree as the horizon passed releases already pinned in uv.lock
+# (observed 2026-09-26 with uv 0.12.5: the resolver excluded google-cloud-pubsub
+# and demanded a re-lock). The anchor keeps resolution byte-stable; bump it
+# DELIBERATELY as part of a reviewed dependency update, never passively.
+exclude-newer = "2026-09-13T00:00:00Z"
 # h2: temporary exclude-newer exception for the CVE-2026-71554 (GHSA-6hr6-w5qg-qmwg,
 # request-smuggling) fix in 4.4.1, published 2026-08-03. Remove after 2026-08-17.
 # aiohttp, cryptography: same shape — the advisory fixes are newer than the

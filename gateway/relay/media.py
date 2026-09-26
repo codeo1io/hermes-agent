@@ -21,8 +21,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from gateway.relay.auth import make_upgrade_token
+from tools.url_safety import is_safe_url
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,28 @@ class RelayMediaClient:
         """Is ``url`` a connector re-host reference (needs our bearer to GET)?"""
         return "/relay/media/" in (url or "")
 
+    def _netloc_key(self, url: str) -> Optional[tuple]:
+        """``(host, effective port)`` for an http(s) URL; None when unparseable."""
+        try:
+            parts = urlsplit(url)
+            if parts.scheme not in ("http", "https") or not parts.hostname:
+                return None
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+            return (parts.hostname.lower().rstrip("."), port)
+        except ValueError:
+            return None
+
+    def is_own_rehost(self, url: str) -> bool:
+        """True when *url* points at OUR configured connector host.
+
+        The bearer must never leave the operator-configured connector: inbound
+        ``media_urls`` are attacker-influenced, and a third-party URL that merely
+        contains ``/relay/media/`` would otherwise be handed the per-gateway
+        credential.
+        """
+        own = self._netloc_key(self._base_url)
+        return own is not None and own == self._netloc_key(url)
+
     async def upload(
         self, file_path: str, *, mime: Optional[str] = None, filename: Optional[str] = None
     ) -> Optional[str]:
@@ -112,12 +136,14 @@ class RelayMediaClient:
     async def download(self, url: str, *, suggested_name: Optional[str] = None) -> Optional[str]:
         """GET an attachment to a local temp file; return its path or None on any failure.
 
-        The bearer is presented only for connector re-host URLs; public URLs
-        (e.g. a Discord CDN pass-through) are fetched without it.
+        The bearer is presented only for re-host URLs on OUR configured connector
+        host; everything else (public pass-throughs — and third-party URLs merely
+        mimicking the re-host path) is fetched anonymously and vetted by the SSRF
+        guard (``tools/url_safety.py``).
         """
         if not url:
             return None
-        needs_auth = self.is_relay_media_url(url)
+        needs_auth = self.is_relay_media_url(url) and self.is_own_rehost(url)
         if needs_auth and not self.enabled:
             return None
         headers = {"User-Agent": _MEDIA_USER_AGENT}
@@ -125,6 +151,14 @@ class RelayMediaClient:
             headers["Authorization"] = f"Bearer {self._bearer()}"
 
         def _get() -> Optional[str]:
+            if not needs_auth:
+                # Attacker-influenced destination: vet it like every other fetch
+                # site (cloud metadata always blocked; private/loopback by policy).
+                # Genuine re-hosts are exempt — the connector base URL is operator
+                # configuration and may legitimately resolve to a LAN address.
+                if not is_safe_url(url):
+                    logger.warning("relay media download blocked by URL safety check: %s", url)
+                    return None
             req = urllib.request.Request(url, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:

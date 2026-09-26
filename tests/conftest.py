@@ -704,13 +704,13 @@ _REAL_KANBAN_ROOT = _capture_real_kanban_root()
 
 
 @pytest.fixture(autouse=True)
-def _kanban_write_guard(_hermetic_environment, monkeypatch):
+def _kanban_write_guard(_hermetic_environment, request, monkeypatch):
     """Fail-closed guard: refuse kanban writes that target the REAL root.
 
     Uses a **deny-list**: only blocks writes where the resolved DB path
-    (explicit ``db_path`` or ``kanban_db_path()``) lands under the real
-    ``~/.hermes`` captured at import time. Hermetic tests that legitimately
-    move HERMES_HOME to sibling tempdirs are unaffected.
+    (explicit ``db_path`` or ``kanban_db_path()``) lands on a PRODUCTION board
+    path under the real ``~/.hermes`` captured at import time. Hermetic tests
+    that legitimately move HERMES_HOME to sibling tempdirs are unaffected.
 
     Only patches when ``hermes_cli.kanban_db_connect`` is *already imported*
     — a ``sys.modules`` probe, not an import — so the guard never drags the
@@ -734,6 +734,17 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
     if _orig_connect is None or getattr(_kdb, "kanban_db_path", None) is None:
         return
 
+    # Escape hatch for tests that genuinely need the live board: the same
+    # ``@pytest.mark.live_system_guard_bypass`` marker ``_state_db_write_guard``
+    # honors flips the product-side choke's module global. This wrapper stays
+    # armed only for unmarked tests.
+    if request.node.get_closest_marker("live_system_guard_bypass") is not None:
+        # raising=False: older lineages have no product-side reader for this
+        # flag yet; arming it must not error the very tests the hatch exists
+        # for. Setting it anyway keeps the escape hatch forward-compatible.
+        monkeypatch.setattr(_kdbc, "_KANBAN_GUARD_BYPASS", True, raising=False)
+        return
+
     def _guarded_connect(db_path=None, *args, **kwargs):
         if db_path is not None:
             resolved = Path(db_path).expanduser().resolve()
@@ -743,14 +754,34 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
                 .expanduser()
                 .resolve()
             )
+        # Deny-list matches PRODUCTION board paths only: ``<root>/kanban.db``,
+        # anything under ``<root>/kanban/`` and ``<root>/profiles/<name>/``.
+        # A blanket "anywhere under the real root" refuse-mode mis-fires when
+        # the pytest temp root itself sits under ``~/.hermes`` (conductor
+        # delegate TMPDIR / ``--basetemp ~/.hermes/tmp/...``): sandboxed test
+        # DBs land at e.g. ``~/.hermes/tmp/.../.hermes/kanban.db`` — inside the
+        # root but NOT the production board — and the hermetic suite errors
+        # (2026-09-17 full-suite run). ``_REAL_KANBAN_ROOT`` is the real
+        # ``~/.hermes`` root; relative_to can't fail (resolved paths agree),
+        # but keep the try for exotic mismatches (symlink races).
+        is_production = False
         try:
-            resolved.relative_to(_REAL_KANBAN_ROOT)
+            parts = resolved.relative_to(_REAL_KANBAN_ROOT).parts
         except ValueError:
-            # Resolved path is NOT under the real root — safe to write.
+            parts = ()
+        if parts:
+            is_production = (
+                parts == ("kanban.db",)
+                or (len(parts) >= 2 and parts[0] == "kanban")
+                or (len(parts) == 3 and parts[0] == "profiles")
+            )
+        if not is_production:
+            # Resolved path is NOT a production board path — safe to write.
             return _orig_connect(db_path, *args, **kwargs)
         raise RuntimeError(
             f"kanban_write_guard: kanban DB path resolved to {resolved}, "
-            f"which is under the REAL kanban root ({_REAL_KANBAN_ROOT}). "
+            f"which is a production board path under the REAL kanban root "
+            f"({_REAL_KANBAN_ROOT}). "
             f"Hermetic isolation has been bypassed — refusing to write "
             f"to the real ~/.hermes. See #69283."
         )

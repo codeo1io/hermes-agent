@@ -14,6 +14,7 @@ logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the 
 DELEGATE_BLOCKED_TOOLS = frozenset(
     [
         "delegate_task",  # no recursive delegation
+        "delegate_session",  # no reaching back into the parent's delegation surface
         "clarify",  # no user interaction
         "memory",  # no writes to shared MEMORY.md
         "send_message",  # no cross-platform side effects
