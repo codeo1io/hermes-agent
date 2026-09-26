@@ -205,7 +205,7 @@ Outgoing deliveries (`gateway/delivery.py`) handle:
 
 - **Direct reply** — send response back to the originating chat
 - **Home channel delivery** — route cron job outputs and background results to a configured home channel
-- **Explicit target delivery** — the send engine specifying `telegram:-1001234567890`, exposed via the [`hermes send` CLI](/guides/pipe-script-output) for shell scripts and via cron `deliver:` targets
+- **Explicit target delivery** — the send engine specifying `telegram:-1001234567890`, exposed via the [`hermes send` CLI](../guides/pipe-script-output.md) for shell scripts and via cron `deliver:` targets
 - **Cross-platform delivery** — deliver to a different platform than the originating message
 
 Cron job deliveries are NOT mirrored into gateway session history — they live in their own cron session only. This is a deliberate design choice to avoid message alternation violations.
@@ -276,4 +276,4 @@ The gateway runs as a long-lived process, managed via:
 - [Cron Internals](./cron-internals.md)
 - [ACP Internals](./acp-internals.md)
 - [Agent Loop Internals](./agent-loop.md)
-- [Messaging Gateway (User Guide)](/user-guide/messaging)
+- [Messaging Gateway (User Guide)](../user-guide/messaging/index.md)

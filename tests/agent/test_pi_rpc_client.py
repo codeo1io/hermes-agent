@@ -111,9 +111,15 @@ def test_run_session_prompt_fails_fast_when_pi_exits_before_settled(tmp_path):
     )
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     client = PiRPCClient(acp_command=str(script), base_url="pi://exit-test", persistent_session=True)
+    # Pay interpreter boot + handshake up front: the bound below must measure EXIT
+    # DETECTION, not spawn latency — a spawned-under-load interpreter boot is
+    # multi-second and would make the fails-fast bound assume a quiet runner.
+    client.start()
     started = time.monotonic()
     with pytest.raises(RuntimeError, match="pi rpc process exited with code 7"):
         client.run_session_prompt("boom", timeout_seconds=30)
+    # Boot already paid; only prompt round-trip + exit detection remain. A client
+    # that waited out the 30s prompt timeout instead of detecting the exit blows this.
     assert time.monotonic() - started < 2.0
     client.close()
 
