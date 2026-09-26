@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from pathlib import Path
@@ -32,9 +33,12 @@ import pytest
 
 
 # Both tests share the same handoff file: the leaker writes here, the
-# verifier reads here. We park it in $TMPDIR with a unique-per-run name
+# verifier reads here. We park it in the tempdir with a unique-per-run name
 # so concurrent invocations of the suite don't clobber each other.
-_HANDOFF_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "hermes-isolation-probe"
+# ``tempfile.gettempdir()`` (not a "/tmp" literal) because the Windows
+# windows_only lane also collects this module: a "/tmp" default resolves to
+# ``\tmp`` on the current drive and mkdir fails before any test runs.
+_HANDOFF_DIR = Path(os.environ.get("TMPDIR") or tempfile.gettempdir()) / "hermes-isolation-probe"
 _HANDOFF_DIR.mkdir(exist_ok=True)
 
 
@@ -443,7 +447,7 @@ def test_multiple_absolute_paths_split_on_pathsep(tmp_path: Path) -> None:
     assert "Discovered 2 test files" in proc.stdout, proc.stdout
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="drive-letter paths")
+@pytest.mark.windows_only
 def test_drive_letter_colon_is_not_a_path_separator(tmp_path: Path) -> None:
     """An absolute ``--paths`` value stays one root on Windows.
 

@@ -470,21 +470,43 @@ def _dir_holds_board(d: Path) -> bool:
     return (d / "board.json").exists() or (d / "kanban.db").exists()
 
 
+def _guard_board_path(path: Path) -> None:
+    """Route ``_board_path`` results through the test-isolation guard so
+    workspace / attachment / log trees get the same production-root refusal
+    the sqlite connect path already enforces. No-op outside pytest; bypass
+    via ``HERMES_KANBAN_GUARD_BYPASS=1`` / the ``live_system_guard_bypass``
+    marker as elsewhere. Lazy import: ``kanban_db_connect`` imports this
+    module at import time, so the edge must not."""
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    _ensure_test_isolation(path)
+
+
 def _board_path(
     env_var: Optional[str], board: Optional[str], default_parts: tuple[str, ...], leaf: str,
 ) -> Path:
     """Shared resolver: ``env_var`` override, else legacy ``<root>/<default_parts>``
-    for the ``default`` board, else ``board_dir(slug)/leaf``."""
+    for the ``default`` board, else ``board_dir(slug)/leaf``. Resolved paths
+    are guard-checked before they escape — EXCEPT the ``HERMES_KANBAN_DB``
+    pin: that pin is a user/worker-injected production override whose choke
+    is the sqlite connect guard (tests may inspect where it points without
+    opening it; see tests/hermes_cli/test_kanban_env_pin_leak.py)."""
     if env_var:
         override = os.environ.get(env_var, "").strip()
         if override:
-            return Path(override).expanduser()
+            path = Path(override).expanduser()
+            if env_var != "HERMES_KANBAN_DB":
+                _guard_board_path(path)
+            return path
     slug = _normalize_board_slug(board)
     if slug is None:
         slug = get_current_board()
     if slug == DEFAULT_BOARD:
-        return kanban_home().joinpath(*default_parts)
-    return board_dir(slug) / leaf
+        path = kanban_home().joinpath(*default_parts)
+    else:
+        path = board_dir(slug) / leaf
+    _guard_board_path(path)
+    return path
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
