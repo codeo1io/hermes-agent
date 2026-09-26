@@ -31,11 +31,15 @@ class _SlowUnwindingChild:
 
     def run_conversation(self, **_kwargs):
         self.started.set()
-        assert self.interrupted.wait(timeout=1)
+        # Generous bounds: the "conversation thread" must stay alive until the
+        # test releases it. A short self-destruct deadline (2s) expires on a
+        # loaded CI runner before the test samples the guard, kills the thread,
+        # and makes the deferred close fire early — a false flake.
+        assert self.interrupted.wait(timeout=30)
         # Model the real child turn's finally path: it still performs session
         # activity/SQLite cleanup after the parent requests interruption.
         self.unwinding.set()
-        assert self.allow_finish.wait(timeout=2)
+        assert self.allow_finish.wait(timeout=30)
         self.finished.set()
         return {
             "final_response": "",
@@ -76,15 +80,19 @@ def test_timeout_does_not_close_child_while_worker_is_unwinding(monkeypatch):
     )
 
     assert result["status"] == "timeout"
-    assert child.unwinding.wait(timeout=1)
+    # Deterministic guard: close() is deferred to the worker Future's
+    # done-callback, so while run_conversation is held at allow_finish the
+    # closed event provably cannot be set. An eager close at timeout (the
+    # regression) sets it here.
+    assert child.unwinding.wait(timeout=30)
     try:
         assert not child.closed.is_set(), (
             "timed-out child.close() ran before its conversation thread unwound"
         )
     finally:
         child.allow_finish.set()
-    assert child.finished.wait(timeout=1)
-    assert child.closed.wait(timeout=1)
+    assert child.finished.wait(timeout=30)
+    assert child.closed.wait(timeout=30)
     assert not child.close_while_running, (
         "timed-out child.close() raced its still-running conversation thread"
     )
