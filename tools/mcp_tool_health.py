@@ -160,7 +160,20 @@ class MCPServerHealthMixin:
     async def _keepalive_probe(self) -> None:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
         OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
-        back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
+        back to ``list_tools`` when the server advertises tools, else the -32601 propagates.
+
+        Keepalives are client-initiated RPCs too (3fdf12c920): overlapping requests on one
+        MCP transport can wedge or close the underlying anyio stream. If a user RPC is
+        already in flight, that RPC is itself the stronger liveness signal — defer this
+        keepalive cycle instead of racing it.
+        """
+        if self._rpc_lock.locked():
+            logger.debug(
+                "MCP server '%s': skipping keepalive while an RPC is in flight",
+                self.name,
+            )
+            return
+
         async def list_tools():
             await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
         if not self._ping_unsupported:

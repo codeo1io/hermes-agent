@@ -274,7 +274,6 @@ class SessionMaintenanceMixin:
         ``exclude_active_write_guards`` (automatic maintenance) skips rows under a live turn lease
         or compression lock while expired/dead holders are reclaimed and fenced."""
         where, where_params = self._prune_where(older_than_days, source, filters)
-        removed_ids: list[str] = []
         def _do(conn):
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
@@ -282,20 +281,25 @@ class SessionMaintenanceMixin:
                 session_ids -= {sid for sid in session_ids
                                 if self._write_guards_reject(conn, sid, allow_closed_compression_parent=True)}
             if not session_ids:
-                return 0
+                return []
             # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
+            # ``_execute_write`` retries the WHOLE callback on locked/busy, so the removed
+            # ids must be RETURNED (fresh list per attempt) — a closure over a caller-owned
+            # list accumulates ids across attempts and re-deletes transcript files for
+            # sessions the rolled-back attempt never removed.
+            removed: list[str] = []
             for chunk in _id_chunks(session_ids):
                 ph = _placeholders(chunk)
                 conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-                removed_ids.extend(chunk)
+                removed.extend(chunk)
             self._delete_unreferenced_system_prompts(conn)
-            return len(session_ids)
-        count = self._execute_write(_do)
+            return removed
+        removed_ids = self._execute_write(_do) or []
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
-        return count
+        return len(removed_ids)
 
     def _page_pragmas(self, names: Tuple[str, ...], fail_msg: str) -> Optional[list]:
         """Integer PRAGMAs over the existing connection (never a byte probe); None + debug log on failure."""
