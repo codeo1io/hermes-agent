@@ -61,6 +61,25 @@ def _live_stat(root: Path) -> tuple[int, int]:
     return st.st_mtime_ns, st.st_size
 
 
+def _live_before(root: Path) -> tuple[int, int] | None:
+    """Pre-call live-DB state; ``None`` on hosts with no live board (CI) —
+    for those the immutability contract is "the refused calls must not CREATE
+    the live file", asserted via existence."""
+    try:
+        return _live_stat(root)
+    except FileNotFoundError:
+        return None
+
+
+def _assert_live_untouched(root: Path, before: tuple[int, int] | None) -> None:
+    if before is None:
+        assert not (root / "kanban.db").exists(), (
+            "refused calls must not create the live DB on a clean host"
+        )
+    else:
+        assert _live_stat(root) == before, "refused calls must not touch the live DB"
+
+
 # ---------------------------------------------------------------------------
 # The incident topology: pin at the live board + sandboxed HERMES_HOME.
 # The pin still wins path resolution; the choke must refuse the write.
@@ -81,7 +100,7 @@ def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env
     assert resolved == pinned, (
         f"kanban_db_path() resolved {resolved}, expected the pin {pinned}"
     )
-    before = _live_stat(root)
+    before = _live_before(root)
     # Either guard may fire (the autouse conftest wrapper patches connect);
     # the contract under test is: raise, never touch the live file.
     with pytest.raises(RuntimeError, match="guard"):
@@ -90,7 +109,7 @@ def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env
         kbc.connect(str(pinned))  # explicit live path refused too
     with pytest.raises(RuntimeError, match="guard"):
         kbc.init_db()  # init path guarded as well
-    assert _live_stat(root) == before, "refused calls must not touch the live DB"
+    _assert_live_untouched(root, before)
 
 
 def test_choke_direct_refuses_pinned_live_path(pinned_live_env):
@@ -113,7 +132,7 @@ def test_tool_layer_create_refuses_live_board(pinned_live_env):
     from tools import kanban_tools as kt
 
     root = pinned_live_env
-    before = _live_stat(root)
+    before = _live_before(root)
     out = kt._handle_create(
         {
             "title": "leak-probe-t-cd6b5114",
@@ -123,7 +142,11 @@ def test_tool_layer_create_refuses_live_board(pinned_live_env):
     )
     assert "guard" in out, f"tool layer accepted the live-board create: {out}"
     assert not out.startswith('{"ok"'), f"create reported success: {out}"
-    assert _live_stat(root) == before
+    _assert_live_untouched(root, before)
+    if before is None:
+        # Clean host (no live board): the no-creation assertion above is the
+        # full contract — there is nothing to inspect for leaked rows.
+        return
     live = sqlite3.connect(f"file:{root / 'kanban.db'}?mode=ro", uri=True)
     try:
         n = live.execute(

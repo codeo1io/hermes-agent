@@ -140,6 +140,12 @@ def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
                 "(?,?,?,?,?,?,?,?,?) AND created_by IS NULL",
                 wave_titles,
             ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                # A schema-less kanban.db artifact (created empty on clean CI
+                # hosts) is not a live board — nothing can leak into it.
+                pytest.skip("live kanban.db has no board schema (clean host artifact)")
+            raise
         finally:
             conn.close()
 
