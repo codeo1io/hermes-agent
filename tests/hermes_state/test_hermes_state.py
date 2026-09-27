@@ -1036,45 +1036,52 @@ class TestFTS5Search:
         ]
         assert all("context" in row and row["context"] for row in default)
 
-    def test_search_projection_skips_context_enrichment_queries(self, db):
+    def test_search_projection_skips_context_enrichment_queries(self, db, monkeypatch):
+        """Projection contract: requesting fields WITHOUT 'context' must not run the
+        neighbor-enrichment query; requesting it (or the default projection) must run
+        it exactly once per search. Counted at the module SQL constant's ``format`` —
+        the enrichment constructs that query right before executing it — which is
+        independent of WHICH connection serves the read (pooled read-only connection
+        or the locked writer); the old set_trace_callback seam was blind to the pool
+        and failed deterministically on a healthy store."""
+        from hermes_state_search import _CONTEXT_WINDOW_SQL as real_sql
+
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="before")
         db.append_message("s1", role="assistant", content="projectionneedle")
         db.append_message("s1", role="user", content="after")
 
-        statements = []
-        read_conn = db._get_read_conn() or db._conn
-        traced_connections = [db._conn]
-        if read_conn is not db._conn:
-            traced_connections.append(read_conn)
-        for conn in traced_connections:
-            conn.set_trace_callback(statements.append)
+        enrichments: list[int] = []
 
-        def context_query_count():
-            normalized = (" ".join(sql.upper().split()) for sql in statements)
-            return sum("WITH TARGET AS (" in sql for sql in normalized)
+        class _CountingContextSQL(str):
+            def format(self, *args, **kwargs):  # noqa: A003 - mirrors str.format
+                enrichments.append(1)
+                return super().format(*args, **kwargs)
 
-        try:
-            projected = db.search_messages(
-                "projectionneedle", fields=("session_id", "snippet")
-            )
-            assert len(projected) == 1
-            assert context_query_count() == 0
+        import hermes_state_search
+        monkeypatch.setattr(hermes_state_search, "_CONTEXT_WINDOW_SQL", _CountingContextSQL(real_sql))
 
-            full = db.search_messages(
-                "projectionneedle", fields=("session_id", "context")
-            )
-            assert len(full) == 1
-            assert full[0]["context"]
-            assert context_query_count() == 1
+        projected = db.search_messages(
+            "projectionneedle", fields=("session_id", "snippet")
+        )
+        assert len(projected) == 1
+        assert "context" not in projected[0]
+        assert len(enrichments) == 0
 
-            default = db.search_messages("projectionneedle")
-            assert len(default) == 1
-            assert default[0]["context"]
-            assert context_query_count() == 2
-        finally:
-            for conn in traced_connections:
-                conn.set_trace_callback(None)
+        full = db.search_messages(
+            "projectionneedle", fields=("session_id", "context")
+        )
+        assert len(full) == 1
+        assert full[0]["context"]
+        assert len(enrichments) == 1
+
+        default = db.search_messages("projectionneedle")
+        assert len(default) == 1
+        assert default[0]["context"]
+        assert len(enrichments) == 2
+        # The enrichment is the neighbor window: the hit sits between 'before' and 'after'.
+        neighbour_contents = [entry["content"] for entry in default[0]["context"]]
+        assert "before" in neighbour_contents and "after" in neighbour_contents
 
     def test_sanitize_fts5_query_strips_dangerous_chars(self):
         """Unit test for _sanitize_fts5_query static method."""

@@ -1,30 +1,14 @@
-"""Test that setup.py has shutil available for Matrix E2EE auto-install."""
-import ast
+"""Matrix E2EE auto-install contract: setup.py's mautrix path can resolve tools via shutil."""
 
+import shutil
 
-
-def _parse_setup_imports():
-    """Parse setup.py and return top-level import names."""
-    with open("hermes_cli/setup.py") as f:
-        tree = ast.parse(f.read())
-    names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                names.add(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                names.add(alias.name)
-    return names
+from hermes_cli import setup
 
 
 class TestSetupShutilImport:
-    def test_shutil_imported_at_module_level(self):
-        """shutil must be imported at module level so setup_gateway can use it
-        for the mautrix auto-install path."""
-        names = _parse_setup_imports()
-        assert "shutil" in names, (
-            "shutil is not imported at the top of hermes_cli/setup.py. "
-            "This causes a NameError when the Matrix E2EE auto-install "
-            "tries to call shutil.which('uv')."
-        )
+    def test_shutil_bound_at_module_level(self):
+        """``setup_gateway``'s mautrix auto-install calls ``shutil.which('uv')``; the
+        binding must resolve through the import system (module attribute == the stdlib
+        module), not merely read well in source form. A NameError here breaks the
+        Matrix E2EE auto-install path."""
+        assert setup.shutil is shutil
