@@ -13,7 +13,6 @@ import sys
 
 from pathlib import Path
 from typing import NoReturn
-from hermes_cli.cli_output import line_input
 
 _PRE_BUILD_HINT = "  Pre-build first:  npm install --workspace web && npm run build -w web"
 
@@ -603,6 +602,12 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     import secrets
     print()
     try:
+        # Lazy: a gateway process started from the PRE-update tree keeps the old
+        # hermes_cli.cli_output (no line_input) in sys.modules while the tree on
+        # disk is already post-update. Importing line_input at module scope here
+        # made `hermes update`'s gateway auto-restart fail with ImportError
+        # (E2E install-e2e, v2026.8.18 -> HEAD legs, red since 2026-09-13).
+        from hermes_cli.cli_output import line_input
         username = line_input("  Username [admin]: ").strip() or "admin"
         password = getpass.getpass("  Password: ")
         confirm = getpass.getpass("  Confirm password: ")
