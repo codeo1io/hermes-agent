@@ -41,6 +41,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from typing import Optional
 from pathlib import Path
 
 import pytest
@@ -183,18 +184,21 @@ def _run_probe(live: Path, mode: str, tmp_path: Path) -> dict:
     return ast.literal_eval(report_line[len("__WAVE13_REPORT__ ") :])
 
 
-def _live_probe_rows(live: Path) -> list[tuple]:
-    """Read-only probe of the live board for the wave-13 fingerprint. Empty
-    boards created-but-never-initialized by an earlier process on the host
-    (GitHub runners end up with a zero-page ``~/.hermes/kanban.db``) count as
-    "no debris": sqlite opens the file fine but the schema never existed."""
+def _live_probe_rows(live: Path) -> Optional[list[tuple]]:
+    """Read-only probe of the live board for the wave-13 fingerprint, or ``None``
+    when the file has no board schema. Empty boards created-but-never-initialized
+    by an earlier process on the host (GitHub runners end up with a zero-page
+    ``~/.hermes/kanban.db``) count as "no debris": sqlite opens the file fine
+    but the schema never existed. Distinguishing ``None`` (no schema) from ``[]``
+    (schema, no matching rows) is what makes a single open suffice for both the
+    debris fingerprint and the is-this-a-real-board predicate below."""
     conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
     try:
         has_tasks = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
         if not has_tasks:
-            return []
+            return None
         return conn.execute(
             "SELECT id, title, assignee FROM tasks WHERE title IN (?,?,?,?)",
             _WAVE13_TITLES,
@@ -205,24 +209,12 @@ def _live_probe_rows(live: Path) -> list[tuple]:
 
 def _live_board_is_real(live: Path) -> bool:
     """A real board has the schema (a bare file created by an unrelated
-    process is not a board this regression can fingerprint)."""
+    process is not a board this regression can fingerprint). One probe open:
+    ``None`` = no schema, anything else (including ``[]``) = real board."""
     try:
-        return bool(_live_probe_rows(live) is not None) and _has_tasks(live)
+        return _live_probe_rows(live) is not None
     except sqlite3.OperationalError:
         return False
-
-
-def _has_tasks(live: Path) -> bool:
-    conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
-    try:
-        return (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
-            ).fetchone()
-            is not None
-        )
-    finally:
-        conn.close()
 
 
 @pytest.fixture

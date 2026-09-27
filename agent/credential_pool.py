@@ -567,6 +567,87 @@ def custom_provider_pool_key_candidates(
     return []
 
 
+def _resolve_custom_entry_credential_value(value: str) -> str:
+    """Resolve ``${VAR}`` refs in a custom entry's literal ``api_key`` the way config load does."""
+    if "${" not in value:
+        return value
+    try:
+        from hermes_cli.config import _expand_env_vars
+
+        return str(_expand_env_vars(value)).strip()
+    except Exception:
+        return value
+
+
+def _custom_entry_key_env_value(key_env: str) -> Optional[str]:
+    """Current value of a custom entry's ``key_env`` secret, or None when it is unset/unreadable."""
+    try:
+        from agent.secret_scope import get_secret_str
+
+        val = str(get_secret_str(key_env) or "").strip()
+    except Exception:
+        return None
+    return val or None
+
+
+def _custom_entry_credential_conflicts(entry: Dict[str, Any], owner_key: str) -> bool:
+    """True when a same-URL custom entry carries a credential identity that is not the owner's.
+
+    Value-aware: an ``api_key``/``key_env`` that resolves to the very same secret IS the same
+    identity (the setup flow stores one secret in all three places — entry ``key_env``, model
+    block ``api_key`` ref, pool seed). An unresolved ``key_env`` or a ``key_cmd`` counts as a
+    distinct identity (it cannot be shown to be the owner's); an entry with no declared
+    credential shares the bare-custom pool with the model (#100413)."""
+    literal = str(entry.get("api_key") or "").strip()
+    if literal:
+        return _resolve_custom_entry_credential_value(literal) != owner_key
+    key_env = str(entry.get("key_env") or "").strip()
+    if key_env:
+        resolved = _custom_entry_key_env_value(key_env)
+        return resolved is None or resolved != owner_key
+    return bool(str(entry.get("key_cmd") or "").strip())
+
+
+def custom_provider_pool_key_candidates_for_owner(
+    base_url: Optional[str],
+    provider_name: Optional[str] = None,
+    owner_key: Optional[str] = None,
+) -> List[str]:
+    """Owner-aware variant of :func:`custom_provider_pool_key_candidates`.
+
+    A base_url is not an owner boundary: two configured providers may share an endpoint with
+    different credentials (#124527). When the caller knows the credential owner the URL-only
+    fallback is constrained:
+
+    * ``provider_name`` — the named route is authoritative (name match, as before).
+    * ``owner_key`` — a bare ``custom`` runtime with a known key may only use entries that
+      share that exact credential (literal ``api_key``/``key_env`` resolving to the same
+      secret) or declare no credential of their own (the shared pool, #100413). Same-URL
+      siblings carrying a different — or unresolvably separate — credential keep their
+      identity and are not candidates.
+
+    Callers with no ownership hint keep the legacy URL-only behaviour."""
+    if not base_url:
+        return []
+    if provider_name:
+        return custom_provider_pool_key_candidates(base_url, provider_name)
+    wanted = str(owner_key or "").strip()
+    if not wanted:
+        return custom_provider_pool_key_candidates(base_url)
+    normalized_url = _norm_url(base_url)
+    keys: List[str] = []
+    for norm_name, entry in _iter_custom_providers():
+        entry_url = _norm_url(entry.get("base_url"))
+        if not entry_url or entry_url != normalized_url:
+            continue
+        if _custom_entry_credential_conflicts(entry, wanted):
+            continue
+        for key in _pool_keys_for_custom_entry(norm_name, entry):
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
 def get_custom_provider_pool_key(base_url: Optional[str], provider_name: Optional[str] = None) -> Optional[str]:
     """Preferred pool key for a custom provider: durable slug, else ``custom:<name>``.
 
@@ -740,9 +821,14 @@ def resolve_runtime_pool_key(provider: Optional[str], base_url: Optional[str]) -
 
     try:
         if provider_norm == "custom":
-            candidate = get_custom_provider_pool_key(base_url)
-            if candidate and _accepts(candidate):
-                return str(candidate).strip().lower()
+            # Identity-first (#124527): never mint a pool key from the URL
+            # alone while a configured entry serves this endpoint — a sibling
+            # sharing the base URL must not lend or borrow credentials. The
+            # shared URL pool stays reachable only as the trailing legacy
+            # candidate for keyless sharing (#100413) and unnamed runtimes.
+            for candidate in custom_provider_pool_key_candidates(base_url or ""):
+                if _accepts(candidate):
+                    return str(candidate).strip().lower()
         else:
             # Named/exact custom runtimes are keyed by identity: search the
             # configured candidates by identity before endpoint so a sibling
@@ -2966,8 +3052,12 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
                 # slug or legacy ``custom:<name>``; accept any candidate, or
                 # seeding is skipped when the pool holds the other identity.
                 # Check if this model's base_url matches our custom provider. See #100413.
+                # Owner-aware (#124527): a same-URL sibling that declares its own credential
+                # identity is NOT this model's provider, so its pool must not receive the
+                # model key (and, via the pool, hand its own key back to the model).
                 matched_keys = {
-                    str(key).strip().lower() for key in custom_provider_pool_key_candidates(model_base_url)
+                    str(key).strip().lower()
+                    for key in custom_provider_pool_key_candidates_for_owner(model_base_url, owner_key=model_api_key)
                 }
                 if pool_key in matched_keys:
                     seed.upsert("model_config", {
