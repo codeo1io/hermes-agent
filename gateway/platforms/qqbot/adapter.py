@@ -50,6 +50,12 @@ from gateway.platforms.media_cache import ext_for_mime
 
 logger = logging.getLogger(__name__)
 
+# Fire-and-forget tasks scheduled by _create_task (Heartbeat/Identify/handlers). asyncio
+# keeps only a weak reference to a bare task, so without a strong one the task can be
+# garbage-collected mid-flight and silently drop a heartbeat or inbound handler. Retention
+# lives in _create_task itself — every site schedules through it, so no site can forget.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 
 class QQCloseError(Exception):
     """Raised when the QQ WebSocket closes; carries code + reason for the reconnect loop."""
@@ -494,11 +500,16 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     @staticmethod
     def _create_task(coro):
         """Schedule a coroutine; returns None (no error) when no loop is running
-        (tests call _dispatch_payload synchronously)."""
+        (tests call _dispatch_payload synchronously). The task is retained in
+        module-level _BACKGROUND_TASKS until done so the event loop's weak task
+        reference can't drop it mid-flight."""
         try:
-            return asyncio.get_running_loop().create_task(coro)
+            task = asyncio.get_running_loop().create_task(coro)
         except RuntimeError:
             return None
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        return task
 
     def _close_ws_soon(self) -> None:
         """Close the WS so _read_events raises and _listen_loop reconnects (with Resume)."""
@@ -527,7 +538,7 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             elif t == "RESUMED":
                 logger.info("[%s] Session resumed", self._log_tag)
             elif t in self._INBOUND_HANDLERS:
-                asyncio.create_task(self._on_message(t, d))
+                self._create_task(self._on_message(t, d))
             elif t == "INTERACTION_CREATE":
                 self._create_task(self._on_interaction(d))
             else:

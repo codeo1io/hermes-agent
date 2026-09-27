@@ -24,6 +24,10 @@ class ReadResult:
     mime_type: Optional[str] = None
     dimensions: Optional[str] = None  # For images: "WIDTHxHEIGHT"
     error: Optional[str] = None
+    #: True only when the path is genuinely absent. An error with this False is a read that
+    #: FAILED (transport down, unreadable file); callers deciding whether a path is free
+    #: must not read that as "absent". See patch_parser._apply_add.
+    not_found: bool = False
     similar_files: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:

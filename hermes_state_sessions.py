@@ -1471,25 +1471,26 @@ class SessionSessionsMixin:
         """Delete a session and its messages; delegate children cascade, branch/compression children
         are orphaned. *expected_delete_ids*: proceed only if parent + delegate cascade still equals that
         set (re-walked inside the transaction on purpose: export-before-delete fails closed)."""
-        removed_ids: List[str] = []
         expected_ids = set(expected_delete_ids) if expected_delete_ids is not None else None
         def _do(conn):
+            # Retry-safe by contract (see prune_sessions): ids leave via the return value,
+            # never an outer accumulator a replayed attempt would re-extend.
             if conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone() is None:
-                return False
+                return False, []
             if expected_ids is not None and expected_ids != {
                 session_id, *_collect_delegate_child_ids(conn, [session_id])
             }:
-                return False
-            removed_ids.extend(_delete_delegate_children(conn, [session_id]))
+                return False, []
+            removed: list[str] = list(_delete_delegate_children(conn, [session_id]))
             conn.execute(  # orphan remaining children (branches) so FK is satisfied
                 "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?", (session_id,),
             )
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             self._delete_unreferenced_system_prompts(conn)
-            removed_ids.append(session_id)
-            return True
-        deleted = self._execute_write(_do)
+            removed.append(session_id)
+            return True, removed
+        deleted, removed_ids = self._execute_write(_do)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return bool(deleted)
@@ -1527,14 +1528,14 @@ class SessionSessionsMixin:
         unique_ids = list({sid for sid in session_ids or () if isinstance(sid, str) and sid})
         if not unique_ids:
             return 0
-        removed_ids: list[str] = []
         def _do(conn):
+            # Retry-safe by contract (see prune_sessions): ids leave via the return value.
             existing = [row["id"] for chunk in _id_chunks(unique_ids) for row in conn.execute(
                 f"SELECT id FROM sessions WHERE id IN ({_session_ids_placeholders(chunk)})", chunk,
             ).fetchall()]
             if not existing:
-                return 0
-            removed_ids.extend(_delete_delegate_children(conn, existing))
+                return 0, []
+            removed: list[str] = list(_delete_delegate_children(conn, existing))
             for chunk in _id_chunks(existing):
                 ph = _session_ids_placeholders(chunk)
                 conn.execute(  # orphan children whose parent is in the kill list (FK)
@@ -1543,9 +1544,9 @@ class SessionSessionsMixin:
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
             self._delete_unreferenced_system_prompts(conn)
-            removed_ids.extend(existing)
-            return len(existing)
-        count = self._execute_write(_do)
+            removed.extend(existing)
+            return len(existing), removed
+        count, removed_ids = self._execute_write(_do)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return count
@@ -1566,13 +1567,14 @@ class SessionSessionsMixin:
     def delete_empty_sessions(self, sessions_dir: Optional[Path] = None) -> int:
         """Delete every empty, ended, non-archived session in one transaction, orphaning (not cascading)
         children; transcript files are swept too."""
-        removed_ids: list[str] = []
         def _do(conn):
+            # Retry-safe by contract (see prune_sessions): ids leave via the return value.
             session_ids = {row["id"] for row in conn.execute(
                 f"SELECT id FROM sessions WHERE {self._EMPTY_SESSION_WHERE}"
             ).fetchall()}
             if not session_ids:
-                return 0
+                return 0, []
+            removed: list[str] = []
             for chunk in _id_chunks(session_ids):
                 ph = _session_ids_placeholders(chunk)
                 conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
@@ -1580,10 +1582,10 @@ class SessionSessionsMixin:
                 # would otherwise dangle (clean FK state).
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-                removed_ids.extend(chunk)
+                removed.extend(chunk)
             self._delete_unreferenced_system_prompts(conn)
-            return len(session_ids)
-        count = self._execute_write(_do)
+            return len(session_ids), removed
+        count, removed_ids = self._execute_write(_do)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return count

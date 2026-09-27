@@ -2091,7 +2091,10 @@ class ConnectionManager:
     def schedule_reconnect(self) -> None:
         """Schedule a reconnect only if running and not already reconnecting."""
         if self._adapter._running and not self._reconnecting:
-            asyncio.create_task(self._reconnect_with_backoff())
+            # Tracked: an unheld fire-and-forget task can be GC'd before the backoff
+            # coroutine even starts, silently losing the reconnect (same class as the
+            # debounce/recall sites above).
+            self._adapter._track_task(asyncio.create_task(self._reconnect_with_backoff()))
 
     async def _reconnect_with_backoff(self) -> bool:
         if self._reconnecting:

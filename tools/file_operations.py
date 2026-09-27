@@ -239,13 +239,32 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         by ``head -c``). None when no clean base64 came back (no ``base64`` binary);
         callers then fall back to the text heuristic.
 
+        FENCED, like the compound read probe: the transport merges the backend's own
+        stdout with the command's, and this sample is the binary-admission gate, so
+        connect noise (a remote shell announcing ``TERM`` — four base64 characters)
+        must not decode into the head of the sample and decide editability. Noise
+        outside the fence is dropped; noise inside fails base64 validation → None →
+        legacy text heuristic. The status rides in its own trailing segment so a
+        missing ``base64`` is still told apart from an empty file.
+
         Wrapping the sample in base64 lets the original bytes survive the transport, so binary detection can
         happen at the byte layer where it is well-defined (#80308 and friends).
         """
-        result = self._exec(f"head -c {length} {self._escape_shell_arg(path)} 2>/dev/null | base64")
-        if result.exit_code != 0:
+        sentinel = _new_sentinel(_READ_SENTINEL_PREFIX)
+        mark = f"echo {sentinel}"
+        result = self._exec(
+            f"{mark}; head -c {length} {self._escape_shell_arg(path)} 2>/dev/null "
+            f"| base64; __hs=$?; {mark}; echo $__hs")
+        segments = _split_segments(result.stdout or "", sentinel)
+        if len(segments) != 3:  # the command never ran as written (transport noise/echo off)
             return None
-        return self._decode_base64_sample(result.stdout)
+        try:
+            status = int(_strip_terminal_fence_leaks(segments[2]).split()[0])
+        except (IndexError, ValueError):
+            return None
+        if status != 0:  # no base64 on this backend: caller degrades to the text heuristic
+            return None
+        return self._decode_base64_sample(segments[1])
 
     @staticmethod
     def _decode_base64_sample(text: str) -> Optional[bytes]:
@@ -438,22 +457,24 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def _not_regular_error(path: str) -> ReadResult:
         """Error for a path that exists but would block if read."""
         return ReadResult(error=(
-            f"Cannot read '{path}': not a regular file (directory, FIFO, "
-            "socket, or device). Reading it could block indefinitely."))
+            f"Cannot read '{path}': not a regular file (directory, dangling symlink, "
+            "FIFO, socket, or device). Reading it could block indefinitely."))
 
     def _probe_regular_file(self, path: str) -> tuple[int, str]:
         """Byte size of a REGULAR file: ``(file_size, status)`` with status ``"ok"``,
         ``"missing"``, ``"not_regular"`` or ``"bad_size"`` (unparseable ``wc``).
         ``wc -c <`` on a writer-less FIFO/socket//dev/zero blocks forever and a
         name-based blocklist can't cover a FIFO (a file TYPE at any path); ``[ -f ]``
-        is a stat (symlinks followed) so it answers without touching content."""
+        is a stat (symlinks followed) so it answers without touching content. A dangling
+        symlink is ``not_regular``, never ``missing``: the entry exists, and a writer
+        told the path is free would follow the link and create its target."""
         arg = self._escape_shell_arg(path)
         # A missing path ECHOES its sentinel: a non-zero exit with no sentinel means the shell itself did
         # not run (container still starting, removed out-of-band, transport down) — not a missing file.
         # Reporting that as "File not found" made the model trust a false negative for the whole session.
         stat_result = self._exec(
             f"if [ -f {arg} ]; then wc -c < {arg} 2>/dev/null; "
-            f"elif [ -e {arg} ]; then echo {NOT_REGULAR_SENTINEL}; "
+            f"elif [ -e {arg} ] || [ -L {arg} ]; then echo {NOT_REGULAR_SENTINEL}; "
             f"else echo {MISSING_SENTINEL}; fi")
         stat_output = _strip_terminal_fence_leaks(stat_result.stdout).strip()
         if stat_output == MISSING_SENTINEL:
@@ -685,6 +706,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         try:
             st = os.stat(full)
         except (FileNotFoundError, NotADirectoryError):
+            if os.path.islink(full):  # dangling: an entry, not an absent path (``_probe_regular_file``)
+                return self._not_regular_error(path)
             return self._read_file_missing(path, offset, limit)
         except OSError:
             return self._read_file_sequential(path, offset, limit)
@@ -782,7 +805,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             f"wc -l < {arg} 2>/dev/null; {mark}; "
             f"tail -c 1 {arg} 2>/dev/null | wc -l; {mark}; "
             f'echo "$__hs $__hr"; '
-            f"elif [ -e {arg} ]; then echo {NOT_REGULAR_SENTINEL}; "
+            f"elif [ -e {arg} ] || [ -L {arg} ]; then echo {NOT_REGULAR_SENTINEL}; "
             f"else echo {MISSING_SENTINEL}; fi")
 
     def _read_file_missing(self, path: str, offset: int, limit: int) -> ReadResult:
@@ -978,14 +1001,15 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
                 if score > 0:
                     scored.append((score, os.path.join(dir_path, f)))
         scored.sort(key=lambda x: -x[0])
-        return ReadResult(error=f"File not found: {path}", similar_files=[fp for _, fp in scored[:5]])
+        return ReadResult(error=f"File not found: {path}", not_found=True,
+                          similar_files=[fp for _, fp in scored[:5]])
 
     def read_file_raw(self, path: str) -> ReadResult:
         """Whole file as a plain string (no pagination/line numbers/clamping)."""
         path = self._expand_path(path)
         file_size, status = self._probe_regular_file(path)
         if status == "missing":
-            return self._suggest_similar_files(path)
+            return self._suggest_similar_files(path)  # returns not_found=True
         if status == "not_regular":
             return self._not_regular_error(path)
         if status == "env_unavailable":
@@ -1008,7 +1032,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         path = self._expand_path(path)
         file_size, status = self._probe_regular_file(path)
         if status == "missing":
-            return ReadResult(error=f"File not found: {path}")
+            return ReadResult(error=f"File not found: {path}", not_found=True)
         if status == "not_regular":
             return self._not_regular_error(path)
         if status == "env_unavailable":

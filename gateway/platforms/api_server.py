@@ -140,6 +140,11 @@ from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 
 logger = logging.getLogger(__name__)
 
+# Strong references for fire-and-forget WS sends from _browser_controller_ws_sender: the
+# event loop holds only a weak task reference, so a dropped bare task can be GC'd before
+# the frame is written. Discarded on completion; bounded by in-flight sends.
+_BACKGROUND_SEND_TASKS: set[asyncio.Task] = set()
+
 
 def _browser_controller_ws_sender(ws, loop, *, wait_timeout: float = 10.0):
     """Return a loop-aware broker sender for one aiohttp controller socket.
@@ -156,7 +161,9 @@ def _browser_controller_ws_sender(ws, loop, *, wait_timeout: float = 10.0):
         except RuntimeError:
             on_loop = False
         if on_loop:
-            loop.create_task(ws.send_json(frame))
+            task = loop.create_task(ws.send_json(frame))
+            _BACKGROUND_SEND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_SEND_TASKS.discard)
             return
         future = asyncio.run_coroutine_threadsafe(ws.send_json(frame), loop)
         try:

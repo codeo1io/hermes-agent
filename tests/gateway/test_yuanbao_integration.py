@@ -266,6 +266,33 @@ class TestP0ReconnectGuard:
         adapter._connection.schedule_reconnect()
         # No new task should be created because already reconnecting
 
+    def test_schedule_reconnect_retains_task(self):
+        """The reconnect task is registered in _background_tasks (rm-034 / I90
+        lineage): the event loop holds only a weak reference to a bare task, so an
+        unheld backoff coroutine can be GC'd before it starts — silently losing the
+        reconnect."""
+        adapter = YuanbaoAdapter(make_config())
+        adapter._running = True
+        adapter._connection._reconnecting = False
+        ran = []
+
+        async def fake_backoff():
+            ran.append(True)
+            return True
+
+        adapter._connection._reconnect_with_backoff = fake_backoff
+
+        async def scenario():
+            adapter._connection.schedule_reconnect()
+            tasks = list(adapter._background_tasks)
+            assert len(tasks) == 1, "reconnect task must be tracked, not dropped"
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+            await asyncio.sleep(0)  # let the done callback run
+            assert adapter._background_tasks == set(), "completed task must be discarded"
+
+        asyncio.run(scenario())
+        assert ran == [True]
+
 
 
 

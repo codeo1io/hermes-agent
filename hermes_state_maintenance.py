@@ -274,7 +274,6 @@ class SessionMaintenanceMixin:
         ``exclude_active_write_guards`` (automatic maintenance) skips rows under a live turn lease
         or compression lock while expired/dead holders are reclaimed and fenced."""
         where, where_params = self._prune_where(older_than_days, source, filters)
-        removed_ids: list[str] = []
         def _do(conn):
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
@@ -282,17 +281,22 @@ class SessionMaintenanceMixin:
                 session_ids -= {sid for sid in session_ids
                                 if self._write_guards_reject(conn, sid, allow_closed_compression_parent=True)}
             if not session_ids:
-                return 0
+                return 0, []
             # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
+            # Retry-safe by contract: _execute_write replays the WHOLE callback after a
+            # rollback, so the removed ids must live in this frame and travel out through
+            # the return value. An outer accumulator replays extend() per attempt and
+            # then drives file removal for ids a later attempt no longer selected.
+            removed: list[str] = []
             for chunk in _id_chunks(session_ids):
                 ph = _placeholders(chunk)
                 conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
                 conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
-                removed_ids.extend(chunk)
+                removed.extend(chunk)
             self._delete_unreferenced_system_prompts(conn)
-            return len(session_ids)
-        count = self._execute_write(_do)
+            return len(session_ids), removed
+        count, removed_ids = self._execute_write(_do)
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return count

@@ -374,6 +374,70 @@ class TestBomHandling:
         assert raw.startswith(self.BOM.encode("utf-8")), "BOM lost on V4A update"
         assert b"print('world')" in raw
 
+    @pytest.mark.parametrize("op", ["add", "move"])
+    def test_a_dangling_symlink_destination_is_occupied(self, ops, tmp_path: Path, op):
+        # Ported from upstream 9556b73e7f (rm-035). `[ -f ]` and `[ -e ]` follow the
+        # link, so a dangling one read as an absent path: Add followed it and created
+        # its target, Move replaced the link. The entry is there.
+        link = tmp_path / "link.txt"
+        link.symlink_to(tmp_path / "gone.txt")
+        (tmp_path / "src.txt").write_bytes(b"SOURCE\n")
+        body = (f"*** Add File: {link}\n+X\n" if op == "add"
+                else f"*** Move File: {tmp_path / 'src.txt'} -> {link}\n")
+        res = ops.patch_v4a(f"*** Begin Patch\n{body}*** End Patch")
+        assert not res.success
+        assert link.is_symlink() and os.readlink(link) == str(tmp_path / "gone.txt")
+        assert not (tmp_path / "gone.txt").exists()
+        assert (tmp_path / "src.txt").read_bytes() == b"SOURCE\n"
+
+    def test_probe_regular_file_classifies_dangling_symlink_not_regular(self, ops, tmp_path: Path):
+        # The shell probe (and the native stat path below) must call a dangling link
+        # an occupied entry, not a missing path.
+        link = tmp_path / "dang.txt"
+        link.symlink_to(tmp_path / "gone.txt")
+        _size, status = ops._probe_regular_file(str(link))
+        assert status == "not_regular"
+
+    def test_native_read_file_reports_dangling_symlink_not_missing(self, ops, tmp_path: Path):
+        link = tmp_path / "dang.txt"
+        link.symlink_to(tmp_path / "gone.txt")
+        res = ops._read_file_native(str(link), 1, 10)
+        assert res.error and "not a regular file" in res.error
+        assert "dangling" in res.error
+
+    def test_sample_file_bytes_is_fenced_against_backend_noise(self, ops, tmp_path: Path):
+        # Ported shape from upstream 7c686fe7a7 (rm-035): the binary-admission
+        # sample must be sentinel-delimited — connect noise outside the fence is
+        # dropped instead of being base64-decoded into the head of the sample
+        # (pre-fix: "TERM" + payload joined into ONE base64 word and decoded).
+        import base64 as _b64
+        from types import SimpleNamespace
+        target = tmp_path / "sample.txt"
+        target.write_bytes(b"hello sample\n")
+        payload = _b64.b64encode(b"hello sample\n").decode()
+
+        def fake_exec(command, **kw):
+            sentinel = command.split("; ", 1)[0].replace("echo ", "")
+            return SimpleNamespace(
+                stdout=f"TERM\n{sentinel}\n{payload}\n{sentinel}\n0\n", exit_code=0)
+
+        ops._exec = fake_exec
+        assert ops._sample_file_bytes(str(target)) == b"hello sample\n"
+
+    def test_sample_file_bytes_degrades_without_base64(self, ops, tmp_path: Path):
+        # A backend with no base64 (status 127) must fall back to the text heuristic
+        # (None), never manufacture sample bytes from transport noise.
+        from types import SimpleNamespace
+        target = tmp_path / "sample.txt"
+        target.write_bytes(b"plain text\n")
+
+        def fake_exec(command, **kw):
+            sentinel = command.split("; ", 1)[0].replace("echo ", "")
+            return SimpleNamespace(stdout=f"{sentinel}\n\n{sentinel}\n127\n", exit_code=0)
+
+        ops._exec = fake_exec
+        assert ops._sample_file_bytes(str(target)) is None
+
     def test_file_has_bom_ignores_stripped_pre_content(self, ops, tmp_path: Path):
         # _file_has_bom must probe the DISK even when handed pre_content
         # that (having been BOM-stripped upstream) claims there is no BOM.

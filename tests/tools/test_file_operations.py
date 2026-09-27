@@ -801,10 +801,15 @@ class TestByteLayerBinaryDetection:
     def test_sample_decodes_base64_transport(self, mock_env):
         import base64 as b64
         payload = ("汉字" * 400).encode("utf-8")[:1000]
-        mock_env.execute.return_value = {
-            "output": b64.b64encode(payload).decode() + "\n",
-            "returncode": 0,
-        }
+
+        def fenced_reply(command, **kwargs):
+            """The reply shape the fenced probe asks for: its per-call sentinel
+            around the base64 payload, then the read's exit status."""
+            sentinel = READ_SENTINEL_RE.search(command).group(0)
+            body = b64.b64encode(payload).decode()
+            return {"output": f"{sentinel}\n{body}\n{sentinel}\n0\n", "returncode": 0}
+
+        mock_env.execute.side_effect = fenced_reply
         ops = ShellFileOperations(mock_env)
         assert ops._sample_file_bytes("/tmp/x.txt") == payload
 
