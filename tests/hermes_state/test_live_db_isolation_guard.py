@@ -160,6 +160,18 @@ class TestSubprocessChildCovered:
         }
         env["PYTEST_CURRENT_TEST"] = "tests/fake.py::test_child (call)"
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+        # The scenario is "default open lands on the PRODUCTION root". The guard
+        # captures the production root from the passwd database, and a run whose
+        # HOME is itself a scratch dir under that root (delegate pytest homes live
+        # under ``<root>/tmp/...`` — deliberately allowed by the guard) never lands
+        # there by default. Normalize the child's HOME to the passwd home so the
+        # default open targets the root the guard must refuse, without naming
+        # HERMES_HOME at all.
+        from hermes_state_guard import _real_platform_state_root
+
+        real_root = _real_platform_state_root()
+        if real_root is not None:
+            env["HOME"] = str(real_root.parent)
         code = (
             "from hermes_state import SessionDB\n"
             "SessionDB()\n"

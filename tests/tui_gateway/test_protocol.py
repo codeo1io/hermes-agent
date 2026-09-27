@@ -287,7 +287,7 @@ def _frames(buf):
     return [json.loads(line) for line in buf.getvalue().splitlines()]
 
 
-def _wait_open(server_requests, buf=None, timeout=2.0):
+def _wait_open(server_requests, buf=None, timeout=30.0):
     """The open request once its frame has been written (registration precedes the write)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

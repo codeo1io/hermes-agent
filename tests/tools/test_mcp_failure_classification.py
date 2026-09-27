@@ -187,6 +187,12 @@ def test_initial_auth_failure_parks_and_revives_after_relogin(
 
     monkeypatch.setattr(mcp_tool, "_PARKED_RETRY_INTERVAL", 0.05)
 
+    # The parked self-probe honours the on-disk mcp_servers entry (67737c37f8): a
+    # gone-or-disabled entry pauses the probe. Stub an enabled entry so the revival
+    # path under test stays live.
+    from tools import mcp_tool_config as _config
+    monkeypatch.setattr(_config, "_load_mcp_config", lambda: {"figma": {"command": "x"}})
+
     _real_sleep = asyncio.sleep
 
     async def _fast_sleep(_delay, *a, **kw):

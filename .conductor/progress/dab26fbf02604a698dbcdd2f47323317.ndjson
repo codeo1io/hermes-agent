@@ -1,0 +1,4 @@
+{"step":1,"ts":"2026-10-02T05:01:30Z","summary":"Engine targeted cmd escalates to cloud-CI fallback (pyproject/package.json FULL_IMPACT) - split: static gates + impacted pytest","touched":[]}
+{"step":2,"ts":"2026-10-02T05:01:30Z","summary":"Engine runner uv path failed (built .venv in worktree, No module named pytest) and spawned forbidden cloud fallback - killed, no remote side effect, .venv removed","touched":[]}
+{"step":3,"ts":"2026-10-02T05:01:30Z","summary":"Static gates green: tomllib select/pfi parse, ruff check . clean, npm JSONs parse; undici census ui-tui 6.28.1, node-gyp nested 6.28.0 pre-existing (override-immune, follow-up)","touched":["pyproject.toml","package.json","package-lock.json"]}
+{"step":4,"ts":"2026-10-02T05:01:30Z","summary":"Engine-banner pytest (raw -n 8, ambient creds) broad set: 22845 passed 208 failed -> raw-pytest env class; re-running 85 failed files under canonical run_tests.sh","touched":["/tmp/tt-pytest.log"]}

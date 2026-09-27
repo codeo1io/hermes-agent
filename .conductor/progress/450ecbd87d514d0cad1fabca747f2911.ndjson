@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-10-02T04:32:00Z","summary":"Batch B1-B4 mapped to change units U1-U4; disjointness verified 10/10 files vs wave set; dirty state = 3 untracked ndjson to preserve","touched":["/tmp/b1-files.txt"]}
+{"step":2,"ts":"2026-10-02T04:40:00Z","summary":"stewardship_request JSON validated (4 units, 7 surfaces entries, 4 separate-pairs) + companion md; envelope delivered to result channel","touched":["conductor-delegate-spool*/delegate/450ecbd87d514d0cad1fabca747f2911.{json,stewardship.md}"]}
