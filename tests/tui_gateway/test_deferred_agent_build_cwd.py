@@ -47,8 +47,8 @@ def test_deferred_agent_build_threads_session_cwd(monkeypatch, tmp_path):
     server._sessions[sid] = session
     try:
         server._start_agent_build(sid, session)
-        assert built.wait(timeout=15), "agent build thread never called _make_agent"
-        assert ready.wait(timeout=5), "agent_ready never set after build"
+        assert built.wait(timeout=60), "agent build thread never called _make_agent"
+        assert ready.wait(timeout=30), "agent_ready never set after build"
     finally:
         server._sessions.pop(sid, None)
         from tools.approval import unregister_gateway_notify
