@@ -160,6 +160,15 @@ class TestSubprocessChildCovered:
         }
         env["PYTEST_CURRENT_TEST"] = "tests/fake.py::test_child (call)"
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+        # The leak vector under test is a child aiming at the developer's
+        # REAL home. The parallel runner hands every test file a throwaway
+        # HOME, and the guard pins its deny root from the passwd database
+        # (immune to HOME games), so an inherited throwaway HOME would aim
+        # the child at a sandbox root and the refusal would never be the
+        # one under test. Point the child's home view at the real root's
+        # home — exactly what a leaky child on a dev box resolves.
+        if sys.platform != "win32":
+            env["HOME"] = str(REAL_ROOT.parent)
         code = (
             "from hermes_state import SessionDB\n"
             "SessionDB()\n"

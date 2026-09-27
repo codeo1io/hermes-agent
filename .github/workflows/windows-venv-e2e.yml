@@ -78,3 +78,26 @@ jobs:
           uv run --no-sync python -m pytest \
             tests/tools/test_process_registry_windows_live.py \
             -o addopts= -v -p no:cacheprovider
+
+      - name: Run fleet-config + plan-reconciliation live E2E
+        # Both files docstring-claimed this lane but were never listed — they ran
+        # on NO lane (skipif-guarded everywhere else).
+        shell: bash
+        run: |
+          set -uo pipefail
+          uv run --no-sync python -m pytest \
+            tests/hermes_cli/test_fleet_config_migration_windows_live.py \
+            tests/hermes_cli/test_plan_reconciliation_windows_live.py \
+            -o addopts= -v -p no:cacheprovider
+
+      - name: Run control-socket + desktop-lifecycle + shim-quarantine live E2E
+        # Same dead-coverage class: all three docstring-claimed this lane and
+        # were never listed (receipt grep maps every windows_live file 1:1).
+        shell: bash
+        run: |
+          set -uo pipefail
+          uv run --no-sync python -m pytest \
+            tests/gateway/test_control_socket_windows_live.py \
+            tests/hermes_cli/test_desktop_lifecycle_windows_live.py \
+            tests/hermes_cli/test_shim_fail_closed_windows_live.py \
+            -o addopts= -v -p no:cacheprovider

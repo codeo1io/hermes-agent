@@ -42,6 +42,20 @@ def test_quickstart_unknown_model_404s(client):
     assert r.status_code == 404
 
 
+def _pin_recommendable_budget(monkeypatch):
+    """Probe a host whose VRAM makes every catalog variant resident, so the
+    automatic recommendation exists regardless of the real hardware (a
+    GPU-less CI runner probes zero VRAM and would get no recommendation)."""
+    from hermes_cli.local_runtime.estimator import HardwareBudget
+    import hermes_cli.web_routers.local_models as lm
+
+    gib = 1 << 30
+    monkeypatch.setattr(lm.hardware, "probe_budget", lambda **kw: HardwareBudget(
+        usable_vram_bytes=64 * gib, total_device_bytes=64 * gib,
+        ram_available_bytes=64 * gib, uma=False,
+    ))
+
+
 def test_quickstart_without_recommendation_requires_explicit_choice(client, monkeypatch):
     """One budget: automatic setup refuses; an explicit spilled choice reaches activation."""
     from hermes_cli.local_runtime.estimator import HardwareBudget
@@ -131,6 +145,11 @@ def test_quickstart_runs_all_three_legs(client, monkeypatch, tmp_path):
     config.setdefault("local_runtime", {})["backend"] = "cpu"
     save_config(config)
 
+    # The automatic pick needs a resident variant; a GPU-less CI host probes
+    # zero VRAM and gets no recommendation at all. Pin the probe like the
+    # explicit-choice test does.
+    _pin_recommendable_budget(monkeypatch)
+
     # Leg 1: no runtime installed yet; install is the stubbed binaries call.
     monkeypatch.setattr(
         "hermes_cli.local_runtime.binaries.installed_tags", lambda: [])
@@ -192,6 +211,9 @@ def test_quickstart_skips_satisfied_legs(client, monkeypatch):
 
     # Every catalog variant reads as staged.
     from hermes_cli.local_runtime.catalog import CATALOG
+
+    # Host-independent recommendation (GPU-less CI probes no resident VRAM).
+    _pin_recommendable_budget(monkeypatch)
 
     all_ids = {v.model_id for e in CATALOG for v in e.variants}
     monkeypatch.setattr(

@@ -188,7 +188,9 @@ async def test_unexpected_signal_starts_teardown_after_bounded_interrupt_grace()
         "gateway.status.write_runtime_status"
     ):
         stop_task = asyncio.create_task(runner.stop())
-        await asyncio.wait_for(disconnect_started.wait(), timeout=0.75)
+        # Bounded liveness wait only: generous enough for a loaded runner
+        # (the grace values under test stay at 0.0/0.01 below).
+        await asyncio.wait_for(disconnect_started.wait(), timeout=3.0)
         await stop_task
 
     assert runner._shutdown_event.is_set() is True

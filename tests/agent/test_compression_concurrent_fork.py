@@ -2171,7 +2171,9 @@ def test_hard_stop_waits_for_commit_already_admitted(tmp_path: Path) -> None:
         daemon=True,
     )
     compression.start()
-    assert commit_started.wait(timeout=2)
+    # Preflight (agent+plugin-loaded, feasibility probe) can take seconds on a
+    # loaded runner; this is a liveness wait, not the measured contract.
+    assert commit_started.wait(timeout=15)
 
     stop = threading.Thread(
         target=lambda: (

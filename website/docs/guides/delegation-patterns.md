@@ -8,7 +8,7 @@ description: "When to use isolated Hermes subagents versus persistent Pi delegat
 
 Hermes supports both isolated child-agent tasks and persistent external coding sessions. Use `delegate_task` for fresh-context Hermes subagents and parallel work; use `delegate_session` when coding work should stay in one native Pi conversation across follow-ups.
 
-For the full feature reference, see [Delegation](/user-guide/features/delegation).
+For the full feature reference, see [Delegation](../user-guide/features/delegation.md).
 
 ---
 
@@ -239,4 +239,4 @@ delegation:
 
 ---
 
-*For the complete delegation reference — all parameters, ACP integration, and advanced configuration — see [Subagent Delegation](/user-guide/features/delegation).*
+*For the complete delegation reference — all parameters, ACP integration, and advanced configuration — see [Subagent Delegation](../user-guide/features/delegation.md).*
