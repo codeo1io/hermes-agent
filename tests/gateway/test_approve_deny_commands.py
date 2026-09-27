@@ -354,7 +354,14 @@ class TestBlockingApprovalE2E:
 
         t = threading.Thread(target=agent_thread)
         t.start()
-        t.join(timeout=1)
+        # timeout=0 means the guard returns an immediate "timeout" outcome — but
+        # on a loaded CI runner thread startup alone can exceed a fixed 1s join,
+        # which would fire the safety deny below and turn the outcome into
+        # "denied". Poll for the result (or thread exit) with a generous bound
+        # and only deny as a hang safety net.
+        _deadline = time.monotonic() + 10.0
+        while t.is_alive() and result_holder[0] is None and time.monotonic() < _deadline:
+            time.sleep(0.05)
         if t.is_alive():
             resolve_gateway_approval(session_key, "deny")
             t.join(timeout=5)

@@ -657,12 +657,34 @@ _make_list_resources_handler = _make_utility_handler(
 _make_read_resource_handler = _make_utility_handler(
     "resources/read", "read_resource",
     lambda session, args, sn: session.read_resource(args["uri"]), _render_read_resource, required="uri")
+def _coerce_prompt_arguments(raw: Any) -> Dict[str, str]:
+    """``prompts/get`` arguments are ``dict[str, string]`` in the MCP spec, but models send
+    JSON scalars (numbers, bools) that the SDK's pydantic validation rejects with a raw
+    ValidationError. Coerce scalars to their string form; structured values stay a caller
+    error we surface through the normal dispatch error path instead of an SDK stack trace."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("prompt 'arguments' must be an object of string values")
+    coerced: Dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, bool):  # before int: bool is an int subclass
+            coerced[key] = "true" if value else "false"
+        elif isinstance(value, (int, float, str)):
+            coerced[key] = str(value)
+        else:
+            raise ValueError(
+                f"prompt argument '{key}' must be a string (got {type(value).__name__}); pass string values")
+    return coerced
+
+
 _make_list_prompts_handler = _make_utility_handler(
     "prompts/list", "list_prompts",
     lambda session, args, sn: _core._paginate_full_list(session.list_prompts, "prompts", sn), _render_prompt_list)
 _make_get_prompt_handler = _make_utility_handler(
     "prompts/get", "get_prompt",
-    lambda session, args, sn: session.get_prompt(args["name"], arguments=args.get("arguments", {})),
+    lambda session, args, sn: session.get_prompt(
+        args["name"], arguments=_coerce_prompt_arguments(args.get("arguments"))),
     _render_get_prompt, required="name")
 
 
