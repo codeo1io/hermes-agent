@@ -51,49 +51,51 @@ class TestReleaseRunningAgentStateUnit:
         runner._release_running_agent_state("missing")  # still fine
 
 
-class TestNoMoreBareDeleteSites:
-    """Regression: all bare `del self._running_agents[key]` sites were
-    converted to use the helper.  If a future contributor reverts one,
-    this test flags it.  Docstrings / comments mentioning the old
-    pattern are allowed.
-    """
+class TestRunningAgentStateLockstepInvariant:
+    """The state contract the old bare ``del`` sites violated: the three dicts
+    hold the same session keys at every observable boundary.  This replaces an
+    earlier test that regex-scanned ``gateway/run.py`` for bare ``del`` sites —
+    reading source text in tests is banned (it tests source shape, not behavior);
+    the behavioral form asserts the invariant on every exercisable path of the
+    public release helper, which is the funnel all cleanup sites must use."""
 
-    def test_no_bare_del_of_running_agents_in_gateway_run(self):
-        from pathlib import Path
-        import re
+    def test_key_sets_stay_in_lockstep_across_mixed_lifecycles(self):
+        runner = _make_runner()
+        runner._session_run_generation = {}
+        keys = [f"agent:main:telegram:private:{i}" for i in range(3)]
 
-        gateway_run = (Path(__file__).parent.parent.parent / "gateway" / "run.py").read_text()
-        # Match `del self._running_agents[...]` that is NOT inside a
-        # triple-quoted docstring.  We scan non-docstring lines only.
-        lines = gateway_run.splitlines()
+        for key in keys:
+            runner._running_agents[key] = MagicMock()
+            runner._running_agents_ts[key] = 1.0
+            runner._busy_ack_ts[key] = 1.0
 
-        in_docstring = False
-        docstring_delim = None
-        offenders = []
-        for idx, line in enumerate(lines, start=1):
-            stripped = line.strip()
-            if not in_docstring:
-                if stripped.startswith('"""') or stripped.startswith("'''"):
-                    delim = stripped[:3]
-                    # single-line docstring?
-                    if stripped.count(delim) >= 2:
-                        continue
-                    in_docstring = True
-                    docstring_delim = delim
-                    continue
-                if re.search(r"\bdel\s+self\._running_agents\[", line):
-                    offenders.append((idx, line.rstrip()))
-            else:
-                if docstring_delim and docstring_delim in stripped:
-                    in_docstring = False
-                    docstring_delim = None
+        def _lockstep():
+            return (
+                set(runner._running_agents)
+                == set(runner._running_agents_ts)
+                == set(runner._busy_ack_ts)
+            )
 
-        assert offenders == [], (
-            "Found bare `del self._running_agents[...]` sites in gateway/run.py. "
-            "Use self._release_running_agent_state(session_key) instead so "
-            "_running_agents_ts and _busy_ack_ts are popped in lockstep.\n"
-            + "\n".join(f"  line {n}: {l}" for n, l in offenders)
-        )
+        assert _lockstep()
+
+        for key in keys:  # unconditional release, the path every caller funnels into
+            assert runner._release_running_agent_state(key) is True
+            assert _lockstep(), f"dicts drifted apart after releasing {key}"
+
+        assert not runner._running_agents and not runner._running_agents_ts and not runner._busy_ack_ts
+
+    def test_release_cannot_leave_partial_state_even_from_drifted_input(self):
+        """A caller that drifted the dicts by hand (the pre-fix world) must not
+        be able to make the helper itself leave residue behind."""
+        runner = _make_runner()
+        runner._running_agents["k"] = MagicMock()
+        # _running_agents_ts and _busy_ack_ts never got the key — drifted input
+
+        assert runner._release_running_agent_state("k") is True
+
+        assert "k" not in runner._running_agents
+        assert "k" not in runner._running_agents_ts
+        assert "k" not in runner._busy_ack_ts
 
 
 class TestSessionDbCloseOnShutdown:
