@@ -40,6 +40,10 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # instead (a module global cannot cross a process boundary).
 _KANBAN_GUARD_BYPASS = False
 _KANBAN_GUARD_BYPASS_ENV = "HERMES_KANBAN_GUARD_BYPASS"
+# Stable identifier prefixing every test-isolation refusal message. Tests
+# assert against this symbol (never message prose) so wording changes cannot
+# silently sever the guard contract.
+KANBAN_TEST_ISOLATION_GUARD_MARKER = "kanban test-isolation guard"
 
 # Cap on ``<db>.corrupt.<hash>.bak`` quarantines per board: content-addressing
 # dedupes identical bytes, but mutating corruption mints a new fingerprint each
@@ -731,7 +735,7 @@ def _ensure_test_isolation(path: Path) -> None:
     )
     if production:
         raise RuntimeError(
-            "kanban test-isolation guard: test attempted to open the "
+            f"{KANBAN_TEST_ISOLATION_GUARD_MARKER}: test attempted to open the "
             f"production kanban DB at {resolved} (under real Hermes root {root}). "
             "Tests must run against a temporary HERMES_HOME outside the real "
             "root — or export HERMES_KANBAN_GUARD_BYPASS=1 for a test that "

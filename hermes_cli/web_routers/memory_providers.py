@@ -370,6 +370,15 @@ def _run_setup_step(results: list, kind: str, name: str, command: str, status_of
 
 
 def _install_memory_provider_external_dependencies(dependencies: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """Run a provider manifest's check/install steps.
+
+    TRUST BOUNDARY: ``install`` commands come from the provider manifest and
+    run with ``shell=True`` under the dashboard operator's account. Manifests
+    are first-party (``hermes/memory-providers/…``), so this is the same trust
+    class as an operator running the documented install line themselves —
+    NOT a service boundary. If manifests ever become remotely fetchable or
+    user-contributed, this must move to an allow-listed argv form first.
+    """
     results: List[Dict[str, Any]] = []
     for dep in dependencies:
         name = dep.get("name") or "dependency"

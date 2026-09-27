@@ -156,7 +156,14 @@ def _resolve_openrouter_runtime(
         )
     )
     if is_openrouter_context:
-        candidates = [explicit_api_key, get_secret_str("OPENROUTER_API_KEY"), get_secret_str("OPENAI_API_KEY")]
+        # A trusted config base_url carries its own key rungs (#1760, #124527): the literal
+        # ``model.api_key``/``model.key_env`` beside an openrouter.ai URL belongs to that
+        # endpoint's owner and is consulted before the shared OPENROUTER/OPENAI env fallbacks
+        # — same precedence as every other custom endpoint.
+        from hermes_cli.runtime_provider_custom import _model_cfg_key_env_for
+        candidates = [explicit_api_key, (cfg_api_key if use_config_base_url else ""),
+                      (_model_cfg_key_env_for(model_cfg, base_url) if use_config_base_url else ""),
+                      get_secret_str("OPENROUTER_API_KEY"), get_secret_str("OPENAI_API_KEY")]
     else:
         # ``model.api_key`` and ``model.key_env`` back a trusted config base_url only; the key_env
         # rung is what a bare ``provider: custom`` block relies on (#67453).
@@ -172,7 +179,11 @@ def _resolve_openrouter_runtime(
         return rp._runtime("openrouter", cfg_api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
                            api_key, source=source)
     if base_url:
-        pool_result = rp._try_resolve_from_custom_pool(base_url, "custom", cfg_api_mode, provider_name=None)
+        # A known owner key (explicit, or the trusted config key) keeps the URL-only pool
+        # fallback off same-URL providers carrying their own credentials (#124527).
+        owner_key = (explicit_api_key or "").strip() or (cfg_api_key if use_config_base_url else "")
+        pool_result = rp._try_resolve_from_custom_pool(base_url, "custom", cfg_api_mode, provider_name=None,
+                                                       owner_key=owner_key)
         if pool_result:
             return pool_result
     # Local no-auth servers get a placeholder key — the OpenAI SDK requires a non-empty string.

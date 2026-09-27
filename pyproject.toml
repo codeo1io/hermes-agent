@@ -685,7 +685,10 @@ preview = true  # required for PLW1514 (unspecified-encoding) — preview rule
 # ASYNC230 (blocking open()) and ASYNC240 (blocking path methods) are real
 # but ~180 legacy sites deep; they graduate to this list once the backlog
 # is burned down (see per-file-ignores below for the frozen baseline).
-select = ["PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251"]
+# DTZ003: naive datetime.utcnow()/utcfromtimestamp() — .timestamp() on the
+# naive value reinterprets UTC in the host's local zone (real tempGuid epoch
+# shift in bluebubbles before the fix); the tz-aware spelling is the contract.
+select = ["PLW1514", "ASYNC210", "ASYNC220", "ASYNC221", "ASYNC251", "DTZ003"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests can intentionally exercise locale-encoding edge cases.

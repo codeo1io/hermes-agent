@@ -26,8 +26,19 @@ import pytest
 
 
 def _real_hermes_home() -> Path:
-    """Where the operator's logs live, ignoring any test sandboxing."""
-    return Path.home() / ".hermes"
+    """Where the operator's logs live, ignoring any test sandboxing.
+
+    Uses the passwd-captured production root — the same authority conftest's
+    `_hermes_home_points_at_production` uses — so a HOME that is itself a
+    hermes-managed sandbox (delegate pytest homes under ``~/.hermes/tmp``) is
+    not mistaken for the operator's real root."""
+    try:
+        from hermes_state_guard import _real_platform_state_root
+
+        real = _real_platform_state_root()
+    except Exception:
+        real = None
+    return real or (Path.home() / ".hermes")
 
 
 def _all_file_destinations() -> list[str]:

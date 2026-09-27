@@ -679,11 +679,19 @@ def _resolve_single_delivery_target(
     # target is the ORIGIN session id (chat_id IS the session id for this
     # surface; _deliver_to_api_server_transcript appends there). No env/home
     # fallback exists — with no origin the target does not resolve.
+    # NOTE: read the RAW origin, not the push-filtered one — _resolve_origin drops
+    # api_server origins (d5d653c2f0) for the deliver=origin home-channel fallback,
+    # but THIS lane is exactly what makes an api_server origin deliverable again.
     if platform_name.lower() == "api_server":
-        if origin and str(origin.get("platform") or "").lower() == "api_server":
+        raw_origin = job.get("origin")
+        if (
+            isinstance(raw_origin, dict)
+            and str(raw_origin.get("platform") or "").lower() == "api_server"
+            and raw_origin.get("chat_id")
+        ):
             return {
                 "platform": platform_name,
-                "chat_id": str(origin["chat_id"]),
+                "chat_id": str(raw_origin["chat_id"]),
                 "thread_id": None,
                 "_resolved_from": "home",  # mirror-eligible primary conversation
             }
@@ -715,6 +723,79 @@ def _get_bot_chat_delivery_timeout() -> int:
         return value if value > 0 else 600
     except Exception:
         return 600
+
+
+def _deliver_to_api_server_transcript(
+    job: dict, chat_id: str, content: str
+) -> Optional[str]:
+    """Deliver job output into an api_server session's transcript.
+
+    The API server is a stateless request/response surface: there is no push
+    lane and ``send()`` is a permanent stub ("API server uses HTTP
+    request/response, not send()"), so BOTH the live-adapter and standalone
+    lanes dead-end for it. The one delivery primitive that works is the
+    transcript itself — the same visibility model gateway/wake.py documents
+    for this platform (the output is visible the next time the client polls
+    or reopens the conversation, and a later turn in that session sees it in
+    history). The target chat_id for an api_server origin IS the raw session
+    id.
+
+    Written as a user-role message with a ``[Cron delivery]`` prefix (role
+    parity with ``_maybe_mirror_cron_delivery`` — an assistant-role splice
+    after the agent's last turn breaks strict alternation on replay).
+
+    Returns None on success, or an error string for ``last_delivery_error``
+    that names the ACTUAL failure (missing session) instead of the dead
+    send() stub's message.
+    """
+    text = (content or "").strip()
+    if not text:
+        return None
+    job_label = job.get("name") or job.get("id") or "cron"
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+    except Exception as e:
+        return f"api_server transcript delivery failed (session db): {e}"
+    try:
+        try:
+            session_row = db.get_session(chat_id)
+        except Exception as e:
+            return f"api_server transcript delivery failed (session lookup): {e}"
+        if session_row is None:
+            # Resolve compression lineage: an origin chat_id may be a rotated
+            # parent whose live tip moved on. State.db's own resolve handles it.
+            try:
+                latest = db.resolve_resume_session_id(chat_id)
+            except Exception:
+                latest = None
+            if latest and latest != chat_id:
+                chat_id = latest
+            else:
+                return (
+                    f"api_server target session {chat_id} does not exist; "
+                    "deliver to an explicit platform, or re-create the job "
+                    "from a live session"
+                )
+        try:
+            db.append_message(
+                session_id=chat_id,
+                role="user",
+                content=f"[Cron delivery: {job_label}]\n{text}",
+            )
+        except Exception as e:
+            return f"api_server transcript delivery failed (append): {e}"
+        logger.info(
+            "Job '%s': delivered to api_server session %s transcript",
+            job.get("id", "?"), chat_id,
+        )
+        return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def _get_standalone_send_timeout() -> int:

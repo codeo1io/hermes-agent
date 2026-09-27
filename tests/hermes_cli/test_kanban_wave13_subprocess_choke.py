@@ -30,7 +30,7 @@ REPORT (refusal or success per probe), never on side effects it induces. On a
 guard-absent checkout the child reports "connected" and the test fails loudly;
 on the live board nothing was mutated by the probe itself (the child is
 refused before it could write; if it were NOT refused the failure fires and
-any planted row is cleaned up by the fixture's sweep, see ``_sweep_probe_rows``).
+any planted row is cleaned up by the fixture's sweep, see ``_live_probe_rows``).
 Hosts without a live board (GitHub runners) skip only the live-path probes;
 the synthesized-production-root probes still run everywhere.
 """
@@ -41,10 +41,12 @@ import os
 import sqlite3
 import subprocess
 import sys
+from typing import Optional
 from pathlib import Path
 
 import pytest
 
+from hermes_cli.kanban_db_connect import KANBAN_TEST_ISOLATION_GUARD_MARKER
 from hermes_state_guard import _real_platform_state_root
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -183,18 +185,21 @@ def _run_probe(live: Path, mode: str, tmp_path: Path) -> dict:
     return ast.literal_eval(report_line[len("__WAVE13_REPORT__ ") :])
 
 
-def _live_probe_rows(live: Path) -> list[tuple]:
-    """Read-only probe of the live board for the wave-13 fingerprint. Empty
-    boards created-but-never-initialized by an earlier process on the host
-    (GitHub runners end up with a zero-page ``~/.hermes/kanban.db``) count as
-    "no debris": sqlite opens the file fine but the schema never existed."""
+def _live_probe_rows(live: Path) -> Optional[list[tuple]]:
+    """Read-only probe of the live board for the wave-13 fingerprint, or ``None``
+    when the file has no board schema. Empty boards created-but-never-initialized
+    by an earlier process on the host (GitHub runners end up with a zero-page
+    ``~/.hermes/kanban.db``) count as "no debris": sqlite opens the file fine
+    but the schema never existed. Distinguishing ``None`` (no schema) from ``[]``
+    (schema, no matching rows) is what makes a single open suffice for both the
+    debris fingerprint and the is-this-a-real-board predicate below."""
     conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
     try:
         has_tasks = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
         ).fetchone()
         if not has_tasks:
-            return []
+            return None
         return conn.execute(
             "SELECT id, title, assignee FROM tasks WHERE title IN (?,?,?,?)",
             _WAVE13_TITLES,
@@ -205,24 +210,12 @@ def _live_probe_rows(live: Path) -> list[tuple]:
 
 def _live_board_is_real(live: Path) -> bool:
     """A real board has the schema (a bare file created by an unrelated
-    process is not a board this regression can fingerprint)."""
+    process is not a board this regression can fingerprint). One probe open:
+    ``None`` = no schema, anything else (including ``[]``) = real board."""
     try:
-        return bool(_live_probe_rows(live) is not None) and _has_tasks(live)
+        return _live_probe_rows(live) is not None
     except sqlite3.OperationalError:
         return False
-
-
-def _has_tasks(live: Path) -> bool:
-    conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
-    try:
-        return (
-            conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
-            ).fetchone()
-            is not None
-        )
-    finally:
-        conn.close()
 
 
 @pytest.fixture
@@ -242,7 +235,7 @@ def test_subprocess_predicate_refuses_live_board(wave13_topology):
     root, live, tmp_path = wave13_topology
     report = _run_probe(live, "predicate", tmp_path)
     state, detail = report["ensure_test_isolation"]
-    assert state == "refused" and "test-isolation guard" in detail, report
+    assert state == "refused" and KANBAN_TEST_ISOLATION_GUARD_MARKER in detail, report
 
 
 def test_subprocess_open_paths_refuse_live_board(wave13_topology):
@@ -259,7 +252,7 @@ def test_subprocess_open_paths_refuse_live_board(wave13_topology):
         assert name in report, report
         state, detail = report[name]
         assert state == "refused", f"{name} not refused from subprocess: {report}"
-        assert "test-isolation guard" in detail or "guard" in detail, report
+        assert KANBAN_TEST_ISOLATION_GUARD_MARKER in detail, report
     assert _live_probe_rows(live) == before, "refused probes mutated the live board"
 
 

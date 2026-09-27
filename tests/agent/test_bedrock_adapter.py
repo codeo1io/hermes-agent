@@ -1636,6 +1636,7 @@ class TestReasoningReplaySchema:
     replaying captured thinking as a bare ``text`` key dies client-side with ParamValidationError (#115865)."""
 
     def test_call_converse_replays_thinking_botocore_accepts(self):
+        pytest.importorskip("botocore.session", reason="botocore (with session module) required")
         import botocore.session
         from botocore.validate import validate_parameters
         from agent.bedrock_adapter import call_converse
