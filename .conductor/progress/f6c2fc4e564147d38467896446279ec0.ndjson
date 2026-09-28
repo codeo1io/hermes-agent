@@ -1,0 +1,6 @@
+{"step":1,"ts":"2026-09-30T16:06:16Z","summary":"Orient: fork of NousResearch/hermes-agent; upstream/main=6ec05205a9 (09-30); merge-base v0.21.4 (09-21); 14 fork-local commits","touched":[]}
+{"step":2,"ts":"2026-09-30T16:06:16Z","summary":"Divergence: history 39935 ahead but CONTENT near-current; feature-presence spot-checks (a2a, micro-compaction, smart_policy, PKCE, CDP, oneshot) all PRESENT in our HEAD","touched":[]}
+{"step":3,"ts":"2026-09-30T16:06:16Z","summary":"Content diff: 2636 upstream-only files; narrowed to product files ADDED upstream since 09-25 (i18n, telemetry v5, node-abi, worker_bootstrap, profiles_service_cleanup, ssh_workspace_fs...)","touched":[]}
+{"step":4,"ts":"2026-09-30T16:06:16Z","summary":"Precise absence checks: mcp Node-ABI handling, cron worker-entry lease, profile-delete schtasks cleanup, config_check diagnostics, web_server_skew_exit, compression archive/reply-anchor ALL ABSENT in ours","touched":[]}
+{"step":5,"ts":"2026-09-30T16:06:16Z","summary":"Deps: ours mcp==2.2.0 (=PyPI latest, upstream lags 2.0.0); pydantic ahead; upstream added py3.14 lane (<3.15, conditional pins, truststore/uvloop/resvg/tomli-w); ours caps <3.14","touched":[]}
+{"step":6,"ts":"2026-09-30T16:06:16Z","summary":"Wrote phase_result JSON (12 evidence-backed candidates: 6 port waves, 2 capability, 3 eco/standards, 1 policy-caveat)","touched":[]}
