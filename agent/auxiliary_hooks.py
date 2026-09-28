@@ -8,6 +8,10 @@ included — carrying the ``pre_api_request`` / ``post_api_request`` payload sha
 turn-scoped, so observability plugins keyed on turn identity never see auxiliary traffic unless
 they subscribe to these. Observer-only (returns ignored) and fail-open: a raising or hung
 callback is logged and the auxiliary call proceeds untouched.
+
+The ``post`` payload's usage is ONE contract in two places: the top-level ``usage`` field and
+its mirror under ``response["usage"]`` are built from the same normalized summary — observers
+may read either, and they can never disagree.
 """
 
 from __future__ import annotations
@@ -54,8 +58,27 @@ def _system_prompt(messages: Any, kwargs: Dict[str, Any]) -> str:
     return ""
 
 
+def _message_list(kwargs: Dict[str, Any]) -> list:
+    """The request's ``messages`` (chat) or ``input`` (Responses) as a list.
+
+    A bare-string ``input`` is ONE message; ``len()`` applied to it directly
+    would report characters. Anything else shaped wrong is no messages.
+    """
+    messages = kwargs.get("messages")
+    if not isinstance(messages, list):
+        messages = kwargs.get("input")
+    if isinstance(messages, str):
+        return [messages]
+    return messages if isinstance(messages, list) else []
+
+
 def _usage_summary(response: Any, *, provider: str, api_mode: str) -> Optional[Dict[str, Any]]:
-    raw_usage = getattr(response, "usage", None)
+    # Relay paths hand back plain dicts; attribute-style API responses carry
+    # ``usage`` directly. Read both or the dict path silently reports no usage.
+    if isinstance(response, dict):
+        raw_usage = response.get("usage")
+    else:
+        raw_usage = getattr(response, "usage", None)
     if response is None or not raw_usage:
         return None
     from dataclasses import asdict
@@ -110,7 +133,7 @@ class _AuxCallHooks:
             api_mode=api_mode,
             streaming=streaming,
             started_at=self.started_at,
-            message_count=len(kwargs.get("messages") or kwargs.get("input") or []),
+            message_count=len(_message_list(kwargs)),
         )
 
     def pre(self) -> None:
@@ -119,13 +142,13 @@ class _AuxCallHooks:
         from agent.api_request_hooks import ApiRequestHooksMixin as _Sanitize
 
         kwargs = self.kwargs
-        messages = kwargs.get("messages")
-        if not isinstance(messages, list):
-            messages = kwargs.get("input")  # Responses API
-        if not isinstance(messages, list):
-            messages = []
+        messages = _message_list(kwargs)
         body = {k: v for k, v in kwargs.items() if k not in {"timeout", "http_client"}}
-        total_chars = sum(len(str(_field(m, "content") or "")) for m in messages)
+        # A bare-string message counts itself; message objects count their content.
+        total_chars = sum(
+            len(m) if isinstance(m, str) else len(str(_field(m, "content") or ""))
+            for m in messages
+        )
         _fire(
             PRE_AUXILIARY_CALL, **self.base,
             request_messages=list(messages),
@@ -157,10 +180,11 @@ class _AuxCallHooks:
             message, finish_reason = _first_choice_message(response)
             content = _field(message, "content") if message is not None else None
             tool_calls = (_field(message, "tool_calls") if message is not None else None) or []
+            usage = _usage_summary(response, provider=self.provider, api_mode=self.api_mode)
             payload.update(
                 finish_reason=finish_reason,
                 response_model=_field(response, "model"),
-                usage=_usage_summary(response, provider=self.provider, api_mode=self.api_mode),
+                usage=usage,
                 response=_Sanitize._sanitize_hook_payload({
                     "model": _field(response, "model"),
                     "finish_reason": finish_reason,
@@ -169,7 +193,9 @@ class _AuxCallHooks:
                         "content": content,
                         "tool_calls": tool_calls,
                     },
-                    "usage": payload.get("usage"),
+                    # Mirror of the top-level normalized usage: built from the
+                    # same summary so the two can never drift apart.
+                    "usage": usage,
                 }),
                 assistant_content_chars=len(content) if isinstance(content, str) else 0,
                 assistant_tool_call_count=len(tool_calls),
