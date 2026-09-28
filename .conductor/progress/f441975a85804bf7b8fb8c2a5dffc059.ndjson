@@ -1,0 +1,10 @@
+{"step":1,"ts":"2026-10-01T01:31:02Z","summary":"Phase research start (attempt f441975a; evidence carried from aborted attempts baa17fc6/d11f34c1 of same phase)","touched":[]}
+{"step":2,"ts":"2026-10-01T01:31:03Z","summary":"Read ROADMAP.md (58 lines): rm-001..rm-018; open rm-001/rm-002; superseded rm-016/rm-013/rm-010/rm-007","touched":["ROADMAP.md"]}
+{"step":3,"ts":"2026-10-01T01:31:05Z","summary":"Verified rm-001 signals include hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js (minified vendor chunk; absent from HEAD tree)","touched":["ROADMAP.md","hermes_cli/web_dist"]}
+{"step":4,"ts":"2026-01-01T01:31:06Z","summary":"Verified rm-002 lists 5 .worktrees/t_171b1032/** paths; acp_adapter IS tested at HEAD (tests/acp_adapter/test_acp_runtime_adapter.py, 24 tests)","touched":["ROADMAP.md","tests/acp_adapter/"]}
+{"step":5,"ts":"2026-10-01T01:31:08Z","summary":"Remotes: origin=/work/projects/hermes-agent; GitHub codeo1io/hermes-agent; upstream NousResearch/hermes-agent","touched":[]}
+{"step":6,"ts":"2026-10-01T01:31:10Z","summary":"Network live (pypi.org 200, api.github.com 200); /tmp/deps.txt clobbered by concurrent tenant → moved scratch to unique dir","touched":["/tmp/research_baa17fc6/"]}
+{"step":7,"ts":"2026-10-01T01:31:14Z","summary":"Fetched upstream NousResearch/hermes-agent top open issues by comments (user-needs evidence)","touched":[]}
+{"step":8,"ts":"2026-10-01T01:31:18Z","summary":"Dependency drift table: pyproject pins vs PyPI latest (37 runtime deps, exact-pin policy)","touched":["pyproject.toml","/tmp/research_baa17fc6/dep_drift.tsv"]}
+{"step":9,"ts":"2026-10-01T01:33:50Z","summary":"MCP protocol grep re-run (output dropped from view x2 - no MCP claim made in result)","touched":["tools/mcp_tool_client.py"]}
+{"step":10,"ts":"2026-10-01T01:33:52Z","summary":"Synthesized 6 evidence-backed roadmap candidates; wrote phase_result JSON","touched":["/home/agent/.hermes/conductor-delegate-spool-infra-deploy/delegate/f441975a85804bf7b8fb8c2a5dffc059.json"]}
