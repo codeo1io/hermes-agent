@@ -32,6 +32,78 @@
 - acceptance: Docs regenerated/updated; staleness detector reports 0 signals
 - evidence: inference.stale_docs returns [] for the repo
 
+### Bound the three mixed-scope child spawns (profile-scope P05 class)
+- id: `rm-028` | track: reliability | priority: 95.0 | status: candidate
+- signals: profile_scope.P05:plugins/platforms/buzz/adapter.py::L395, profile_scope.P05:plugins/platforms/photon/adapter.py::L922, profile_scope.P05:plugins/memory/openviking/__init__.py::L981 (reproduced: `python3 scripts/check_profile_scope_patterns.py --files <those 3>` → 3 findings C2)
+- acceptance: all three spawns pass a profile-bound child env (`served_profile_child_env` or equivalent keyed by `hermes_home_key()`), never `os.environ.copy()`; the lint reports 0 findings on those files; two-home A→B→A multiplex E2E (real imports, temp HERMES_HOME) proves no default-profile env/secret leak into children
+- evidence: `scripts/run_tests.sh` on the touched files' suites green at HEAD; conductor validation digest validation:v1:<sha> recorded in the shipping PR. Systemic successor (profile-scoped event bus, upstream v0.21.5) is evaluated only after a named-consumer list exists (anti-speculative rule)
+
+### Port the upstream automatic venv-mending family
+- id: `rm-029` | track: reliability | priority: 93.0 | status: candidate
+- signals: upstream release v0.21.5 (v2026.9.24) ships auto venv-mending; absent at HEAD (`rg -l 'venv[-_]mend'` → 0); ops evidence: pytest-less 141MB `.venv` repeatedly materialized in conductor worktrees by bare `uv run python -m pytest`, aborting resolvers (conflict-case record 2026-09-30)
+- acceptance: a corrupted or pytest-less `.venv` on the `scripts/run_tests.sh` probe chain (`.venv` → `venv` → `$HOME/.hermes/hermes-agent/venv`) is detected and automatically rebuilt, with a log line; E2E test mangles a venv and proves the mend; no new bare-`uv run` code paths introduced
+- evidence: new E2E green via `scripts/run_tests.sh`; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Decompose the measured Python complexity hot spots (supersedes rm-001's vendor-bundle signal list)
+- id: `rm-030` | track: reliability | priority: 91.0 | status: candidate
+- signals: ast.complexity_hot:tools/delegate_session_tool.py::L759 (421 lines, CC 107), ast.complexity_hot:scripts/run_tests_parallel.py::L964 (545 lines, CC 84), ast.complexity_hot:plugins/platforms/discord/adapter.py::L6215 (565 lines, CC 88), ast.complexity_hot:plugins/platforms/discord/adapter.py::L5896 (CC 80), god_file:agent/auxiliary_client.py (8,193 lines; +563 since the prior assessment)
+- acceptance: each listed function split below 300 lines / CC 30 along the existing `<stem>_<topic>` sibling policy; `delegate_session` dispatch becomes a table (no ≥4-branch ladder); behavior locked by the existing suites before/after; `evals/codebase_navigability/static_metrics.py` before/after distributions recorded
+- evidence: static_metrics delta + `scripts/run_tests.sh` green at HEAD; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Make the profile-scope lint see the whole tree
+- id: `rm-031` | track: reliability | priority: 85.0 | status: candidate
+- signals: ci.added_lines_only:.github/workflows/lint.yml::L218 (diff-anchored invocation); the 3 live P05 sites predate the gate and can never surface in it
+- acceptance: repo-wide (or scheduled) invocation of `scripts/check_profile_scope_patterns.py` in CI with a baseline budget that fails on NEW findings (budget 3 today, 0 after rm-028)
+- evidence: probe workflow run reports exactly the 3 baseline findings before rm-028 and 0 after; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Delegation batch summary invariant (upstream #129450 class)
+- id: `rm-032` | track: reliability | priority: 80.0 | status: candidate
+- signals: upstream issue #129450 open 2026-09-30 (batch tasks reported failed while passing); our delegation-summary surface is tools/delegate_tool_tasks.py::L36 + tools/delegate_tool_results.py::L31,L345 (upstream's `hydra_session_tool` name does not exist at this HEAD — corrected from research signal)
+- acceptance: behavior-contract test asserting batch summary verdict == reduction of per-task outcomes (no false failure, no false pass); proven red on an injected miscount; upstream fix tracked and backported if the same code path applies
+- evidence: invariant test green at HEAD via `scripts/run_tests.sh`; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Refresh CI supply-chain tooling (osv-scanner 2.2.3 → 2.3.0)
+- id: `rm-033` | track: reliability | priority: 75.0 | status: candidate
+- signals: pin:.github/workflows/osv-scanner.yml::L47 (reusable-workflow digest pin, was `# v2.3.8`; the research artifact's `hermes_ci.yml::L271` path does not exist at this HEAD — corrected); google/osv-scanner-action Latest = v2.6.0
+- acceptance: every osv-scanner use re-pinned to the v2.3.0 commit SHA + `# v2.3.0` comment (SHA policy); scanner job runs clean on current lockfiles; quarterly re-check noted beside the pin
+- evidence: scanner job green in CI on the shipping PR; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Refresh the model catalog for the upstream v0.21.5 model wave
+- id: `rm-034` | track: customer-experience | priority: 70.0 | status: candidate
+- signals: tooling exists (scripts/build_model_catalog.py + website/static/api/model-catalog.json + 11 gating test files) but content predates upstream v0.21.5's wave: grok-4.21/5, gpt-6.1(-pro), gemini-3.1, kimi-k2.5, GLM-5(-air), claude-haiku-5, deepseek-v3.2
+- acceptance: catalog regenerated via the existing builder; every catalog model has a context-length entry (relationship contract, not a snapshot count); the build is deterministic (two runs byte-identical)
+- evidence: determinism + contract tests green via `scripts/run_tests.sh`; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Convert source-reading tests to behavior tests
+- id: `rm-035` | track: maintainability | priority: 60.0 | status: candidate
+- signals: tests.reads_source:tests/tools/test_browser_content_none_guard.py::L55, tests.reads_source:tests/test_trajectory_compressor_async.py::L93, tests.reads_source:tests/tools/test_cross_profile_guard.py::L224, tests.reads_source:tests/gateway/test_session_state_cleanup.py::L65, tests.reads_source:tests/tools/test_subprocess_stdin_guard.py::L54, tests.reads_source:tests/hermes_cli/test_setup_matrix_e2ee.py::L8 (root AGENTS.md bans source-text assertions outright)
+- acceptance: none of these files read `.py`/`.ts` source text; the asserted logic is extracted to pure/DI-testable functions; assertions are on behavior
+- evidence: `rg 'inspect.getsource|readFileSync'` clean for the converted files; their suites green via `scripts/run_tests.sh`; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Bound the MCP bootstrap subprocess
+- id: `rm-036` | track: reliability | priority: 55.0 | status: candidate
+- signals: no_timeout:hermes_cli/mcp_catalog.py::L400 (`_run_bootstrap` → `subprocess.run(shell=True)` with no timeout; `hermes mcp install` can hang forever on a wedged server)
+- acceptance: bootstrap bounded by a timeout sourced from config.yaml (no new HERMES_* env var per doctrine); a hanging-server test proves abort with an actionable error message; the timeout setting documented in the `hermes mcp` docs
+- evidence: new timeout test green via `scripts/run_tests.sh`; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Register or replace the posix_only file-local marker alias
+- id: `rm-037` | track: reliability | priority: 50.0 | status: candidate
+- signals: marker_alias:tests/tools/test_spill_safety.py::L22 (file-local skipif; only linux/macos/windows_only are lane-registered, so `-m posix_only` deselects everything — green over zero coverage)
+- acceptance: the marker is registered in pytest config/lane tooling or replaced by platform markers; `scripts/ci/list_os_marked_tests.py` lists the file and `-m <marker>` selects ≥1 test on a POSIX lane
+- evidence: lane-selection check output recorded in the PR; suites green via `scripts/run_tests.sh`; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Curate upstream v0.21.5+ absorption (decision memos + selective backports)
+- id: `rm-038` | track: customer-experience | priority: 40.0 | status: candidate
+- signals: divergence: 39,947 upstream commits past merge-base d337b736aa with upstream-only subsystems (apps/desktop 755 files, hermes_cli/observability 19, tools/connectors 10, scripts/bundles 15); open upstream #129420 (desktop_preview emitter not wired), #129423 (desktop artifacts ignore rules)
+- acceptance: one written decision memo per subsystem applying the doctrine rule (observability: opt-in gate mandatory, vendor backends stay out-of-tree; connectors: Footprint Ladder — service-gated tool/plugin, never core schema; bundles: deferred until this fork ships desktop releases); desktop policy = port reliability fixes only, never wholesale catch-up; no repo-wide desktop merge
+- evidence: memos merged under website/docs/developer-guide/ (or equivalent); each memo cites the doctrine paragraph it applies; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
+### Widen the nemo-relay pre-1.0 bound after a compat check
+- id: `rm-039` | track: reliability | priority: 35.0 | status: candidate
+- signals: pin:pyproject.toml (nemo-relay >=0.8.3,<0.9 behind heavy platform markers); PyPI has 0.9.3; the pre-1.0 policy prescribes <0.(minor+2) = <0.10
+- acceptance: 0.9.x API compatibility verified against the platform markers; bound widened to <0.10 with `uv lock` refreshed; affected suites green
+- evidence: uv lock diff + `scripts/run_tests.sh` on the nemo-touching tests; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+
 ## Closed items
 
 - `rm-006` Port skills.auto_load from upstream — superseded

@@ -1344,6 +1344,16 @@ _OS_MARKS = {
         lambda: sys.platform == "win32",
         "native Windows",
     ),
+    # Set-cover companion to the single-host marks: runs on BOTH POSIX hosts.
+    # Registered like the others so ``-m posix_only`` selects it (a file-local
+    # skipif alias is invisible to ``-m`` — green over zero coverage) and so
+    # ``_reject_multiple_os_marks`` treats it as mutually exclusive with them
+    # (``posix_only`` + ``linux_only`` is redundant: the item already runs on
+    # Linux; the pair reads as more precise than it is).
+    "posix_only": (
+        lambda: sys.platform != "win32",
+        "POSIX (Linux or macOS)",
+    ),
 }
 
 
@@ -1513,12 +1523,15 @@ def pytest_runtest_setup(item):
 def _reject_multiple_os_marks(items):
     """Fail collection when one test carries two host-OS markers.
 
-    Every marker in ``_OS_MARKS`` skips on all but one host, so two of them
-    on the same item means it is skipped on *every* host — a test that never
-    runs anywhere, reported as green by both the Linux suite and the
-    tests-os lanes. That is the exact silent-coverage-loss the markers were
-    introduced to remove, so it is a hard collection error rather than a
-    warning nobody reads.
+    Every marker in ``_OS_MARKS`` skips on at least one host, and each single-
+    host mark (``linux_only``/``macos_only``/``windows_only``) skips on all but
+    one, so two of them on the same item means it is skipped on *every* host —
+    a test that never runs anywhere, reported as green by both the Linux suite
+    and the tests-os lanes. That is the exact silent-coverage-loss the markers
+    were introduced to remove, so it is a hard collection error rather than a
+    warning nobody reads. ``posix_only`` (a two-host mark) is held to the same
+    rule: combined with any single-host mark it is redundant, and it shares in
+    the empty-intersection hazard when paired with another set-cover mark.
     """
     offenders = []
     for item in items:

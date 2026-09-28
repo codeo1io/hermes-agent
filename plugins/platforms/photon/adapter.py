@@ -464,6 +464,21 @@ def _guess_mime(path: str) -> Optional[str]:
     return mimetypes.guess_type(path)[0] or None
 
 
+def _sidecar_child_env(project_id: str, project_secret: str, port: int, bind: str, token: str) -> Dict[str, str]:
+    """Sidecar child env: a scrubbed base (``hermes_subprocess_env`` — the launch profile's
+    secrets never ride into the long-lived node child) plus exactly the PHOTON_* scope it
+    proxies. The project credentials are re-added AFTER the scrub: they are this profile's
+    scoped secrets handed over explicitly, not inherited env residue (P05 class, rm-028)."""
+    from tools.environments.local import hermes_subprocess_env  # scrubbed base: no launch-profile secrets
+    env = hermes_subprocess_env()
+    env.update({
+        "PHOTON_PROJECT_ID": project_id, "PHOTON_PROJECT_SECRET": project_secret,
+        "PHOTON_SIDECAR_PORT": str(port), "PHOTON_SIDECAR_BIND": bind,
+        "PHOTON_SIDECAR_TOKEN": token,
+        # Exit on stdin EOF so ANY gateway death (incl. SIGKILL) can't orphan it on the port.
+        "PHOTON_SIDECAR_WATCH_STDIN": "1"})
+    return env
+
 
 
 # -- Adapter -------------------------------------------------------------------
@@ -919,13 +934,8 @@ class PhotonAdapter(BasePlatformAdapter):
     async def _start_sidecar(self) -> None:
         await self._ensure_sidecar_deps()
         await self._reap_stale_sidecar()
-        env = os.environ.copy()
-        env.update({
-            "PHOTON_PROJECT_ID": self._project_id, "PHOTON_PROJECT_SECRET": self._project_secret,
-            "PHOTON_SIDECAR_PORT": str(self._sidecar_port), "PHOTON_SIDECAR_BIND": self._sidecar_bind,
-            "PHOTON_SIDECAR_TOKEN": self._sidecar_token,
-            # Exit on stdin EOF so ANY gateway death (incl. SIGKILL) can't orphan it on the port.
-            "PHOTON_SIDECAR_WATCH_STDIN": "1"})
+        env = _sidecar_child_env(
+            self._project_id, self._project_secret, self._sidecar_port, self._sidecar_bind, self._sidecar_token)
         from hermes_cli._subprocess_compat import windows_hide_flags  # hide child console on Windows
         await self._apply_spectrum_patch(windows_hide_flags())
         try:

@@ -138,11 +138,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--base", default="origin/main", help="base ref for the added-lines diff")
     ap.add_argument("--head", default=None, help="head ref (default: working tree)")
     ap.add_argument("--files", nargs="*", default=[], help="scan these whole files instead of a diff")
+    ap.add_argument("--all", action="store_true", help="scan every tracked Python file (tree-wide, no diff anchor)")
+    ap.add_argument("--pattern", default=None, help="only report findings whose pattern_id matches (e.g. P05)")
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help="skip files under these top-level dirs (e.g. tests evals scripts); offline tooling)")
+    ap.add_argument("--max-findings", type=int, default=None,
+                    help="exit 1 when findings exceed this budget (CI gate mode)")
     ap.add_argument("--json", default=None, help="also write findings as JSON to this path")
     args = ap.parse_args(argv)
 
     patterns = load_patterns()
+    if args.all:
+        tracked = subprocess.run(["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True)
+        args.files = [line for line in tracked.stdout.splitlines() if line]
     findings = run(args.base, args.head, args.files, patterns)
+    if args.pattern:
+        findings = [f for f in findings if f.pattern_id == args.pattern]
+    if args.exclude:
+        findings = [f for f in findings if f.path.split("/", 1)[0] not in args.exclude]
     if args.json:
         Path(args.json).write_text(json.dumps([asdict(f) for f in findings], indent=2) + "\n", encoding="utf-8")
     if not findings:
@@ -154,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{f.path}:{f.line}  {f.pattern_id}/{f.pattern_class}  {f.why}")
         print(f"    | {f.text}")
         print(f"    hint: {f.scope_hint}")
+    if args.max_findings is not None and len(findings) > args.max_findings:
+        print(f"profile-scope patterns: {len(findings)} > budget {args.max_findings} — FAIL")
+        return 1
     return 0
 
 

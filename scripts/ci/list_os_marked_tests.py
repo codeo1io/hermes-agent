@@ -31,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-_VALID_MARKERS = ("linux_only", "macos_only", "windows_only")
+_VALID_MARKERS = ("linux_only", "macos_only", "windows_only", "posix_only")
 
 
 def find_marked_files(marker: str, root: Path) -> list[Path]:
