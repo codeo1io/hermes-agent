@@ -28,6 +28,10 @@ from gateway.restart import (
 from gateway.run_common import _UNSET
 from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_watchdog_delay
 
+class _RestartRequesterGone(Exception):
+    """A plain planned-stop restart's requesting process died before the drain completed."""
+
+
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
