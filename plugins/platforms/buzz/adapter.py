@@ -991,9 +991,32 @@ class BuzzAdapter(BasePlatformAdapter):
             self._ws_task = None
             return False
 
+    async def _recv_with_timeout(self, websocket, timeout: float):
+        """Receive one frame under a timeout without ``asyncio.wait_for``.
+
+        ``wait_for`` consumes an outer cancellation when its wrapped future has
+        already completed (the bpo-32751 branch): a cancel delivered while the
+        handshake is parked on ``recv()`` gets swallowed, the WS loop task survives
+        its own ``cancel()``, and every caller waiting for it to unwind — ``stop()``,
+        the auth-timeout path, tests — hangs forever on a task that keeps
+        reconnecting. Detach the receive the way ``_ws_read_loop`` does and let a
+        bare ``asyncio.wait`` race the timeout instead, so an outer cancel always
+        propagates (the receive task is reaped in ``finally``).
+        """
+        recv_task = asyncio.ensure_future(websocket.recv())
+        try:
+            done, _ = await asyncio.wait({recv_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                raise asyncio.TimeoutError(f"no WebSocket frame for {timeout:.0f}s during authentication")
+            return recv_task.result()
+        finally:
+            if not recv_task.done():
+                recv_task.cancel()
+                recv_task.add_done_callback(_consume_ws_read_task)
+
     async def _authenticate_websocket(self, websocket) -> None:
         """NIP-42: await the AUTH challenge, answer with a signed kind-22242 event (+ optional NIP-OA tag), await OK."""
-        message = json.loads(await asyncio.wait_for(websocket.recv(), timeout=_WS_AUTH_TIMEOUT))
+        message = json.loads(await self._recv_with_timeout(websocket, _WS_AUTH_TIMEOUT))
         if not isinstance(message, list) or len(message) < 2 or message[0] != "AUTH":
             raise ConnectionError("Buzz relay did not send a NIP-42 AUTH challenge")
         # BUZZ_AUTH_TAG is per-identity: a scoped profile without one fails closed to "" rather than borrowing
@@ -1013,7 +1036,7 @@ class BuzzAdapter(BasePlatformAdapter):
         event = _nostr_auth.build_auth_event(private_key=self._private_key, challenge=str(message[1]), relay_url=self._websocket_url(), auth_tag_json=auth_tag)
         await websocket.send(json.dumps(["AUTH", event], separators=(",", ":")))
         while True:
-            response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=_WS_AUTH_TIMEOUT))
+            response = json.loads(await self._recv_with_timeout(websocket, _WS_AUTH_TIMEOUT))
             if not isinstance(response, list) or not response:
                 continue
             if response[0] == "OK" and len(response) >= 4 and response[1] == event["id"]:

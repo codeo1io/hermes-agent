@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-10-02T05:15:00Z","summary":"Orient: rank c1-01..c1-10 + merge core; gathering feasibility evidence","touched":[]}
+{"step":2,"ts":"2026-10-02T05:25:00Z","summary":"Selected batch: B-1 merge anchor (43 hunks/10 files) + c1-03/c1-06/c1-04 fixes + c1-08 memo; batch.md + JSON written","touched":["delegate/0804225a3d9046b8b206fd883ceb5d25.batch.md","delegate/0804225a3d9046b8b206fd883ceb5d25.json"]}

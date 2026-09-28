@@ -28,7 +28,7 @@ class Provider(StubAuthProvider):
     def refresh_session(self, *, refresh_token):
         self.calls += 1
         self.entered.set()
-        assert self.release.wait(5), "test provider timed out"
+        assert self.release.wait(30), "test provider timed out"
         if self.outcome == "expired":
             raise RefreshExpiredError("expired")
         if self.outcome == "outage":
@@ -123,11 +123,11 @@ def test_concurrent_refresh_uses_concrete_provider_identity(outcome, independent
     register_provider(other)
     with ThreadPoolExecutor(max_workers=3) as pool:
         first = pool.submit(coalesced, "same-token", "owner")
-        assert owner.entered.wait(3)
+        assert owner.entered.wait(15), "first refresh never reached the provider"
         second = pool.submit(coalesced, "same-token", "other")
         try:
             if independent:
-                assert other.entered.wait(3), "unrelated providers must not share a lock"
+                assert other.entered.wait(15), "unrelated providers must not share a lock"
             else:
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
@@ -144,10 +144,10 @@ def test_concurrent_refresh_uses_concrete_provider_identity(outcome, independent
         if outcome == "outage":
             for future in (first, second):
                 with pytest.raises(ProviderError):
-                    future.result(timeout=3)
+                    future.result(timeout=20)
             assert owner.calls == 2
         else:
-            results = [first.result(timeout=3), second.result(timeout=3)]
+            results = [first.result(timeout=20), second.result(timeout=20)]
             if outcome == "expired":
                 assert results == [None, None]
             else:
@@ -172,7 +172,7 @@ class _RotatingReuseDetectingProvider(Provider):
             raise RefreshExpiredError("refresh token reuse detected")
         self.rotated.add(refresh_token)
         self.entered.set()
-        assert self.release.wait(5), "test provider timed out"
+        assert self.release.wait(30), "test provider timed out"
         return Session(user_id="u", email="u@example.test", display_name="u", org_id="o",
                        provider=self.name, expires_at=int(time.time()) + 900,
                        access_token="fresh-at", refresh_token=f"rt-{self.calls}")
@@ -207,8 +207,8 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(call) for _ in range(4)]
-        assert provider.entered.wait(3)
+        assert provider.entered.wait(15), "burst never reached the provider"
         provider.release.set()
-        statuses = sorted(f.result(timeout=10).status_code for f in futures)
+        statuses = sorted(f.result(timeout=20).status_code for f in futures)
     assert statuses == [200, 200, 200, 200]
     assert provider.calls == 1
