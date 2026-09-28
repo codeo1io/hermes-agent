@@ -708,6 +708,14 @@ class ResponseStore:
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
         self._max_size = max_size
+        # One connection shared by every method: serialize multi-statement
+        # sequences (put's evict pass, get's LRU touch) so an off-loop caller
+        # can never interleave statements on the same sqlite connection.
+        self._lock = threading.Lock()
+        # Set under _lock by close(): readers past that point degrade to
+        # "not available" (same answer as an LRU-evicted entry) instead of
+        # raising sqlite ProgrammingError; writers still fail loud.
+        self._closed = False
         if db_path is None:
             db_path = ":memory:"
             with suppress(Exception):
@@ -744,64 +752,80 @@ class ResponseStore:
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
-        row = self._conn.execute(
-            "SELECT data FROM responses WHERE response_id = ?", (response_id,)).fetchone()
-        if row is None:
-            return None
-        self._conn.execute(
-            "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
-            (time.time(), response_id))
-        self._conn.commit()
-        try:
-            return json.loads(row[0])
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Corrupted JSON in response store for id=%s, evicting entry", response_id)
-            self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
+        with self._lock:
+            if self._closed:
+                return None
+            row = self._conn.execute(
+                "SELECT data FROM responses WHERE response_id = ?", (response_id,)).fetchone()
+            if row is None:
+                return None
+            self._conn.execute(
+                "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
+                (time.time(), response_id))
             self._conn.commit()
-            return None
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Corrupted JSON in response store for id=%s, evicting entry", response_id)
+                self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
+                self._conn.commit()
+                return None
 
     def put(self, response_id: str, data: Dict[str, Any]) -> None:
         """Store a response, evicting the oldest if at capacity."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
-            (response_id, json.dumps(data, default=str), time.time()))
-        count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
-        if count > self._max_size:
-            evict_ids = [row[0] for row in self._conn.execute(
-                "SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?",
-                (count - self._max_size,)).fetchall()]
-            if evict_ids:
-                placeholders = ",".join("?" for _ in evict_ids)
-                # Conversation mappings pointing at evicted responses go too.
-                self._conn.execute(f"DELETE FROM conversations WHERE response_id IN ({placeholders})", evict_ids)
-                self._conn.execute(f"DELETE FROM responses WHERE response_id IN ({placeholders})", evict_ids)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
+                (response_id, json.dumps(data, default=str), time.time()))
+            count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
+            if count > self._max_size:
+                evict_ids = [row[0] for row in self._conn.execute(
+                    "SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?",
+                    (count - self._max_size,)).fetchall()]
+                if evict_ids:
+                    placeholders = ",".join("?" for _ in evict_ids)
+                    # Conversation mappings pointing at evicted responses go too.
+                    self._conn.execute(f"DELETE FROM conversations WHERE response_id IN ({placeholders})", evict_ids)
+                    self._conn.execute(f"DELETE FROM responses WHERE response_id IN ({placeholders})", evict_ids)
+            self._conn.commit()
 
     def delete(self, response_id: str) -> bool:
         """Remove a response (and conversation mappings to it). True if found and deleted."""
-        self._conn.execute("DELETE FROM conversations WHERE response_id = ?", (response_id,))
-        cursor = self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
-        self._conn.commit()
-        return cursor.rowcount > 0
+        with self._lock:
+            self._conn.execute("DELETE FROM conversations WHERE response_id = ?", (response_id,))
+            cursor = self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
+            self._conn.commit()
+            return cursor.rowcount > 0
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
-        row = self._conn.execute("SELECT response_id FROM conversations WHERE name = ?", (name,)).fetchone()
-        return row[0] if row else None
+        with self._lock:
+            if self._closed:
+                return None
+            row = self._conn.execute("SELECT response_id FROM conversations WHERE name = ?", (name,)).fetchone()
+            return row[0] if row else None
 
     def set_conversation(self, name: str, response_id: str) -> None:
         """Map a conversation name to its latest response_id."""
-        self._conn.execute("INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)", (name, response_id))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)", (name, response_id))
+            self._conn.commit()
 
     def close(self) -> None:
-        """Close the database connection."""
-        with suppress(Exception):
-            self._conn.close()
+        """Close the connection. Later reads degrade to empty (None/0) so a
+        straggler reader during shutdown sees "not available", not an error;
+        writes on a closed store still raise."""
+        with self._lock:
+            self._closed = True
+            with suppress(Exception):
+                self._conn.close()
 
     def __len__(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
-        return row[0] if row else 0
+        with self._lock:
+            if self._closed:
+                return 0
+            row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
+            return row[0] if row else 0
 
 
 _CORS_HEADERS = {
