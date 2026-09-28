@@ -1,0 +1,8 @@
+{"step":1,"ts":"2026-09-30T17:26:52Z","summary":"network confirmed; upstream=NousResearch/hermes-agent (public, pushed 17:22Z today); ROADMAP port-history read","touched":["ROADMAP.md"]}
+{"step":2,"ts":"2026-10-01T00:35:12Z","summary":"Identified upstream NousResearch/hermes-agent; cloned shallow to /tmp; 1072-commit delta since fork HEAD 2026-09-28","touched":["/tmp/research-9116/upstream-hermes"]}
+{"step":3,"ts":"2026-10-01T00:42:03Z","summary":"Family analysis: cron routed-fire 12x, tui_gateway 17x, update 14x, checkpoints 7x, mcp secret-scope 3x, message_uid 4x, telemetry v5, i18n #126296","touched":[]}
+{"step":4,"ts":"2026-10-01T00:47:41Z","summary":"Fork-presence greps: message_uid/gpt-6.1-sol/sonnet-5.5/git-2.55/busy-queue/decision-data all ABSENT; MCP 2026-07-28 spec CURRENT (mcp==2.2.0 ahead of upstream 2.0.0)","touched":[]}
+{"step":5,"ts":"2026-10-01T00:52:18Z","summary":"PyPI freshness sweep: openai 2.24->3.22, anthropic 0.87->1.9, acp 0.9->0.12.1, ty 0.0.21->0.84, websockets 15->17; upstream shares the lags","touched":[]}
+{"step":6,"ts":"2026-10-01T00:55:29Z","summary":"User-needs evidence: 4304 issues since Sep 14; top pain = cron import failures #122222, kanban row loss #119003, desktop duplicate/vanishing turns, Windows update pain","touched":[]}
+{"step":7,"ts":"2026-10-01T00:58:47Z","summary":"Wrote 12 evidence-backed candidates to spool findings md","touched":["/home/agent/.hermes/conductor-delegate-spool-infra-deploy/delegate/9116af96ceee4aeea8807084026f17f8-candidates.md"]}
+{"step":8,"ts":"2026-10-01T00:59:33Z","summary":"Phase result JSON written to authoritative channel","touched":["/home/agent/.hermes/conductor-delegate-spool-infra-deploy/delegate/9116af96ceee4aeea8807084026f17f8.json"]}
