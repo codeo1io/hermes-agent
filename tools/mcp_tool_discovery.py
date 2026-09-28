@@ -280,9 +280,37 @@ def _get_connected_server_for_call(server_name: str) -> Optional[_core.MCPServer
     elif server is not None and server.session is None and server._is_recycled_stdio():
         _request_lazy_reconnect(server_name, server)
     else:
-        return server
+        return _stale_ready_gate(server)
     with _core._lock:
-        return _core._servers.get(key)
+        return _stale_ready_gate(_core._servers.get(key))
+
+
+def _stale_ready_gate(server: Optional[_core.MCPServerTask]) -> Optional[_core.MCPServerTask]:
+    """Hold back a server whose reconnect has begun but whose teardown has not caught up.
+
+    A keepalive/session-expiry reconnect deliberately clears ``_ready`` before
+    the old transport is torn down — and every production reconnect path sets
+    ``_reconnect_event`` when it does. Treat ONLY that combination as an
+    in-progress reconnect even if ``session`` still references the stale
+    ClientSession object: waiting here keeps callers out of the stale-session
+    window instead of generating a second ClosedResourceError (3fdf12c920).
+    A server whose ``_ready`` is merely unset with no reconnect signaled is
+    pre-lifecycle state (freshly constructed, or a test double publishing a
+    session directly) — pass it through to the caller's own handling."""
+    if server is None:
+        return None
+    ready = getattr(server, "_ready", None)
+    if ready is None or not hasattr(ready, "is_set") or ready.is_set():
+        return server
+    if getattr(server, "session", None) is None:
+        return server
+    reconnect = getattr(server, "_reconnect_event", None)
+    if reconnect is None or not hasattr(reconnect, "is_set") or not reconnect.is_set():
+        return server
+    from tools import mcp_tool_loop as _loop
+    if _loop._wait_for_server_session_ready(server, old_session=server.session, timeout=5.0):
+        return server
+    return None
 
 
 async def _discover_and_register_server(name: str, config: dict) -> List[str]:
