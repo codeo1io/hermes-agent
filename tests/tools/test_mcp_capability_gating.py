@@ -110,6 +110,7 @@ class TestKeepaliveProbe:
 
     async def test_keepalive_uses_ping_for_prompt_only_server(self):
         task = MCPServerTask("test")
+        task._config = {"url": "https://example.test/mcp"}
         task.initialize_result = _caps(prompts=SimpleNamespace())
         task.session = SimpleNamespace(
             list_tools=AsyncMock(),
@@ -126,6 +127,7 @@ class TestKeepaliveProbe:
     async def test_keepalive_uses_ping_legacy_fallback(self):
         """No captured capabilities → still pings (no spurious list_tools)."""
         task = MCPServerTask("test")
+        task._config = {"url": "https://example.test/mcp"}
         assert task.initialize_result is None
         task.session = SimpleNamespace(
             list_tools=AsyncMock(),
@@ -166,7 +168,7 @@ class TestKeepaliveInterval:
     async def _captured_interval(self, config):
         """Run one keepalive cycle and capture the ``asyncio.wait`` timeout."""
         task = MCPServerTask("test")
-        task._config = config
+        task._config = {"url": "https://example.test/mcp", **config}
         task.session = SimpleNamespace(send_ping=AsyncMock())
         captured = {}
         real_wait = asyncio.wait
