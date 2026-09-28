@@ -1,0 +1,5 @@
+{"step":1,"ts":"2026-09-30T08:31:02Z","summary":"prioritize: init, artifacts present","touched":[".conductor/progress/7d23860b90224105a257731479f57f1a.ndjson"]}
+{"step":2,"ts":"2026-09-30T08:34:18Z","summary":"probes: upstream git OK(rc=0), succfam +176/0 3 files present, cronfam 12c/48f/~1.5k lines, roadmap tool not in-tree, 9 sites re-verified","touched":["/tmp/research-4938049a/cronfam.json","/tmp/research-4938049a/succfam.json"]}
+{"step":3,"ts":"2026-09-30T08:34:18Z","summary":"scored 10 items (weights I.35 R.20 E.20 D.10 S.15); top: rm-029 3.90, rm-033/rm-034 3.80","touched":[]}
+{"step":4,"ts":"2026-09-30T08:34:18Z","summary":"selected batch cycle-1 rm-029+rm-033+rm-034; wrote batch-selection.md with briefs+gates+deferrals","touched":["delegate/prioritize-7d23860b/batch-selection.md"]}
+{"step":5,"ts":"2026-09-30T08:34:40Z","summary":"phase_result JSON written+validated; tracked tree clean","touched":["delegate/7d23860b90224105a257731479f57f1a.json"]}
