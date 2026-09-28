@@ -51,17 +51,20 @@ function readText(relativePath: string): string {
 
 function parseVersion(version: string): [number, number, number] {
   const [major = 0, minor = 0, patch = 0] = version.split('-')[0].split('.').map(Number)
+
   return [major, minor, patch]
 }
 
 function compare(left: string, right: string): number {
   const have = parseVersion(left)
   const want = parseVersion(right)
+
   for (let index = 0; index < have.length; index += 1) {
     if (have[index] !== want[index]) {
       return have[index] - want[index]
     }
   }
+
   return 0
 }
 
@@ -71,14 +74,18 @@ function satisfiesClause(version: string, clause: string): boolean {
     /^(?:\^|>=|<=|>|<|=)?\d+(?:\.\d+){0,2}$/,
     `unsupported semver clause: ${clause}`
   )
+
   if (clause.startsWith('^')) {
     const bound = clause.slice(1)
+
     return parseVersion(version)[0] === parseVersion(bound)[0] && compare(version, bound) >= 0
   }
+
   const match = clause.match(/^(>=|<=|>|<|=)?(.+)$/)
   assert.ok(match)
   const [, operator = '=', bound] = match
   const result = compare(version, bound)
+
   return operator === '>='
     ? result >= 0
     : operator === '<='
@@ -93,6 +100,7 @@ function satisfiesClause(version: string, clause: string): boolean {
 function satisfiesRange(version: string, range: string): boolean {
   const alternatives = range.split('||').map(alternative => alternative.trim().split(/\s+/))
   alternatives.flat().forEach(clause => satisfiesClause(version, clause))
+
   return alternatives.some(clauses => clauses.every(clause => satisfiesClause(version, clause)))
 }
 
@@ -110,6 +118,7 @@ const lockfile = readJson<Lockfile>('package-lock.json')
 
 function engines(label: string): Engines {
   assert.ok(rootManifest.engines?.node && rootManifest.engines?.npm, `${label} must declare engines`)
+
   return rootManifest.engines
 }
 
@@ -117,11 +126,13 @@ const rootEngines = engines('root package.json')
 
 function managedNodeMajor(): number {
   const installSh = readText('scripts/install.sh')
+
   for (const line of installSh.split('\n')) {
     if (line.startsWith('NODE_VERSION=')) {
       return Number.parseInt(line.split('=')[1].trim().replace(/["']/g, ''), 10)
     }
   }
+
   assert.fail('install.sh does not define NODE_VERSION')
 }
 
@@ -132,6 +143,7 @@ describe('Engines are satisfiable', () => {
     const satisfying = Object.entries(STOCK_NPM_BY_NODE_MAJOR).filter(([, npm]) =>
       satisfiesRange(npm, rootEngines.npm!)
     )
+
     assert.ok(satisfying.length > 0, `engines.npm is ${rootEngines.npm}, which no shipping Node bundles`)
   })
 
@@ -197,21 +209,27 @@ describe('Declared floors clear the locked tree', () => {
 
   test('every engines arm floor clears every locked dependency', () => {
     const lockedRanges = new Map<string, string>()
+
     for (const [pkgPath, meta] of Object.entries(lockfile.packages ?? {})) {
       const nodeRange = meta?.engines?.node
+
       if (typeof nodeRange === 'string' && nodeRange.trim() !== '' && nodeRange.trim() !== '*') {
         lockedRanges.set(nodeRange, pkgPath)
       }
     }
+
     const violations: Array<[string, string, string]> = []
+
     for (const arm of rootEngines.node!.split('||')) {
       const floor = arm.trim().replace(/^(\^|>=|=)/, '')
+
       for (const [depRange, example] of lockedRanges) {
         if (!satisfiesRange(floor, normalizeRange(depRange))) {
           violations.push([floor, depRange, example])
         }
       }
     }
+
     assert.deepEqual(violations, [])
   })
 
@@ -221,9 +239,11 @@ describe('Declared floors clear the locked tree', () => {
     // Node that npm then rejects.
     const installSh = readText('scripts/install.sh')
     const installPs1 = readText('scripts/install.ps1')
+
     for (const arm of rootEngines.node!.split('||')) {
       const trimmed = arm.trim()
       const [major, minor] = parseVersion(trimmed.replace(/^(\^|>=|=)/, ''))
+
       if (trimmed.startsWith('^') && minor > 0) {
         const shGate = `[ "$major" -eq ${major} ] && [ "$minor" -ge ${minor} ]`
         const ps1Gate = `if ($v.Major -eq ${major}) { return ($v.Minor -ge ${minor}) }`
