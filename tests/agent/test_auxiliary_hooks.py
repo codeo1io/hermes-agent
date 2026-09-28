@@ -70,3 +70,62 @@ def test_raising_subscriber_does_not_break_the_auxiliary_call(manager, aux_clien
     response = call_llm(task="compression", messages=[{"role": "user", "content": "summarize"}])
 
     assert response is aux_client.chat.completions.create.return_value
+
+
+def test_post_payload_nested_usage_mirrors_top_level(manager, aux_client):
+    """``post["usage"]`` and ``post["response"]["usage"]`` are ONE contract.
+
+    The nested mirror used to read ``payload["usage"]`` while the dict passed to
+    ``payload.update`` was still being built — so the mirror was always ``None``
+    while the top level carried the summary. Observers keyed on either copy must
+    see the same normalized usage.
+    """
+    fired = []
+    manager.register_hook("post_auxiliary_call", lambda **kw: fired.append(kw))
+
+    call_llm(task="title_generation", messages=[{"role": "user", "content": "hello"}])
+
+    post = fired[0]
+    assert post["usage"]["input_tokens"] == 10 and post["usage"]["output_tokens"] == 5
+    assert post["response"]["usage"] == post["usage"]
+
+
+def test_usage_summary_reads_dict_responses_like_attribute_responses():
+    """Relay paths hand back plain dicts; attribute clients hand back objects.
+
+    ``_usage_summary`` must read ``usage`` off either shape, or every dict
+    response silently reports no usage while the attribute twin reports it.
+    """
+    from agent.auxiliary_hooks import _usage_summary
+
+    attrs = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5))
+    as_dict = {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+    kwargs = {"provider": "openrouter", "api_mode": "chat_completions"}
+
+    assert _usage_summary(as_dict, **kwargs) == _usage_summary(attrs, **kwargs)
+
+
+def test_string_input_is_one_message_not_a_char_count(manager):
+    """A bare-string ``input`` (Responses API) is ONE message everywhere.
+
+    ``__init__``'s ``message_count`` used ``len()`` on the raw value — for a
+    string that reports characters — while ``pre()`` reported ZERO messages and
+    zero chars for the same request. Both must agree: one message, its chars.
+    """
+    from agent.auxiliary_hooks import _AuxCallHooks
+
+    fired = []
+    manager.register_hook("pre_auxiliary_call", lambda **kw: fired.append(kw))
+
+    hooks = _AuxCallHooks(
+        aux_task="vision_caption", metadata={}, client=None,
+        kwargs={"input": "hello world"}, provider="openai", model="mock-model",
+        api_mode="responses", streaming=False,
+    )
+    assert hooks.base["message_count"] == 1
+
+    hooks.pre()
+    pre = fired[0]
+    assert pre["message_count"] == 1
+    assert pre["request_messages"] == ["hello world"]
+    assert pre["request_char_count"] == 11 and pre["approx_input_tokens"] == 2

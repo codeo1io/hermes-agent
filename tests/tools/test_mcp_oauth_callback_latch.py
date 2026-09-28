@@ -25,15 +25,23 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _get(port: int, path: str) -> int:
-    conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    try:
-        conn.request("GET", path)
-        resp = conn.getresponse()
-        resp.read()
-        return resp.status
-    finally:
-        conn.close()
+def _get(port: int, path: str, _retries: int = 20) -> int:
+    for attempt in range(_retries):
+        conn = HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            conn.request("GET", path)
+            resp = conn.getresponse()
+            resp.read()
+            return resp.status
+        except ConnectionResetError:
+            # The listener socket can accept (kernel backlog) a hair before the
+            # server thread is ready and reset the first request; retry briefly.
+            if attempt == _retries - 1:
+                raise
+            threading.Event().wait(0.05)
+        finally:
+            conn.close()
+    raise AssertionError("unreachable")
 
 
 def _wait_listening(port: int) -> None:
