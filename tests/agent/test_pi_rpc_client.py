@@ -463,10 +463,16 @@ def test_question_timeout_auto_answers(fake_pi, clean_registry, monkeypatch):
 
 # ---------------------------------------------------------------- provider
 
-def test_pi_rpc_provider_resolves_without_acp_env(monkeypatch):
+def test_pi_rpc_provider_resolves_without_acp_env(monkeypatch, tmp_path):
     from hermes_cli.runtime_provider import resolve_runtime_provider
     monkeypatch.delenv("HERMES_COPILOT_ACP_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_COPILOT_ACP_ARGS", raising=False)
+    # Resolution must not depend on ACP env — nor on pi being installed on PATH
+    # (CI hosts have no pi). Point the explicit override at any executable stub.
+    stub = tmp_path / "pi-stub"
+    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.chmod(0o755)
+    monkeypatch.setenv("HERMES_PI_BIN", str(stub))
     r = resolve_runtime_provider(requested="pi-rpc")
     assert r is not None
 

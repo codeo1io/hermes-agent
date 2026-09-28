@@ -169,12 +169,30 @@ class MCPServerHealthMixin:
     async def _keepalive_probe(self) -> None:
         """Exercise the session; raise on a genuine connection failure. ``ping`` first (cheap,
         OPTIONAL); on -32601 latch ``_ping_unsupported`` (reset per transport connection) and fall
-        back to ``list_tools`` when the server advertises tools, else the -32601 propagates."""
+        back to ``list_tools`` when the server advertises tools, else the -32601 propagates.
+
+        Keepalives are client-initiated RPCs too. Normal tools/resources/prompts are serialized
+        through ``_rpc_lock`` because overlapping requests on one MCP transport can wedge or close
+        the underlying anyio stream (#17003, 3fdf12c920). If a user RPC is already in flight,
+        that RPC is itself the stronger liveness signal, so defer this keepalive cycle instead.
+        """
+        if self._rpc_lock.locked():
+            logger.debug("MCP server '%s': skipping keepalive while an RPC is in flight", self.name)
+            return
+        async with self._rpc_lock:
+            await self._keepalive_probe_locked()
+
+    async def _keepalive_probe_locked(self) -> None:
+        """The probe body; caller holds ``_rpc_lock``."""
+        session = self.session
+        if session is None:
+            raise RuntimeError("MCP session disappeared before keepalive probe")
+
         async def list_tools():
-            await asyncio.wait_for(self.session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+            await asyncio.wait_for(session.list_tools(), timeout=_KEEPALIVE_RPC_TIMEOUT)
         if not self._ping_unsupported:
             try:
-                await asyncio.wait_for(self.session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
+                await asyncio.wait_for(session.send_ping(), timeout=_KEEPALIVE_RPC_TIMEOUT)
                 return
             except Exception as exc:
                 if _is_method_not_found_error(exc):
