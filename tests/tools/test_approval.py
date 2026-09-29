@@ -2270,3 +2270,55 @@ class TestLifecycleGuardLaunchctlParity:
             "launchctl print system/com.apple.WindowServer",
         ):
             assert contains_gateway_lifecycle_command(cmd) is False, cmd
+
+
+class TestShellVariableAssignmentExpansion:
+    """Assignments spelled before a command build the destructive words that run later.
+
+    ``F=-delete; find . $F`` runs ``find . -delete`` but kept every literal flag out of
+    the source text the approval gate scans, so it auto-approved (regression probes from
+    the 2026-09 assessment; ``$(...)`` substitutions were already simulated — the
+    assignment form was the missing sibling). Behavior contract: the gate evaluates a
+    variable-substituted projection of the command, not just its literal bytes.
+    """
+
+    @pytest.mark.parametrize("command,expected_key", [
+        ("F=-delete; find . $F", "find -delete"),
+        ("R=rm; find . -type f | xargs $R", "xargs with rm"),
+        ("D=-delete find $D /", "find -delete"),
+        ("F=-delete; find . \"${F}\"", "find -delete"),
+        ("F=-delete; find . \"$F\"", "find -delete"),
+        ("DEL=-delete; find /tmp -name '*.log' $DEL", "find -delete"),
+    ])
+    def test_variable_built_destructive_words_require_approval(self, command, expected_key):
+        dangerous, key, _ = detect_dangerous_command(command)
+        assert dangerous, command
+        assert key == expected_key, (command, key)
+
+    def test_variable_built_rm_command_requires_approval(self):
+        # Substituting R=rm/F=-rf yields `rm -rf <path>`; which rm rule fires depends on the
+        # operand, so the contract is "an rm deletion approval", not one specific pattern.
+        for command in ("R=rm; F=-rf; $R $F /tmp/x", "R=rm; F=-rf; $R $F /"):
+            dangerous, key, _ = detect_dangerous_command(command)
+            assert dangerous, command
+            assert "delete" in key, (command, key)
+
+    @pytest.mark.parametrize("command", [
+        # Safe values substituted stay safe: the projection must not invent danger.
+        "NAME=notes.md; cat $NAME",
+        "DIR=/tmp; ls $DIR",
+        "MSG=hello; echo \"$MSG\"",
+        # Single quotes are literal to the shell: `find . '$F'` passes the bytes `$F`
+        # to find verbatim, which is a usage error, never an expansion.
+        "F=-delete; find . '$F'",
+        # Assignments in argument position are data, not shell variables.
+        "grep F=-delete notes.txt",
+        # No assignment, no expansion, unchanged behavior.
+        "find . -name '*.log'",
+    ])
+    def test_safe_variants_stay_unprompted(self, command):
+        assert detect_dangerous_command(command) == (False, None, None), command
+
+    def test_literal_spelling_still_flagged_after_change(self):
+        assert detect_dangerous_command("find /tmp -delete")[1] == "find -delete"
+        assert detect_dangerous_command("find . -type f | xargs rm")[1] == "xargs with rm"
