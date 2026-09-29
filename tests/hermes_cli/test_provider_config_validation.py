@@ -77,6 +77,22 @@ class TestNormalizeCustomProviderEntry:
         assert result["catalog_provider"] == "deepseek"
         assert not [r for r in caplog.records if "unknown config keys" in r.message.lower()]
 
+    def test_enabled_is_a_known_key(self, caplog):
+        """``enabled`` is load-bearing config — ``is_provider_enabled`` reads it to hide a
+        provider from pickers and the resolver — so normalizing a config that uses it must not
+        warn "unknown config keys ignored" (#127727). Contract between the two: a key the
+        normalizer accepts is exactly one the enabled-check still consults."""
+        from hermes_cli.config_providers import is_provider_enabled
+
+        entry = {"base_url": "https://api.example.com/v1", "key_env": "GW_KEY", "enabled": False}
+        with caplog.at_level(logging.WARNING):
+            result = _normalize_custom_provider_entry(entry, provider_key="gw")
+        assert result is not None
+        assert not [r for r in caplog.records if "unknown config keys" in r.message.lower()]
+        assert is_provider_enabled({"enabled": False}) is False
+        assert is_provider_enabled({"enabled": True}) is True
+        assert is_provider_enabled({}) is True
+
 
     def test_numeric_yaml_name_and_key_become_strings(self):
         """Unquoted YAML `name: 2070` / key 2070 must not be dropped as non-str."""
