@@ -136,6 +136,53 @@ _ASSET_TEMPLATES = {
 }
 
 
+# sha256 pins for the llama.cpp release assets Hermes downloads and executes at runtime —
+# third-party binaries get the same pinning policy as any other dependency. Digests are the
+# release's own published digests (GitHub release assets[].digest); fetch them with
+#   gh api repos/ggml-org/llama.cpp/releases/tags/<tag> --jq '.assets[]."name digest"'
+# Bump this map together with config_defaults.local_runtime.tag — a tag with no entry here
+# installs unpinned (trust-on-first-download), and the pin-map contract test fails the bump.
+RUNTIME_ASSET_SHA256: dict[str, dict[str, str]] = {
+    "b10964": {
+        "cudart-llama-bin-win-cuda-13.3-x64.zip":
+            "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
+        "cudart-llama-bin-win-cuda-13.4-arm64.zip":
+            "642dcde8805b3e3165ca710a5443b3b4044b27d96bd3ee3132473988c9bcb774",
+        "llama-b10964-bin-macos-arm64.tar.gz":
+            "033c845c1df9bf945ff37bb193238b40910b2244be3e1e637b2ceb5878f1a6f5",
+        "llama-b10964-bin-macos-x64.tar.gz":
+            "03430a394d0a169a5e6d8f01c09f48cf58eb026af6fc95940a4a528e2e50cf38",
+        "llama-b10964-bin-ubuntu-arm64.tar.gz":
+            "5f0e9c95d970892e43380f82ebcab960edfd20a1cd0f7abffa13b29fdb924949",
+        "llama-b10964-bin-ubuntu-rocm-10.0-x64.tar.gz":
+            "162b9645b84fa0a354767ccb5379b1457701134dc1ff4cd8b0ecc5ccec248455",
+        "llama-b10964-bin-ubuntu-vulkan-arm64.tar.gz":
+            "f7864baa0edf5a059fb42c5efb5aceb96075aa1f41e6c3142b71ca69286cb0bb",
+        "llama-b10964-bin-ubuntu-vulkan-x64.tar.gz":
+            "55d1e58e14c11eedea090bf088fdeefbfe7b4b09ee03bf6dba9834651769afcf",
+        "llama-b10964-bin-ubuntu-x64.tar.gz":
+            "9abf88aea48a55d0f80edb1ee20220b186848cca0b4e919d71518cfd7ca67443",
+        "llama-b10964-bin-win-cpu-arm64.zip":
+            "4b6a004b076eea47c318bea35cf1db2ff2bf037738b04645646ae8d7c3159478",
+        "llama-b10964-bin-win-cpu-x64.zip":
+            "917f39c076402c421224824607397af20f53625a60defc20e8dd22446bf4c5d7",
+        "llama-b10964-bin-win-cuda-13.3-x64.zip":
+            "cd63ae76ad78a1540aa0f30f6c6284bab14c146d99a58f70c3f0a38cb9c62351",
+        "llama-b10964-bin-win-cuda-13.4-arm64.zip":
+            "93590d8c74fb2e729b06160b524ee06ebed2aed5619b8c8fbd52a431e453831c",
+        "llama-b10964-bin-win-rocm-10.0-x64.zip":
+            "1f75c2a7cc64b7d4ee30f1e5a65ebec3681e4a67be788fc7251abc898f98748e",
+        "llama-b10964-bin-win-vulkan-x64.zip":
+            "1ee3ad952f4ba71f438bd6d7bebef19e1c7af04adcaa35d08b4ddabb27d4c642",
+    },
+}
+
+
+def pinned_assets(tag: str) -> dict[str, str]:
+    """Shipped sha256 pins for ``tag``'s release assets (empty for unpinned tags)."""
+    return RUNTIME_ASSET_SHA256.get(tag, {})
+
+
 def resolve_assets(tag: str, backend: str, os_name: str | None = None,
                    arch: str | None = None) -> AssetPlan:
     """Compose the asset list for (tag, backend, platform). Raises BinaryResolutionError for pairs
@@ -277,7 +324,9 @@ def ensure_runtime_installed(tag: str, backend: str,
                              expected_sha256: dict[str, str] | None = None,
                              progress: "Callable[[str, int, int, str], None] | None" = None) -> Path:
     """Idempotent: resolve, download, verify, extract, version-check; returns the install dir.
-    ``expected_sha256`` pins hashes per asset; without pins the computed hash is recorded in the
+    ``expected_sha256`` pins hashes per asset and OVERRIDES the shipped pin map
+    (``RUNTIME_ASSET_SHA256``); by default the map pins the release Hermes ships, so no
+    call site can forget. For a tag with no pins at all the computed hash is recorded in the
     manifest (trust on first download, verified on every reinstall). ``progress(stage, done,
     total, label)`` ticks through download/extract/verify."""
     plan = resolve_assets(tag, backend)
@@ -296,6 +345,7 @@ def ensure_runtime_installed(tag: str, backend: str,
         tick = progress
         return lambda d, t: tick(stage, d, t, label)
 
+    pins = expected_sha256 if expected_sha256 is not None else pinned_assets(tag)
     recorded: dict[str, str] = {}
     n_assets = len(plan.assets)
     for i, asset in enumerate(plan.assets, 1):
@@ -307,7 +357,7 @@ def ensure_runtime_installed(tag: str, backend: str,
         if progress is not None:
             progress("verify", 0, 0, label)
         digest = _sha256(archive)
-        expected = (expected_sha256 or {}).get(asset)
+        expected = pins.get(asset)
         if expected and digest != expected:
             archive.unlink(missing_ok=True)
             raise BinaryResolutionError(

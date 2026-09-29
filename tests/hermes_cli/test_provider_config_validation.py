@@ -77,6 +77,37 @@ class TestNormalizeCustomProviderEntry:
         assert result["catalog_provider"] == "deepseek"
         assert not [r for r in caplog.records if "unknown config keys" in r.message.lower()]
 
+    def test_enabled_is_a_known_key(self, caplog):
+        """``enabled`` is load-bearing config — ``is_provider_enabled`` reads it to hide a
+        provider from pickers and the resolver — so normalizing a config that uses it must not
+        warn "unknown config keys ignored" (#127727). Contract between the two: a key the
+        normalizer accepts is exactly one the enabled-check still consults."""
+        from hermes_cli.config_providers import is_provider_enabled
+
+        entry = {"base_url": "https://api.example.com/v1", "key_env": "GW_KEY", "enabled": False}
+        with caplog.at_level(logging.WARNING):
+            result = _normalize_custom_provider_entry(entry, provider_key="gw")
+        assert result is not None
+        assert not [r for r in caplog.records if "unknown config keys" in r.message.lower()]
+        assert is_provider_enabled({"enabled": False}) is False
+        assert is_provider_enabled({"enabled": True}) is True
+        assert is_provider_enabled({}) is True
+
+    def test_disabled_provider_never_reaches_discovery(self):
+        """rm-028-cycle guard contract (#127727): a provider the user disabled with
+        ``enabled: false`` is dropped before normalization, so it can never surface in the
+        custom-provider list that discovery and pickers iterate."""
+        from hermes_cli.config_providers import providers_dict_to_custom_providers
+
+        providers = {
+            "off": {"base_url": "https://off.example.com/v1", "key_env": "OFF_KEY", "enabled": False},
+            "on": {"base_url": "https://on.example.com/v1", "key_env": "ON_KEY", "enabled": True},
+        }
+        custom = providers_dict_to_custom_providers(providers)
+        names = {entry.get("provider_key") or entry.get("name") for entry in custom}
+        assert "off" not in names
+        assert "on" in names
+
 
     def test_numeric_yaml_name_and_key_become_strings(self):
         """Unquoted YAML `name: 2070` / key 2070 must not be dropped as non-str."""
