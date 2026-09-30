@@ -1,24 +1,16 @@
-"""Tests for None guard on browser_tool LLM response content.
+"""Tests for the None guard on browser_tool LLM response content.
 
-browser_tool.py's browser_vision accesses response.choices[0].message.content
-which can be None when reasoning-only models (DeepSeek-R1, QwQ) return
-content=None. These tests verify the site is guarded.
+browser_vision() renders its result payload through
+``tools.browser_tool._vision_analysis_or_fallback``: reasoning-only models
+(DeepSeek-R1, QwQ) legally return ``content=None``, and the payload must always
+carry a usable analysis string instead of crashing on ``None.strip()``.
 
 The old _extract_relevant_content snapshot-summarization path was removed —
 oversized snapshots now always truncate-and-store (no auxiliary LLM), so its
 None-guard tests are gone with it.
 """
 
-import types
-
-
-# ── helpers ────────────────────────────────────────────────────────────────
-
-def _make_response(content):
-    """Build a minimal OpenAI-compatible ChatCompletion response stub."""
-    message = types.SimpleNamespace(content=content)
-    choice = types.SimpleNamespace(message=message)
-    return types.SimpleNamespace(choices=[choice])
+from tools.browser_tool import _vision_analysis_or_fallback
 
 
 # ── browser_vision ─────────────────────────────────────────────────────────
@@ -27,43 +19,19 @@ class TestBrowserVisionNoneGuard:
     """tools/browser_tool.py — browser_vision() analysis extraction"""
 
     def test_none_content_produces_fallback_message(self):
-        """When LLM returns None content, analysis should have a fallback message."""
-        response = _make_response(None)
-        analysis = (response.choices[0].message.content or "").strip()
-        fallback = analysis or "Vision analysis returned no content."
+        """When the vision model returns None content, the payload carries a
+        fixed fallback message."""
+        assert _vision_analysis_or_fallback(None) == "Vision analysis returned no content."
 
-        assert fallback == "Vision analysis returned no content."
+    def test_whitespace_only_content_falls_back(self):
+        """Blank analysis is indistinguishable from None for the caller."""
+        assert _vision_analysis_or_fallback("   \n\t ") == "Vision analysis returned no content."
 
-    def test_normal_content_passes_through(self):
-        """Normal analysis content should pass through unchanged."""
-        response = _make_response("  The page shows a login form.  ")
-        analysis = (response.choices[0].message.content or "").strip()
-        fallback = analysis or "Vision analysis returned no content."
+    def test_empty_string_falls_back(self):
+        assert _vision_analysis_or_fallback("") == "Vision analysis returned no content."
 
-        assert fallback == "The page shows a login form."
-
-
-# ── source line verification ──────────────────────────────────────────────
-
-class TestBrowserSourceLinesAreGuarded:
-    """Verify the actual source file has the fix applied."""
-
-    @staticmethod
-    def _read_file() -> str:
-        import os
-        base = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        with open(os.path.join(base, "tools", "browser_tool.py")) as f:
-            return f.read()
-
-    def test_browser_vision_guarded(self):
-        src = self._read_file()
-        assert "analysis = response.choices[0].message.content\n" not in src, (
-            "browser_tool.py browser_vision still has unguarded "
-            ".content assignment — apply None guard"
+    def test_normal_content_passes_through_stripped(self):
+        """Normal analysis content passes through, whitespace-stripped."""
+        assert _vision_analysis_or_fallback("  The page shows a login form.  ") == (
+            "The page shows a login form."
         )
-
-    def test_snapshot_llm_summarization_removed(self):
-        """Snapshots must not route through an auxiliary LLM anymore."""
-        src = self._read_file()
-        assert "_extract_relevant_content" not in src
-        assert "_get_extraction_model" not in src

@@ -35,6 +35,7 @@ from urllib.parse import quote, unquote, urlparse
 from urllib.request import url2pathname
 
 from agent.message_content import flatten_message_text
+from plugins.child_spawn_env import minimal_child_env
 from agent.memory_provider import MemoryProvider, spawn_context_thread
 from agent.secret_scope import get_secret
 from agent.skill_commands import extract_user_instruction_from_skill_message
@@ -952,6 +953,17 @@ def _local_listener_suffix(endpoint: str) -> str:
     return f" The listener on {host}:{port} is {_describe_local_port_listener(host, port)}."
 
 
+def _server_child_env() -> Dict[str, str]:
+    """Env for the spawned openviking-server: allowlisted base, PYTHONPATH never included.
+
+    PYTHONPATH must never ride along: the Desktop backend puts the Hermes venv on it,
+    which would shadow openviking-server's own site-packages (and on Windows lock the
+    Hermes venv's .pyd files, breaking `hermes update`) (#78153). The allowlist also
+    keeps the server from inheriting the gateway's Tier-1 secrets — it is long-lived.
+    """
+    return minimal_child_env()
+
+
 def _start_local_openviking_server(endpoint: str) -> tuple[str, str]:
     try:
         host, port = _local_openviking_bind(endpoint)
@@ -971,15 +983,9 @@ def _start_local_openviking_server(endpoint: str) -> tuple[str, str]:
     log_path = get_hermes_home() / _OPENVIKING_SERVER_LOG_RELATIVE_PATH
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        # Strip PYTHONPATH: the Desktop backend puts the Hermes venv on it, which
-        # would shadow openviking-server's own site-packages (and on Windows lock
-        # the Hermes venv's .pyd files, breaking `hermes update`).
-        # Do not let the server child inherit this process's PYTHONPATH. If inherited, openviking-server
-        # would import aiohttp and friends from the Hermes venv instead of its own (its venv's site-packages
-        # are shadowed because PYTHONPATH precedes them) — and on Windows the loaded DLLs then lock the
-        # Hermes venv, aborting `hermes update` with access-denied on .pyd files. (#78153)
-        child_env = os.environ.copy()
-        child_env.pop("PYTHONPATH", None)
+        # Minimal env (see _server_child_env): PYTHONPATH must not shadow the server's own
+        # site-packages / lock the Hermes venv's .pyd files on Windows (#78153).
+        child_env = _server_child_env()
         with log_path.open("ab") as log_file:
             subprocess.Popen([server_cmd, "--host", host, "--port", str(port)], stdout=log_file, stderr=log_file,
                              stdin=subprocess.DEVNULL, start_new_session=True, env=child_env)

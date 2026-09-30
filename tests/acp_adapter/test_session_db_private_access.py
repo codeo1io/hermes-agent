@@ -7,7 +7,6 @@ Verifies that:
 3. update_session_meta updates the correct columns atomically.
 """
 
-import ast
 import json
 import tempfile
 from pathlib import Path
@@ -77,55 +76,44 @@ class TestUpdateSessionMeta:
 
 
 # ---------------------------------------------------------------------------
-# AST check: session.py must not access db._lock or db._conn
+# _persist routes writes through the public API
 # ---------------------------------------------------------------------------
 
-class TestNoPrviateDBAccess:
-    """_persist() in session.py must not access db._lock or db._conn."""
+class TestPersistRoutesThroughPublicAPI:
+    """``_persist()`` must write through ``SessionDB``'s public surface: spying on
+    the public ``update_session_meta`` while a seeded session saves proves the
+    routing (and that no private ``db._lock``/``db._conn`` path is needed to
+    persist) without inspecting the module's source shape."""
 
-    def test_no_db_private_lock_access(self):
-        with open("acp_adapter/session.py", encoding="utf-8") as f:
-            source = f.read()
+    def test_persist_writes_via_update_session_meta(self, tmp_path, monkeypatch):
+        db = _tmp_db(tmp_path)
+        manager = SessionManager(agent_factory=_mock_agent, db=db)
 
-        tree = ast.parse(source)
+        state = manager.create_session(cwd="/original")
+        state.history.append({"role": "user", "content": "hi"})
+        manager.save_session(state.session_id)  # first save creates the row
 
-        violations = []
-        for node in ast.walk(tree):
-            # Looking for: db._lock  or  db._conn
-            if isinstance(node, ast.Attribute):
-                if isinstance(node.value, ast.Name) and node.value.id == "db":
-                    if node.attr in ("_lock", "_conn"):
-                        violations.append(
-                            f"db.{node.attr} at line {node.lineno}"
-                        )
+        calls = []
+        original = type(db).update_session_meta
 
-        assert violations == [], (
-            "session.py accesses private SessionDB internals: "
-            + ", ".join(violations)
-            + " — use db.update_session_meta() instead"
+        def spied(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return original(self, *args, **kwargs)
+
+        # Patch on the class: _persist resolves its handle via _get_db(), which is
+        # not guaranteed to be the same SessionDB instance we constructed with.
+        monkeypatch.setattr(type(db), "update_session_meta", spied)
+        state.cwd = "/updated"
+        manager.save_session(state.session_id)  # existing row → update path
+
+        assert calls, (
+            "_persist must route writes through SessionDB.update_session_meta — "
+            "direct db._conn.execute() would bypass the write serialization "
+            "that method owns"
         )
-
-    def test_persist_calls_update_session_meta(self):
-        """AST check: _persist must call db.update_session_meta()."""
-        with open("acp_adapter/session.py", encoding="utf-8") as f:
-            tree = ast.parse(f.read())
-
-        found = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "_persist":
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Call):
-                        func = child.func
-                        if isinstance(func, ast.Attribute):
-                            if func.attr == "update_session_meta":
-                                found = True
-                                break
-                break
-
-        assert found, (
-            "_persist() must call db.update_session_meta() "
-            "instead of db._conn.execute() directly"
-        )
+        row = db.get_session(state.session_id)
+        assert row is not None
+        assert json.loads(row["model_config"])["cwd"] == "/updated"
 
 
 # ---------------------------------------------------------------------------
