@@ -83,36 +83,29 @@ class TestAsyncClientLazyCreation:
         assert instances[0] is not instances[1]
 
 
-class TestSourceLineVerification:
-    """Verify the actual source has the lazy pattern applied."""
+class TestInitSummarizerLeavesAsyncClientLazy:
+    """The real ``_init_summarizer`` custom-endpoint branch must leave the async
+    client unconstructed: binding an ``AsyncOpenAI`` in ``__init__`` would pin it to
+    whatever event loop is current, breaking the later ``asyncio.run()`` calls that
+    ``process_directory()`` makes per directory."""
 
-    @staticmethod
-    def _read_file() -> str:
-        import os
-        base = os.path.dirname(os.path.dirname(__file__))
-        with open(os.path.join(base, "trajectory_compressor.py")) as f:
-            return f.read()
+    def test_custom_endpoint_init_constructs_no_async_client(self, monkeypatch):
+        from trajectory_compressor import CompressionConfig, TrajectoryCompressor
 
-    def test_no_eager_async_openai_in_init(self):
-        """__init__ should NOT create AsyncOpenAI eagerly."""
-        src = self._read_file()
-        # The old pattern: self.async_client = AsyncOpenAI(...) in _init_summarizer
-        # should not exist — only self.async_client = None
-        lines = src.split("\n")
-        for i, line in enumerate(lines, 1):
-            if "self.async_client = AsyncOpenAI(" in line and "_get_async_client" not in lines[max(0,i-3):i+1]:
-                # Allow it inside _get_async_client method
-                # Check if we're inside _get_async_client by looking at context
-                context = "\n".join(lines[max(0,i-20):i+1])
-                if "_get_async_client" not in context:
-                    pytest.fail(
-                        f"Line {i}: AsyncOpenAI created eagerly outside _get_async_client()"
-                    )
+        monkeypatch.setenv("TEST_API_KEY", "sk-test")
+        with patch.object(TrajectoryCompressor, "_init_tokenizer"), \
+                patch("openai.OpenAI") as sync_ctor, \
+                patch("openai.AsyncOpenAI") as async_ctor:
+            comp = TrajectoryCompressor(CompressionConfig(
+                summarization_model="test-model",
+                base_url="https://api.example.com/v1",
+                api_key_env="TEST_API_KEY",
+            ))
 
-    def test_get_async_client_method_exists(self):
-        """_get_async_client method should exist."""
-        src = self._read_file()
-        assert "def _get_async_client(self)" in src
+        async_ctor.assert_not_called()  # lazy — only _get_async_client() constructs it
+        sync_ctor.assert_called_once()
+        assert comp.async_client is None
+        assert comp._async_client_api_key == "sk-test"
 
 
 @pytest.mark.asyncio

@@ -64,6 +64,19 @@ _AGENT_PASSTHROUGH = (
 )
 
 
+def worker_api_key(api_key):
+    """``api_key`` normalized for a multiprocessing worker config.
+
+    A zero-arg callable is an Azure Foundry Entra ID bearer provider
+    (``agent.azure_identity_adapter``), which is not safely picklable across the Pool
+    boundary — it becomes ``None`` and each worker rebuilds its own provider via
+    ``resolve_runtime_provider()`` from ``model.auth_mode`` in config.yaml.
+    """
+    if callable(api_key) and not isinstance(api_key, str):
+        return None
+    return api_key
+
+
 def _normalize_tool_stats(tool_stats: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
     """All possible tools with zero defaults (consistent HF schema), plus any unexpected tools."""
     normalized = {
@@ -618,17 +631,15 @@ class BatchRunner:
         ``resolve_runtime_provider()`` from ``model.auth_mode`` in config.yaml
         (azure-identity caches in-process, so each worker gets its own short-lived cache).
         """
-        if callable(self.api_key) and not isinstance(self.api_key, str):
-            worker_api_key = None
+        worker_key = worker_api_key(self.api_key)
+        if worker_key is None and callable(self.api_key):
             print(
                 "ℹ️  Detected Entra ID bearer provider — workers will rebuild "
                 "credentials from config.yaml in each process.",
                 flush=True,
             )
-        else:
-            worker_api_key = self.api_key
         config = {key: getattr(self, key) for key in _AGENT_PASSTHROUGH}
-        config["api_key"] = worker_api_key
+        config["api_key"] = worker_key
         for key in ("distribution", "model", "max_iterations", "verbose", "log_prefix_chars"):
             config[key] = getattr(self, key)
         return config

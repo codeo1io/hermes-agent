@@ -91,6 +91,16 @@ def _credential_pool_notice(provider: str) -> tuple:
     return next_at is not None, lines
 
 
+def _runtime_credentials_missing(api_key) -> bool:
+    """True when the resolved ``api_key`` carries no credential a request can use.
+
+    A callable (Azure Entra ID bearer provider) always counts as present: the OpenAI
+    SDK invokes it per request, so string validation / placeholder substitution must
+    not run — stringifying it to ``"no-key-required"`` is what produced Azure 401s.
+    """
+    return not callable(api_key) and not (isinstance(api_key, str) and api_key)
+
+
 def _keyless_custom_base(base_url) -> bool:
     """Custom/local endpoints (llama.cpp, ollama, vLLM) often need no auth; only a
     non-OpenRouter base_url qualifies."""
@@ -270,7 +280,7 @@ class CLIAgentSetupMixin:
             list(runtime.get("args") or []))
         # A callable api_key is a bearer-token provider (Azure Entra ID): the OpenAI SDK
         # invokes it per request, so skip string validation / placeholder substitution.
-        if not callable(api_key) and not (isinstance(api_key, str) and api_key):
+        if _runtime_credentials_missing(api_key):
             if _keyless_custom_base(base_url):
                 # Placeholder key so the SDK doesn't reject the keyless local endpoint.
                 api_key = "no-key-required"
