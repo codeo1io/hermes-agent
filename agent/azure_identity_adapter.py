@@ -285,6 +285,20 @@ def is_token_provider(value: Any) -> bool:
     return callable(value) and not isinstance(value, str)
 
 
+def display_api_key(value) -> str:
+    """User-facing rendering of an ``api_key`` that may be an Entra token provider.
+
+    Never invokes a callable value (that would mint a token mid-render): a provider
+    renders as the static label so ``hermes config`` output cannot leak or vary
+    turn-to-turn. Keys ≤ 12 chars render as unset rather than echoing a stub value.
+    """
+    if is_token_provider(value):
+        return "Microsoft Entra ID"
+    if isinstance(value, str) and len(value) > 12:
+        return f"{value[:8]}...{value[-4:]}"
+    return "Not set!"
+
+
 def materialize_bearer_for_http(value: Any) -> str:
     """Mint a fresh Bearer JWT for a manual HTTP request (calls the provider once). Only for sites building
     ``Authorization`` outside the OpenAI SDK; the Anthropic SDK can't take a callable, so
