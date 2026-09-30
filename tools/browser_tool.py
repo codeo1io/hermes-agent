@@ -1221,6 +1221,16 @@ def _capture_vision_screenshot(effective_task_id: str, annotate: bool, screensho
     return result, screenshot_path, None
 
 
+def _vision_analysis_or_fallback(analysis: Optional[str]) -> str:
+    """Analysis text for the browser_vision result payload.
+
+    Reasoning-only vision models (DeepSeek-R1, QwQ) legally return ``content=None``;
+    strip whitespace and fall back to a fixed message so the tool always hands the
+    caller a usable string instead of crashing on ``None.strip()``.
+    """
+    return (analysis or "").strip() or "Vision analysis returned no content."
+
+
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
     """Screenshot the current page for visual inspection. Native-vision models get the image
     attached to the conversation; otherwise the auxiliary vision model returns a text
@@ -1254,7 +1264,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
             return _vision._native_vision_result(screenshot_path, question, annotate, result, _lp_fallback_warning)
 
         analysis = _vision._analyze_screenshot_with_aux_llm(screenshot_path, question)
-        response_data = {"success": True, "analysis": analysis or "Vision analysis returned no content.",
+        response_data = {"success": True, "analysis": _vision_analysis_or_fallback(analysis),
                          "screenshot_path": str(screenshot_path)}
         _lp._copy_fallback_warning(response_data, result)
         if annotate and result.get("data", {}).get("annotations"):

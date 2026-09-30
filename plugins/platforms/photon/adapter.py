@@ -45,6 +45,7 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import compile_mention_patterns, strip_markdown
 from gateway.platforms.helpers import MessageDeduplicator, bounded_put, cancel_task
+from plugins.child_spawn_env import minimal_child_env
 from utils import atomic_json_write
 
 from .auth import load_project_credentials
@@ -467,6 +468,24 @@ def _guess_mime(path: str) -> Optional[str]:
 
 
 # -- Adapter -------------------------------------------------------------------
+
+def _sidecar_env(project_id: str, project_secret: str, port: int, bind: str, token: str) -> Dict[str, str]:
+    """Env for the sidecar node process: minimal base + the project wiring.
+
+    The sidecar is detached and outlives the gateway (stdin-EOF watch is the only
+    leash), so its env must be an allowlist — everything in os.environ is readable
+    back via /proc/<pid>/environ for the child's lifetime. See
+    plugins/child_spawn_env for the base.
+    """
+    env = minimal_child_env()
+    env.update({
+        "PHOTON_PROJECT_ID": project_id, "PHOTON_PROJECT_SECRET": project_secret,
+        "PHOTON_SIDECAR_PORT": str(port), "PHOTON_SIDECAR_BIND": bind,
+        "PHOTON_SIDECAR_TOKEN": token,
+        # Exit on stdin EOF so ANY gateway death (incl. SIGKILL) can't orphan it on the port.
+        "PHOTON_SIDECAR_WATCH_STDIN": "1"})
+    return env
+
 
 class PhotonAdapter(BasePlatformAdapter):
     """Bidirectional bridge to Photon Spectrum via the Node spectrum-ts sidecar."""
@@ -919,13 +938,9 @@ class PhotonAdapter(BasePlatformAdapter):
     async def _start_sidecar(self) -> None:
         await self._ensure_sidecar_deps()
         await self._reap_stale_sidecar()
-        env = os.environ.copy()
-        env.update({
-            "PHOTON_PROJECT_ID": self._project_id, "PHOTON_PROJECT_SECRET": self._project_secret,
-            "PHOTON_SIDECAR_PORT": str(self._sidecar_port), "PHOTON_SIDECAR_BIND": self._sidecar_bind,
-            "PHOTON_SIDECAR_TOKEN": self._sidecar_token,
-            # Exit on stdin EOF so ANY gateway death (incl. SIGKILL) can't orphan it on the port.
-            "PHOTON_SIDECAR_WATCH_STDIN": "1"})
+        env = _sidecar_env(
+            self._project_id, self._project_secret,
+            self._sidecar_port, self._sidecar_bind, self._sidecar_token)
         from hermes_cli._subprocess_compat import windows_hide_flags  # hide child console on Windows
         await self._apply_spectrum_patch(windows_hide_flags())
         try:
