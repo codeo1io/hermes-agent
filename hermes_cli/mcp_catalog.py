@@ -393,11 +393,19 @@ def _install_root() -> Path:
     return root
 
 
-def _run_bootstrap(cwd: Path, commands: List[str]) -> None:
-    """Execute bootstrap commands in *cwd*. Raise CatalogError on first failure."""
+BOOTSTRAP_DEFAULT_TIMEOUT_S = 600.0
+"""Per-command wall-clock budget for catalog bootstrap steps (10 min). A hung
+installer must fail loudly, not block `hermes mcp install` forever."""
+
+
+def _run_bootstrap(cwd: Path, commands: List[str], timeout: float = BOOTSTRAP_DEFAULT_TIMEOUT_S) -> None:
+    """Execute bootstrap commands in *cwd*. Raise CatalogError on first failure or timeout."""
     for cmd in commands:
         _say(f"  $ {cmd}", Colors.DIM)
-        rc = subprocess.run(cmd, cwd=str(cwd), shell=True).returncode
+        try:
+            rc = subprocess.run(cmd, cwd=str(cwd), shell=True, timeout=timeout).returncode
+        except subprocess.TimeoutExpired:
+            raise CatalogError(f"bootstrap step timed out after {timeout:.0f}s: {cmd}") from None
         if rc != 0:
             raise CatalogError(f"bootstrap step failed (exit {rc}): {cmd}")
 

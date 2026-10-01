@@ -978,8 +978,9 @@ def _start_local_openviking_server(endpoint: str) -> tuple[str, str]:
         # would import aiohttp and friends from the Hermes venv instead of its own (its venv's site-packages
         # are shadowed because PYTHONPATH precedes them) — and on Windows the loaded DLLs then lock the
         # Hermes venv, aborting `hermes update` with access-denied on .pyd files. (#78153)
-        child_env = os.environ.copy()
-        child_env.pop("PYTHONPATH", None)
+        from tools.environments.local import hermes_subprocess_env  # scrubbed base: no gateway-profile secrets
+        child_env = hermes_subprocess_env()
+        child_env.pop("PYTHONPATH", None)  # strip even non-Hermes PYTHONPATH from the Desktop backend
         with log_path.open("ab") as log_file:
             subprocess.Popen([server_cmd, "--host", host, "--port", str(port)], stdout=log_file, stderr=log_file,
                              stdin=subprocess.DEVNULL, start_new_session=True, env=child_env)

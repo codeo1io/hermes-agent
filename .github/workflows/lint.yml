@@ -217,6 +217,14 @@ jobs:
           done
           python scripts/check_profile_scope_patterns.py --base "origin/${{ github.base_ref }}" --head origin/pr-head
 
+      # Gate: tree-wide P05 ratchet (child-spawn env inheritance). The per-PR advisory above only
+      # sees added lines, so a pre-existing os.environ.copy() spawn can never surface there. This
+      # step scans every tracked product file and fails when the count EXCEEDS the budget: fix one
+      # site, lower the budget by one. tests/evals/scripts/skills are excluded (fixtures and
+      # offline tooling own their env). Budget 9 as of 2026-10-01 (8 hermes_cli + raft adapter).
+      - name: Profile-scope P05 ratchet (tree-wide, blocking)
+        run: python scripts/check_profile_scope_patterns.py --all --pattern P05 --exclude tests evals scripts skills --max-findings 9
+
       # Advisory: dropped public names / methods / test defs vs the PR base, printed into the log.
       # A refactor that silently removes a public symbol breaks plugins that import it; the Sep 2026
       # decomposition opened with 1,703 such drops that reviewers had to find by hand.
