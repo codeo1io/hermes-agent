@@ -306,3 +306,8 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# Conductor per-attempt progress breadcrumbs are scratch, not product state.
+# Existing 22 tracked files predate this policy; untrack at the commit gate:
+#   git rm -r --cached .conductor/progress/
+.conductor/progress/
