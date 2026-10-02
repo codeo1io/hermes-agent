@@ -33,6 +33,9 @@ MAX_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_DIMENSION = 8_000
 COMMENT_LOOKUP_ATTEMPTS = 6
 COMMENT_LOOKUP_DELAY_SECONDS = 2
+# Every GitHub API call here carries a timeout: a stalled connection would
+# otherwise hang the publisher past its own CI job timeout.
+API_TIMEOUT_SECONDS = 30
 _SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.png$")
 _ATTACHMENT_URL = re.compile(r"^!\[[^\]\r\n]*\]\((https://github\.com/user-attachments/assets/[0-9a-fA-F-]+)\)$")
 
@@ -65,7 +68,7 @@ def _api_request(
             "User-Agent": "hermes-e2e-evidence-publisher",
         },
     )
-    with urllib.request.urlopen(request) as response:
+    with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
         parsed = json.loads(response.read())
     if not isinstance(parsed, dict):
         raise ValueError(f"Expected an object from {url}")
@@ -215,7 +218,7 @@ def _wait_for_review_comment(token: str, source_repo: str, pr_number: str) -> di
         },
     )
     for attempt in range(COMMENT_LOOKUP_ATTEMPTS):
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT_SECONDS) as response:
             comment = _find_review_comment(json.loads(response.read()))
         if comment is not None:
             return comment
