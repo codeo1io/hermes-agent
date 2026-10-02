@@ -32,6 +32,7 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
+import { wslOpenUrlArgv } from './wsl-open-url'
 import {
   destroyKeepaliveAgents,
   downloadAgentFor,
