@@ -176,8 +176,12 @@ async def test_websocket_loop_reconnects_when_read_goes_silent(monkeypatch, capl
 
     task = asyncio.create_task(adapter._websocket_loop())
     try:
+        # Wait for the recovered socket to re-publish "connected", not just for the
+        # second connect() to be called: the handshake signs a kind-22242 event, so on a
+        # loaded runner the state lands well after the socket exists. Stopping at
+        # len(sockets) >= 2 raced the handshake and read 'retrying' twice instead.
         deadline = time.monotonic() + 5.0
-        while len(sockets) < 2 and time.monotonic() < deadline:
+        while (len(sockets) < 2 or "connected" not in states) and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
     finally:
         release_parked_receive.set()
@@ -281,7 +285,14 @@ async def test_websocket_loop_backs_off_and_publishes_retrying_on_clean_relay_cl
 
     task = asyncio.create_task(adapter._websocket_loop())
     try:
-        await asyncio.sleep(0.3)
+        # The handshake signs a kind-22242 event before the read loop can see the clean
+        # close, so "retrying" is published only after that CPU work finishes — far
+        # past a fixed 0.3s window on a loaded runner. Wait for the state itself, then
+        # verify the backoff (>=1s) has not produced a second connect by then.
+        deadline = time.monotonic() + 5.0
+        while states != ["retrying"] and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert len(sockets) == 1, f"a reconnect before the backoff elapsed would mean no backoff, got {len(sockets)} connects"
     finally:
         task.cancel()
         try:
@@ -289,7 +300,7 @@ async def test_websocket_loop_backs_off_and_publishes_retrying_on_clean_relay_cl
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
-    assert len(sockets) == 1, f"clean close must back off before reconnecting, got {len(sockets)} connects in 0.3s"
+    assert len(sockets) == 1, f"clean close must back off before reconnecting, got {len(sockets)} connects"
     assert sockets[0].exited, "the closed connection was not exited before backing off"
     assert states == ["retrying"], f"a clean relay close must publish retrying, got {states}"
 
