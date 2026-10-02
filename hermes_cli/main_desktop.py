@@ -836,7 +836,14 @@ def _desktop_macos_local_codesign(app: Path, *, desktop_dir: Path, identity: str
             if p.suffix in {".framework", ".app"}:
                 bundles.add(p)
     for bundle in sorted(bundles, key=lambda p: len(p.parts), reverse=True):
-        ent = ent_inherit if bundle.suffix == ".app" and "Helper" in bundle.name else None
+        # The NOTARIZED Templates/Juno frameworks land unsigned (notarization ticket only), so a Helper
+        # without the JIT entitlement would abort on launch. Non-app bundles (frameworks, XPC services)
+        # get no entitlements; app bundles with Helpers get the inherit set (#85532).
+        ent = (
+            ent_inherit
+            if bundle.suffix == ".app" and "Helper" in bundle.name
+            else None
+        )
         sign_path(bundle, entitlements=ent, identifier=_desktop_macos_bundle_id(bundle))
 
     # 3) The main bundle, with the app's own entitlements.
