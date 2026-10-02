@@ -1,9 +1,9 @@
-"""Behavior contracts for the GPT-6 Sol/Luna registration (the 5.6 tier successors).
+"""Behavior contracts for the GPT-6 Sol/Terra/Luna registration (the 5.6 tier successors).
 
 Invariant tests only, no list snapshots. They pin what would silently regress:
 
 1. `/model gpt` still lands on the flagship: Astra outranks Sol, Sol outranks
-   Luna, and every GPT-6 tier outranks its 5.6 predecessor.
+   Terra/Luna, and every GPT-6 tier outranks its 5.6 predecessor.
 2. The Codex OAuth `-900k` opt-in machinery treats the gpt-6 tiers exactly like
    the 5.6 ones: picker synthesis, dated snapshots, wire stripping, the
    compaction auto-raise on the base slug (and not on the variant), and the
@@ -43,3 +43,7 @@ def test_gpt6_tiers_share_the_codex_900k_contract_with_56():
             _compression_threshold_for_model("gpt-5.6-sol", provider="openai-codex")
         assert _compression_threshold_for_model(f"{base}-900k", provider="openai-codex") is None
         assert codex_supported_efforts(f"openai/{base}") == CODEX_GPT56_EFFORTS
+
+
+
+

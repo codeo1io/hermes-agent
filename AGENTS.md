@@ -286,6 +286,16 @@ families: `hermes_state.py` (21), `gateway/run.py` (15), `tools/mcp_tool.py` (15
   spawns (`served_profile_child_env`, never `os.environ.copy()`). Fail-closed reads exist only after
   `set_multiplex_active(True)`. Prove live with two homes (A→B→A) under multiplex, not one temp
   `HERMES_HOME`. Advisory lint: `scripts/check_profile_scope_patterns.py`.
+- **Machine facts and resource lookup go through `hermes_platform`.** `hermes_platform.host` is the
+  one answer for OS family, native architecture (`IsWow64Process2` → `platform.machine()`; never
+  `PROCESSOR_ARCHITECTURE` alone, it reads AMD64 under x64-on-ARM64 emulation), CPU identity, and
+  WSL/container/Termux. Facts are cached per process and take **no environment-variable input**, so
+  a hardware recognizer (`host/products.py`) cannot be set from a shell. Distinguish the control
+  host (where this Python runs) from the terminal execution target (SSH/container) and the Desktop
+  client (another machine): `host.*` answers only the first. A new bare `shutil.which` or a
+  hand-written known-path table outside `hermes_platform/` fails
+  `tests/test_managed_runtime_resolution.py` unless allowlisted with a reason; resolvers land in
+  `hermes_platform/resolver/`. Lookup never installs, downloads, or starts anything.
 - **Argparse alias dispatch:** `add_parser("list", aliases=["ls"])` sets `dest` to the literal
   the user typed (`"ls"`). Dispatch must accept both (caught PTY-testing `hermes webhook ls`).
 - **Don't wire in dead code without E2E validation.** Unshipped code was dead for a reason;
@@ -313,6 +323,14 @@ May 2026). PyPI: `>=floor,<next_major` (`"httpx>=0.28.1,<1"`); pre-1.0: `<0.(min
 pip: `==exact`. A bare `>=X.Y.Z` is rejected by CI and reviewers. Run `uv lock` after
 changing `pyproject.toml`. Reference: #2810 (bounds), #9801 (SHA pinning + audit CI).
 
+The `[tool.uv] exclude-newer = "14 days"` quarantine covers **Hermes's own dependencies only**
+(`uv lock`/`sync`, `hermes update`, `tools.lazy_deps.ensure` extras — `install policy "core"`).
+Plugin `python_dependencies` install under the plugin's own policy (`install_specs(policy="plugin")`
+→ `uv --no-config`, still inside the core constraints file); Teknium's ruling: "plugins dont have to
+abide by our 14 day rule … Only hermes' dependencies themselves have to." We recommend (not require)
+plugin authors adopt their own quarantine — the developer guide and `plugin-catalog/README.md` carry
+that guidance.
+
 ## Commits, Merges, PRs
 
 - **Squash merges from stale branches silently revert recent fixes.** Before squash-merging,
@@ -328,7 +346,8 @@ changing `pyproject.toml`. Reference: #2810 (bounds), #9801 (SHA pinning + audit
 
 **ALWAYS use `scripts/run_tests.sh`**, never bare `pytest`. It enforces CI parity: credential
 vars unset, `TZ=UTC`, `LANG=C.UTF-8`, `HERMES_HOME` → temp dir, and per-file subprocess
-isolation via `scripts/run_tests_parallel.py` (no xdist; workers scale with CPU count) so
+isolation via `scripts/run_tests_parallel.py` (no xdist; workers scale with CPU count,
+bounded by the ambient cgroup's CPU/pids limits — fail-open when absent) so
 module-level dicts/ContextVars cannot leak between files. Direct `pytest` on a big machine
 with API keys set has caused repeated "works locally, fails in CI" incidents (and the reverse).
 

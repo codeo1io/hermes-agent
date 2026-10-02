@@ -352,8 +352,6 @@ def test_bare_value_flag_keeps_its_value(tmp_path: Path) -> None:
     )
 
 
-
-
 def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     """A positional path arg still overrides discovery (not routed to pytest)."""
     probe_dir = _make_probe_dir(tmp_path)
@@ -420,8 +418,6 @@ def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
     assert "retry output" in proc.stdout
 
 
-
-
 # ---------------------------------------------------------------------------
 # Zero-collection is not a pass; node ids are translated, not dropped.
 #
@@ -438,8 +434,6 @@ def test_zero_collected_across_run_fails_and_says_so(tmp_path: Path) -> None:
     assert proc.returncode == 1, proc.stdout
     assert "NO TESTS RAN" in proc.stdout
     assert "NOT a pass" in proc.stdout
-
-
 
 
 def test_node_id_selector_runs_the_named_test(tmp_path: Path) -> None:

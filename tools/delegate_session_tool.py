@@ -929,16 +929,21 @@ def delegate_session(
             model_arg = explicit_model or _pi_model_for_parent(parent_agent)
             if model_arg:
                 client_kwargs["args"] = ["--model", model_arg]
-        client = client_class(
-            persistent_session=True,
-            session_id=native_hint or handle,
-            session_name=f"Hermes {handle[:8]}",
-            acp_cwd=cwd,
-            question_answerer=_answer,
-            **client_kwargs,
-        )
-        if native_hint and hasattr(client, "native_session_id"):
-            client.native_session_id = native_hint
+        def _make_client(native_session_id: str):
+            created = client_class(
+                persistent_session=True,
+                session_id=native_session_id,
+                session_name=f"Hermes {handle[:8]}",
+                acp_cwd=cwd,
+                question_answerer=_answer,
+                **client_kwargs,
+            )
+            if native_session_id and hasattr(created, "native_session_id"):
+                created.native_session_id = native_session_id
+            return created
+
+        requested_native = native_hint or handle
+        client = _make_client(requested_native)
         try:
             state = client.start(timeout=min(30.0, effective_timeout))
         except Exception as exc:  # noqa: BLE001
@@ -950,9 +955,45 @@ def delegate_session(
                     backend_name,
                     exc_info=True,
                 )
-            return tool_error(
-                f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
-            )
+
+            # A durable Pi handle may outlive a native Pi RPC session that
+            # aborted mid-turn. Reopening the same native id can then wedge
+            # forever at the initial get_state handshake. Keep the Conductor
+            # binding/backend stable, but mint a fresh *native Pi* session and
+            # continue from the durable work-order/worktree. This is Pi
+            # recovery, never backend failover.
+            if backend_name == "pi" and native_hint:
+                recovery_native = (
+                    f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
+                )
+                logger.warning(
+                    "Pi native session %s failed bootstrap; retrying durable "
+                    "delegate handle %s with fresh native session %s: %s",
+                    native_hint,
+                    handle,
+                    recovery_native,
+                    _bounded(exc, 400),
+                )
+                client = _make_client(recovery_native)
+                try:
+                    state = client.start(timeout=min(30.0, effective_timeout))
+                except Exception as recovery_exc:  # noqa: BLE001
+                    try:
+                        client.close()
+                    except Exception:
+                        logger.debug(
+                            "Could not close failed Pi recovery delegate client",
+                            exc_info=True,
+                        )
+                    return tool_error(
+                        "Could not start pi delegate session after fresh-native "
+                        f"recovery: {_bounded(recovery_exc, 1000)} "
+                        f"(original: {_bounded(exc, 400)})"
+                    )
+            else:
+                return tool_error(
+                    f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
+                )
         native_id = str(state.get("sessionId") or handle)
         now = time.time()
         record: Dict[str, Any] = {
