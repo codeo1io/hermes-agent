@@ -780,7 +780,8 @@ class OpenAICompatRoutesMixin:
         ``route`` is the logical endpoint (``/v1/...`` and its ``/p/<profile>/v1/...`` alias are the same
         route), folded into the key because the store keeps the fingerprint only as the slot's value.
         """
-        from gateway.platforms.api_server import _error_response, _idem_cache, _make_request_fingerprint
+        from gateway.platforms.api_server import (
+            _IdempotencyKeyConflict, _error_response, _idem_cache, _make_request_fingerprint)
         idempotency_key = request.headers.get("Idempotency-Key")
         try:
             if idempotency_key:
@@ -791,6 +792,12 @@ class OpenAICompatRoutesMixin:
             else:
                 result, usage = await compute()
             return (result, usage), None
+        except _IdempotencyKeyConflict:
+            # Route parity with the durable /v1/runs lane (_replay_or_conflict): a reused
+            # key with a changed body is a typed 409, not a 500 and not a silent second run.
+            return None, _error_response(
+                "Idempotency-Key was already used with a different request payload",
+                409, code="idempotency_key_conflict")
         except Exception as e:
             logger.error("Error running agent for %s: %s", log_label, e, exc_info=True)
             message = "" if getattr(e, "_notification_presentation_suppressed", False) is True else f"Internal server error: {e}"

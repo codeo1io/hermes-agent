@@ -2414,3 +2414,72 @@ class TestHostedRoomRuns:
                 )
             assert rejected.status == 403
             create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_room_grant_can_follow_own_run_events_stream(
+        self, auth_adapter, monkeypatch
+    ):
+        """A status-permission grant that can GET its run must also open that run's SSE
+        events stream (``_room_permission_for`` maps /events to "status"). The events
+        handler authenticated with plain API-key ``_check_auth`` and 401'd room members
+        who could read the same run's status (assess 47a8f416 probe: GET run 200 /
+        GET events 401)."""
+        from gateway import hosted_rooms
+        from gateway.hosted_room_peer import decode_room_grant, issue_room_grant
+        from gateway.hosted_rooms import local_authority_gateway_id
+        from gateway.platforms import api_server_runs
+
+        grant = issue_room_grant(
+            auth_adapter._room_grant_secret(),
+            grant_id="grant-events",
+            room_id="room-events",
+            home_install_id="install-home",
+            authority_gateway_id="install-home",
+            authority_epoch=1,
+            member_id="member-reviewer",
+            target_install_id=local_authority_gateway_id(),
+            target_profile="default",
+            permissions=("status",),
+            issued_at=100,
+            ttl_seconds=300,
+            status_expires_at=1000,
+        )
+        claims = decode_room_grant(
+            auth_adapter._room_grant_secret(),
+            grant,
+            permission="status",
+            now=100,
+        )
+        hosted_rooms.reserve_peer_room(
+            hosted_rooms.default_db_path(),
+            claims=claims,
+            expires_at=1000,
+            now=100,
+        )
+        monkeypatch.setattr("gateway.platforms.api_server.time.time", lambda: 200)
+
+        run_id = "run-room-events"
+        headers = {"Authorization": f"HermesRoom {grant}"}
+        scope_request = MagicMock()
+        scope_request.headers = headers
+        scope_request.path = f"/v1/runs/{run_id}/events"
+        scope_request.method = "GET"
+        auth_adapter._run_owners[run_id] = auth_adapter._run_idempotency_scope(
+            scope_request
+        )
+        auth_adapter._run_statuses[run_id] = {"status": "completed", "input": "ping"}
+
+        q = asyncio.Queue()
+        await q.put(api_server_runs._run_event(run_id, "run.completed"))
+        await q.put(None)
+        auth_adapter._run_streams[run_id] = q
+
+        app = _create_runs_app(auth_adapter)
+        async with TestClient(TestServer(app)) as cli:
+            status = await cli.get(f"/v1/runs/{run_id}", headers=headers)
+            events = await cli.get(f"/v1/runs/{run_id}/events", headers=headers)
+            events_body = await events.text()
+
+        assert status.status == 200, "member can read the run — events must not be stricter"
+        assert events.status == 200
+        assert "run.completed" in events_body
