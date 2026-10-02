@@ -29,6 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 # secret; only an UNSCOPED read under multiplex (default-profile startup loop) falls back to the process
 # env, which is that profile's own value.
 from agent.secret_scope import is_multiplex_active as _is_multiplex_active
+from plugins.child_spawn_env import minimal_child_env
 from gateway.platforms._shared import (
     apply_yaml_bridge as _apply_yaml_bridge, get_scoped_secret as _shared_scoped_secret, profile_scoped as _profile_scoped,
     seed_extra_from_env as _seed_extra_from_env,
@@ -387,17 +388,28 @@ def _resolve_auth_tag(extra: Optional[dict] = None) -> str:
     return json.dumps(_nostr_auth.parse_auth_tag(raw, "Buzz auth tag"), separators=(",", ":"))
 
 
+def _buzz_cli_env(relay_url: str, private_key: str, auth_tag: str = "") -> Dict[str, str]:
+    """Env for the buzz CLI child: minimal base + this run's wiring.
+
+    The private key travels via env by design (never argv, never logs) — the base
+    is an allowlist so no OTHER Tier-1 secret rides along with it. A stale
+    BUZZ_AUTH_TAG in the operator's shell must not reach the child either: only
+    an explicit ``auth_tag`` argument sets it.
+    """
+    env = minimal_child_env()
+    env["BUZZ_RELAY_URL"] = relay_url
+    env["BUZZ_PRIVATE_KEY"] = private_key
+    if auth_tag:
+        env["BUZZ_AUTH_TAG"] = auth_tag
+    return env
+
+
 async def _exec_buzz(
     cli_path: str, args: List[str], *, relay_url: str, private_key: str, auth_tag: str = "",
     input_text: Optional[str] = None, timeout: float = _CLI_TIMEOUT,
 ) -> Tuple[int, str, str]:
     """Run the buzz CLI (argv, never a shell) -> ``(rc, stdout, stderr)``. Key travels via env only."""
-    env = os.environ.copy()
-    env["BUZZ_RELAY_URL"] = relay_url
-    env["BUZZ_PRIVATE_KEY"] = private_key
-    env.pop("BUZZ_AUTH_TAG", None)
-    if auth_tag:
-        env["BUZZ_AUTH_TAG"] = auth_tag
+    env = _buzz_cli_env(relay_url, private_key, auth_tag)
     proc = await asyncio.create_subprocess_exec(
         cli_path, *args, stdin=asyncio.subprocess.PIPE if input_text is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,

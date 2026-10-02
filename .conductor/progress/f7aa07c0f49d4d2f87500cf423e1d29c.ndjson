@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-30T23:30:56Z","summary":"read run5 receipt: rc=0 verdict=pass cmd==dispatch full_command","touched":["/tmp/fullval-5a770e75/run5.log"]}
+{"step":2,"ts":"2026-09-30T23:30:56Z","summary":"wrote phase_result JSON (scope=full outcome=passed digest verbatim)","touched":["delegate/f7aa07c0f49d4d2f87500cf423e1d29c.json"]}

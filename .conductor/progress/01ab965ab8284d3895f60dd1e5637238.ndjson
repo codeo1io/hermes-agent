@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-30T08:36:27Z","summary":"stewardship: state verified c4da06121c, 0 tracked drift, 16 batch surfaces present","touched":[".conductor/progress/01ab965ab8284d3895f60dd1e5637238.ndjson"]}
+{"step":2,"ts":"2026-09-30T08:37:34Z","summary":"stewardship_request declared: 4 units, 16 surfaces, 5 separate-pairs; JSON validated; 0 tracked drift","touched":["delegate/01ab965ab8284d3895f60dd1e5637238.json","delegate/stewardship-01ab965a/stewardship-request.md"]}

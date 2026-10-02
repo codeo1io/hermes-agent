@@ -384,11 +384,14 @@ def test_start_local_openviking_server_uses_endpoint_host_and_port(monkeypatch):
 
 
 def test_start_local_openviking_server_strips_pythonpath_from_child_env(monkeypatch):
-    """The spawned server must not inherit Hermes's PYTHONPATH (#78153).
+    """The spawned server gets a minimal env: no PYTHONPATH (#78153), no Hermes-side
+    vars, no Tier-1 secrets — only the resolution/TLS base.
 
-    Inheriting it makes openviking-server import packages from the Hermes
+    Inheriting PYTHONPATH makes openviking-server import packages from the Hermes
     venv instead of its own, and on Windows locks Hermes venv DLLs so the
-    venv cannot be rebuilt during `hermes update`.
+    venv cannot be rebuilt during `hermes update`. The server never reads
+    Hermes-side vars (HERMES_PROFILE et al.) — their earlier presence was
+    incidental full-env inheritance, not an input.
     """
     popen_calls = []
 
@@ -401,6 +404,7 @@ def test_start_local_openviking_server_strips_pythonpath_from_child_env(monkeypa
     monkeypatch.setattr(openviking_module.subprocess, "Popen", fake_popen)
     monkeypatch.setenv("PYTHONPATH", "/opt/hermes/.venv/Lib/site-packages")
     monkeypatch.setenv("HERMES_PROFILE", "test-profile")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-tier1")
 
     state, _message = openviking_module._start_local_openviking_server("http://127.0.0.1:1934")
 
@@ -409,7 +413,10 @@ def test_start_local_openviking_server_strips_pythonpath_from_child_env(monkeypa
     child_env = kwargs["env"]
     assert child_env is not None
     assert "PYTHONPATH" not in child_env
-    assert child_env.get("HERMES_PROFILE") == "test-profile"
+    assert "HERMES_PROFILE" not in child_env
+    assert "ANTHROPIC_API_KEY" not in child_env
+    # The server still resolves its own interpreter and tools.
+    assert "PATH" in child_env
 
 
 def test_start_local_openviking_server_does_not_spawn_when_port_already_open(monkeypatch):

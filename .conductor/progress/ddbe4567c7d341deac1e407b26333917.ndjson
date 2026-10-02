@@ -1,0 +1,5 @@
+{"step":1,"ts":"2026-09-30T10:38:48Z","summary":"run-4 verbatim full_command launched detached (run4.log/err)","touched":["/tmp/fullval-ddbe/run4.log"]}
+{"step":1,"ts":"2026-09-30T11:15:20Z","summary":"verified clean slate: no validator procs, no conductor refs, tree unchanged at c4da06121c","touched":[]}
+{"step":2,"ts":"2026-09-30T11:15:20Z","summary":"launched VERBATIM full_command detached (run-4, log+rc in /tmp/fullval-5a770e75/run4.*)","touched":["/tmp/fullval-5a770e75/run4.log","/tmp/fullval-5a770e75/run4.rc"]}
+{"step":3,"ts":"2026-09-30T11:15:20Z","summary":"ephemeral validation PR #108 branch conductor/ci-c16f790d9579 head c16f790d9579…","touched":[]}
+{"step":4,"ts":"2026-09-30T11:15:20Z","summary":"polled: no cancelled/failing checks; single Python tests lane started 11:38:16Z","touched":[]}

@@ -1,0 +1,6 @@
+{"step":1,"ts":"2026-09-30T23:45:30Z","summary":"review recon done: read full batch diff, artifacts, upstream port fidelity (byte-match fleet helper)","touched":["git diff HEAD","delegate/results/*.json"]}
+{"step":2,"ts":"2026-09-30T23:46:10Z","summary":"battery1 10 files 132p/0f rc=0 via run_tests.sh; acceptance greps rm-034/rm-029 hold","touched":["/tmp/review-21a1232b-battery1.log"]}
+{"step":3,"ts":"2026-09-30T23:52:00Z","summary":"proven-red x2: break browser guard -> 4f; disable successor credit -> 4f; both restored md5-identical","touched":["tools/browser_tool.py","hermes_cli/update_inventory.py"]}
+{"step":4,"ts":"2026-09-30T23:54:10Z","summary":"port fidelity vs upstream 57a22675e: fleet helper byte-exact; row_is_external@1941 dead; external rows not filtered from successor set","touched":["hermes_cli/update_cmd_fleet.py"]}
+{"step":5,"ts":"2026-09-30T23:56:30Z","summary":"compound phase artifacts absent everywhere (worktree+canonical+spool); roadmap ids rm-028..037 collide with canonical render items","touched":["ROADMAP.md","/work/projects/hermes-agent/ROADMAP.md"]}
+{"step":6,"ts":"2026-10-01T00:01:00Z","summary":"ruff clean (PLW1514-only config noted); acceptance greps hold; tree restored to batch state; verdict NEEDS_CHANGES 7 findings","touched":["delegate/21a1232bcf9949dc8e51c4b12b6b5640.json"]}

@@ -1,0 +1,6 @@
+{"step":1,"ts":"2026-09-30T10:35:37Z","summary":"found prior attempt run-3 detached validator: script rc=1 empty log, PR/refs already cleaned","touched":[]}
+{"step":2,"ts":"2026-09-30T10:35:37Z","summary":"ps: both live procs were run-3 wrapper+python (started 09:40:00); CI still in progress at poll time","touched":[]}
+{"step":3,"ts":"2026-09-30T10:35:37Z","summary":"polled PR107/CI until script exit; log truncated at deadline (rc=1, 0 bytes)","touched":[]}
+{"step":4,"ts":"2026-09-30T10:35:37Z","summary":"ground truth via gh api: CI run 36697663012 (pull_request, ci-4490561e5807) = completed/SUCCESS","touched":[]}
+{"step":5,"ts":"2026-09-30T10:35:37Z","summary":"jobs receipt: 26 jobs, 12 success (incl Python tests), 14 skip, 0 fail/cancel; Docker/Nix/sentinel SUCCESS","touched":[]}
+{"step":6,"ts":"2026-09-30T10:35:38Z","summary":"tree verified undrifted since run-3 push (HEAD c4da06121c + same 17M/5A)","touched":[]}

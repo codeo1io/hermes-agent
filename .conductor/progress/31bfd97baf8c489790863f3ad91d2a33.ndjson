@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-09-30T11:44:16Z","summary":"run4 rc=0 PASS (PR108 19p/0f); prev fold rejected on command-string rotation; scripts md5-identical","touched":["/tmp/fullval-5a770e75/run4.log"]}
+{"step":2,"ts":"2026-09-30T11:44:16Z","summary":"launched NEW-path full_command verbatim (run5, detached) — same code, fresh ephemeral PR","touched":["/tmp/fullval-5a770e75/run5.log"]}
