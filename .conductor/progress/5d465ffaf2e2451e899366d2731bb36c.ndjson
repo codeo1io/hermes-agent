@@ -1,0 +1,4 @@
+{"step":1,"ts":"2026-10-02T07:40:00Z","summary":"targeted_tests start: engine scope=none (repo tree clean; batch lives in /tmp/merge-b1); running validator + focused suites","touched":[]}
+{"step":2,"ts":"2026-10-02T08:05:00Z","summary":"CAUGHT merge regression: orphan-activity resolution dropped fork _run_child; restored fork HEAD wholesale, re-staged","touched":["/tmp/merge-b1/tests/tui_gateway/test_isolated_orphan_activity.py"]}
+{"step":3,"ts":"2026-10-02T08:10:00Z","summary":"3-way audit of all 15 resolved files: only 2 benign docstring residuals, 0 defs lost","touched":[]}
+{"step":4,"ts":"2026-10-02T08:15:00Z","summary":"Final focused run 15 files/302 passed/0 failed @4 workers; b1 patch refreshed; JSON emitted","touched":["delegate/f82ea1f49c4b49fd9e42403cd207eb65.b1-merge.patch","delegate/5d465ffaf2e2451e899366d2731bb36c.json"]}

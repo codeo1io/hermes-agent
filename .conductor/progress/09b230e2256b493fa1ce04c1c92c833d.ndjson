@@ -1,0 +1,2 @@
+{"step":1,"ts":"2026-10-02T08:00:00Z","summary":"full_tests start: running engine full_command verbatim (github_ci_validate.py --repo .)","touched":[]}
+{"step":2,"ts":"2026-10-02T08:10:00Z","summary":"full_command VERBATIM exit 0 'Validation command succeeded'; FAILURE row = stale deleted-workflow check (workflow: None), gh run list 6/6 success","touched":[]}
