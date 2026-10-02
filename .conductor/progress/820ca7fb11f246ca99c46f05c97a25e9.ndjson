@@ -1,0 +1,6 @@
+{"step":1,"ts":"2026-10-01T01:05:06Z","summary":"808a7d97 forensics: no artifact, provider-fail mid-assessment; continuing same hunt (8 FP classes rejected, wecom queue leak candidate)","touched":[".conductor/progress/820ca7fb11f246ca99c46f05c97a25e9.ndjson"]}
+{"step":2,"ts":"2026-10-01T01:11:28Z","summary":"Fresh-class sweep: ~20 classes grepped; TTS shell, yaml loader, sqlite locks, Electron flags all read","touched":[]}
+{"step":3,"ts":"2026-10-01T01:11:28Z","summary":"Queue/task lifecycle verified: wecom no idle eviction (send_queue.py:47-61), api_server has TTL reaper, yuanbao evicts","touched":["plugins/platforms/wecom/send_queue.py"]}
+{"step":4,"ts":"2026-10-01T01:11:28Z","summary":"FP purge: doc links 1922/1922 resolve (Docusaurus semantics), main.ts 18907L confirmed, whatsapp _message_queue dead, 7 CI urlopen no-timeout","touched":[]}
+{"step":5,"ts":"2026-10-01T01:11:28Z","summary":"Findings md written to delegate spool (4 findings + verified-clean + FP rationales)","touched":["conductor-delegate-spool-infra-deploy/delegate/820ca7fb11f246ca99c46f05c97a25e9.findings.md"]}
+{"step":6,"ts":"2026-10-01T01:11:28Z","summary":"phase_result JSON written + validated; tracked files untouched","touched":["conductor-delegate-spool-infra-deploy/delegate/820ca7fb11f246ca99c46f05c97a25e9.json"]}

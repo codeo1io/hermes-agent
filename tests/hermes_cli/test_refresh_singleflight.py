@@ -202,8 +202,11 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
 
     def call():
         # One TestClient per request: a shared jar would hand later requests the rotated RT.
-        with TestClient(gated_web_app, base_url="http://gw.example.test") as client:
-            return client.get("/api/auth/me", cookies=cookies)
+        # No `with` block: entering it would run the full web_server lifespan (session-db
+        # reconcile, gateway warm-up, hosted-room recovery) per request — seconds under a
+        # loaded runner — while the gate reads only the app.state flags the fixture sets.
+        client = TestClient(gated_web_app, base_url="http://gw.example.test")
+        return client.get("/api/auth/me", cookies=cookies)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(call) for _ in range(4)]
