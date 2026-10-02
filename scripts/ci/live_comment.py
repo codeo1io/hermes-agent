@@ -66,6 +66,10 @@ import zipfile
 from pathlib import Path
 
 API_BASE = "https://api.github.com"
+# Every GitHub API call here carries a timeout: a stalled connection would
+# otherwise hang the comment job past its own CI timeout (artifact downloads
+# keep a larger 60s budget at their call site).
+API_TIMEOUT_SECONDS = 30
 
 # Job names that are infrastructure (this script, the gate, the detector)
 # and should never appear in the review comment.
@@ -151,7 +155,7 @@ def _api_request(url: str, token: str) -> dict:
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "ci-live-comment",
     })
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:
         data: dict = json.loads(resp.read())
         return data
 
@@ -166,7 +170,7 @@ def _api_get_paginated(url: str, token: str, list_key: str | None = None) -> lis
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "ci-live-comment",
         })
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:
             data = json.loads(resp.read())
             link_header = resp.headers.get("Link", "")
 
@@ -330,7 +334,7 @@ def upsert_comment(
         "User-Agent": "ci-live-comment",
     })
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:
             result = json.loads(resp.read())
             return result.get("id")
     except urllib.error.HTTPError as e:
