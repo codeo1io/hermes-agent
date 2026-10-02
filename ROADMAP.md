@@ -32,6 +32,72 @@
 - acceptance: Docs regenerated/updated; staleness detector reports 0 signals
 - evidence: inference.stale_docs returns [] for the repo
 
+### Extend sensitive-path hardening to desktop fs mutation IPC
+- id: `rm-028` | track: reliability | priority: 97.0 | status: candidate
+- signals: security.mutation_ipc_unfiltered:apps/desktop/electron/fs-ipc.ts::L173 (rename), ::L200 (writeText), ::L226 (trash) — `grep -n sensitive apps/desktop/electron/fs-ipc.ts` → 0 matches; read side enforces `rejectSensitiveFilePath` by default at apps/desktop/electron/hardening.ts::L501-L541 (calls :517/:533); writeText comment (:197) claims "allowed roots" that no code enforces
+- acceptance: rename/writeText/trash reject sensitive paths by default via the same `rejectSensitiveFilePath` seam (opt-out flag parity with reads); rename/trash also pass `resolveRequestedPathForIpc`; the unsupported "allowed roots" comment is deleted or replaced by the real invariant; unit tests cover allow/deny/opt-out for all three handlers; full desktop test lane green
+- evidence: assess attempt 5012779a finding F1 (/tmp/assess-5012779a/findings.md); grep receipts recorded in the shipping PR
+
+### Retain unretained async cleanup tasks (deadline abandon + discord fatal-notify)
+- id: `rm-029` | track: reliability | priority: 95.0 | status: candidate
+- signals: agent/deadline.py::L266 `asyncio.ensure_future(_run_abandon_cleanup(...)).add_done_callback(...)` — done-callbacks live on the task, no strong ref held; plugins/platforms/discord/adapter.py::L1218 bare `asyncio.create_task(_notify())` on the fatal path; invariant seam gateway/run_shutdown.py::L1703-L1706 `_retain_background_task` (sibling pattern gateway/slash_commands.py::L810-L814)
+- acceptance: both sites retained in a module-level set with discard-on-done mirroring `_retain_background_task`; no behavior change on the abandon/notify paths; targeted tests stay green
+- evidence: assess attempt 5012779a findings F2/F3; prior class census (#15567 N3 18 sites, #15901 F6) confirmed these two sites are new
+
+### Dependency wave 2026-10 — resolver-visible set
+- id: `rm-030` | track: reliability | priority: 85.0 | status: candidate
+- signals: pins behind PyPI latest as of 2026-10-03 (research 4b5b86cf §1), all ≥14d old so `exclude-newer = "14 days"` needs no exception: requests 2.33.0→2.34.2, croniter 6.0.0→6.2.4, starlette 1.3.1→1.7.0, uvicorn 0.41.0→0.54.0, agent-client-protocol 0.9.0→0.12.1, numpy 2.4.3→2.5.3, onnxruntime 1.27.0→1.30.0, sherpa-onnx 1.13.4→1.13.8, ruamel.yaml 0.18.17→0.19.1, prompt_toolkit 3.0.52→3.0.53, httpx2 2.13.0→2.13.1, ty 0.0.21→0.0.84, pytest-asyncio 1.3.0→1.4.0, debugpy 1.8.20→1.8.22
+- acceptance: pins bumped, `uv lock` regenerated with zero new exclude-newer exceptions, full suite green on the new lock, OSV scan over exact pins reports no advisories
+- evidence: PyPI JSON API receipts (2026-10-03) + lockfile diff in the shipping PR
+
+### Exception-gated bumps + mcp 2.3.0 after quarantine expiry
+- id: `rm-031` | track: reliability | priority: 82.0 | status: candidate
+- signals: cryptography 50.0.0→50.0.2 (OpenSSL 4.0.3 wheels + abi3t wheels for free-threaded CPython 3.15+), fastapi 0.133.1→0.142.2, slack-sdk 3.44.1→3.45.0, google-api-python-client 2.194.0→2.201.0, ruff 0.15.10→0.16.10 — all released inside the 14-day window (cutoff 2026-09-19) so each needs a dated `[tool.uv]` exception line like the aiohttp/h2 precedent; mcp 2.2.0→2.3.0 (released 2026-10-02) is resolver-blocked until 2026-10-16
+- acceptance: dated exception lines added then removed; mcp 2.3.0 bump includes an audit of our tool registrations for `x-mcp-header` annotations (now raising at registration) and a check that the empty-`_meta`/`params` omission passes our client paths; full suite green on each bump
+- evidence: pyproject.toml [tool.uv] comment block; modelcontextprotocol/python-sdk v2.3.0 release body (2026-10-02)
+
+### npm patch wave — electron 40.10.6, vite, react
+- id: `rm-032` | track: reliability | priority: 78.0 | status: candidate
+- signals: apps/desktop/package.json electron 40.10.2 vs 40-x-y dist-tag tip 40.10.6 (4 patch releases, Chromium security cadence); vite 8.2.0→8.3.2; react 19.2.7→19.3.0; typescript 6.0.3→7.0.2 tracked separately as a major
+- acceptance: bumps land in package.json + lockfile, desktop build succeeds, vitest suite green
+- evidence: npm dist-tags receipts (2026-10-03)
+
+### Pre-book Python 3.15 CI lane before the 2026-10-07 final
+- id: `rm-033` | track: reliability | priority: 74.0 | status: candidate
+- signals: endoflife.date cadence (3.14.0 released 2025-10-07 → 3.15.0 final 2026-10-07, 4 days out); cryptography 50.0.2 already ships abi3t wheels for free-threaded CPython 3.15+
+- acceptance: 3.15 CI lane added (allow-failure until final), pyproject upper-bound audit performed for 3.15, cryptography≥50.0.2 prerequisite landed (rm-031), suite green on 3.14 lanes
+- evidence: endoflife.date API receipts (2026-10-03); pyca/cryptography CHANGELOG 50.0.2 entry
+
+### Decide v2026.9.24 tag merge vs selective ports
+- id: `rm-034` | track: reliability | priority: 70.0 | status: candidate
+- signals: fork merge-base = v2026.9.21 (d337b736aa), fork does NOT contain v2026.9.24 (460 PRs / 4,828 files: per-profile multiplexer stop/start/restart + gateway.standalone, live dock, webhook mirroring 11fb429f49, hot-path perf, i18n); 91 files changed on both sides; pyproject/uv.lock conflicts certain; fork dep floors sit ahead of the tag
+- acceptance: recorded decision with a merge-conflict triage (pyproject/uv.lock resolution strategy that preserves fork floors), a re-homing list for fork-settled classes (WSL link-open, locale-decode, waiter-leak), and either a green full suite at merged HEAD or a prioritized selective-port list
+- evidence: research 4b5b86cf §3; upstream v0.21.5 release body; deea8546 campaign merge-window analysis
+
+### ~/.hermes retention + snapshot service
+- id: `rm-035` | track: reliability | priority: 66.0 | status: candidate
+- signals: unbounded spill growth under ~/.hermes (pastes/, hook_outputs/, delegation summaries — cycle-1 assess F8) pairs directly with upstream user demand #12238 (27👍 auto-backup & versioning of ~/.hermes)
+- acceptance: retention policy (config-gated defaults) + snapshot/backup CLI command; bounded growth proven with A→B→A E2E against two temp HERMES_HOMEs; user docs updated; no cache-invalidating mid-conversation behavior
+- evidence: cycle-1 assess F8 receipts; GitHub issue reactions receipt (2026-10-03)
+
+### SearXNG web-search provider
+- id: `rm-036` | track: customer | priority: 48.0 | status: candidate
+- signals: upstream demand #5941 (30👍, self-hosted/privacy search); existing web-search provider seam (firecrawl/exa/tavily/parallel-web extras via lazy_deps)
+- acceptance: provider extra + parity in `hermes setup`/`hermes tools` UX; E2E against a local searxng instance (skippable marker when unavailable); no new core tool footprint (Footprint Ladder rung 3–4)
+- evidence: GitHub issue receipt; pyproject extras inventory
+
+### openai 3.x HTTPX2 migration lane (anthropic 1.x follow-up)
+- id: `rm-037` | track: reliability | priority: 44.0 | status: candidate
+- signals: openai 2.24.0→3.24.0 with 3.0.0 breaking change "HTTPX2 is now the default HTTP client" (2026-08-12, httpx2.md migration guide); fork already pins httpx2 2.13.x for MCP; anthropic 0.87.0→1.11.0 same shape
+- acceptance: provider-lane migration following openai-python httpx2.md; classic httpx retained for unmigrated paths; provider test lanes green; anthropic 1.x handled as its own lane
+- evidence: openai-python v3.0.0 release body; fork pyproject httpx/httpx2 pins
+
+### Evaluate high-demand upstream feature requests
+- id: `rm-038` | track: customer | priority: 30.0 | status: candidate
+- signals: upstream open-issue demand 2026-10-03 — #25267 Claude Agent SDK OAuth provider (57👍, top ask), #18715 remote agent + local tool execution (37👍), #5257 ACP multi-agent orchestration (25👍; we ship the acp extra), #39691 headroom-ai compression (17👍)
+- acceptance: per-item evaluation note (fit vs Footprint Ladder, plugin vs core, cost) recorded in ROADMAP.md or the dev guide before any implementation item is opened
+- evidence: GitHub search receipts (reactions-+1-desc, 2026-10-03)
+
 ## Closed items
 
 - `rm-006` Port skills.auto_load from upstream — superseded
