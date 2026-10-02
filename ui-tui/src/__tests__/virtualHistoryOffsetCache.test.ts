@@ -539,7 +539,13 @@ describe('useVirtualHistory offset cache reuse', () => {
 
       staleHeights.set(items[0]!.key, 1)
       instance.rerender(React.createElement(Harness, { expose, initialHeights: staleHeights, items }))
-      await delay(40)
+
+      // The compensation runs from the post-rerender measure pass, which is
+      // asynchronous; a fixed 40ms wait races it on a busy runner. Wait for
+      // the call itself, bounded.
+      for (let i = 0; i < 100 && adjustScrollTop.mock.calls.length === 0; i++) {
+        await delay(20)
+      }
 
       expect(adjustScrollTop).toHaveBeenCalledOnce()
       expect(adjustScrollTop).toHaveBeenCalledWith(1)

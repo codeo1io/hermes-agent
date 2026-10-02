@@ -1146,6 +1146,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         self.home_path = Path(self.scope_key)
         self._discovery_lock = threading.RLock()
         self._discovered: bool = False
+        # True once a discovery re-applied plugin secret sources for this process: the next
+        # "nothing enabled" discovery must still reconcile (revoke the removed source's env writes)
+        # instead of no-op'ing — see _refresh_secret_sources_after_discovery.
+        self._plugin_secret_sources_reconciled: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
         self._gateway_message_injector: tuple[object, Callable] | None = None
         self._context_engine = None  # Set by a plugin via register_context_engine()
@@ -1287,24 +1291,34 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             plugin_sources = list_plugin_sources()
         except Exception:
             return
-        if not plugin_sources:
-            return
-        try:
-            from hermes_cli.config import load_config
-            secrets = (load_config() or {}).get("secrets") or {}
-        except Exception:
-            secrets = {}
-
-        def _enabled(source) -> bool:
-            section = secrets.get(getattr(source, "name", ""))
+        enabled_names: list[str] = []
+        if plugin_sources:
             try:
-                return bool(source.is_enabled(section if isinstance(section, dict) else {}))
+                from hermes_cli.config import load_config
+                secrets = (load_config() or {}).get("secrets") or {}
             except Exception:
-                return False  # mirrors the orchestrator: a raising is_enabled() is skipped
+                secrets = {}
 
-        enabled_names = [getattr(s, "name", "") for s in plugin_sources if _enabled(s)]
+            def _enabled(source) -> bool:
+                section = secrets.get(getattr(source, "name", ""))
+                try:
+                    return bool(source.is_enabled(section if isinstance(section, dict) else {}))
+                except Exception:
+                    return False  # mirrors the orchestrator: a raising is_enabled() is skipped
+
+            enabled_names = [getattr(s, "name", "") for s in plugin_sources if _enabled(s)]
         if not enabled_names:
-            return
+            # Nothing enabled now. If an earlier discovery re-applied plugin sources for this home, the
+            # snapshot and ``os.environ`` still carry that plugin's names (a force-reload unloads the
+            # registration first, so this is exactly the "last plugin source removed" path) — reconcile
+            # once so they drop out instead of lingering until restart (#126982 review). A home that never
+            # had one stays a no-op: no re-pull, no re-load.
+            if not self._plugin_secret_sources_reconciled:
+                return
+            # The marker is cleared only AFTER the cleanup below succeeds: reset/reload are fallible, and
+            # clearing first left the stale credential active with no retry on the next discovery.
+        else:
+            self._plugin_secret_sources_reconciled = True
         try:
             # Reset and reload the SAME home the process (or routed turn) resolves to: under multiplex this
             # runs at gateway boot after sibling profiles may already have hydrated, and a global clear
@@ -1313,8 +1327,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             home = get_hermes_home()
             reset_secret_source_cache(home)
             load_hermes_dotenv(hermes_home=home)
+            if not enabled_names:
+                self._plugin_secret_sources_reconciled = False  # cleanup succeeded; nothing left to drop
             logger.debug("Re-applied secret sources after plugin discovery for: %s",
-                         ", ".join(sorted(enabled_names)))
+                         ", ".join(sorted(enabled_names)) or "<none — reconciled removed plugin sources>")
         except Exception as exc:
             logger.debug("secret source re-apply after discovery failed: %s", exc)
 

@@ -306,7 +306,14 @@ describe('status-chrome timers under an occluding overlay', () => {
     resetOverlayState()
     await flush()
 
-    const resumed = rule.output()
+    // Ink commits frames asynchronously; a single 20ms flush can read before
+    // the reveal frame is written on a loaded runner (seen as an empty read on
+    // CI). `Date.now` is mocked, so bound the wait by flush iterations.
+    let resumed = rule.output()
+    for (let i = 0; i < 100 && !resumed.includes('6m 0s'); i++) {
+      await flush()
+      resumed = rule.output()
+    }
 
     // Caught up to real elapsed time, not stuck on the pre-overlay values.
     expect(resumed).toContain('6m 0s')
