@@ -1,0 +1,6 @@
+{"step":1,"ts":"2026-10-01T01:13:58Z","summary":"Research phase start: HEAD c4da06121c verified; probing upstream/PyPI network reachability","touched":[".conductor/progress/8c0456373e784a5d8207f630fa10cad9.ndjson"]}
+{"step":2,"ts":"2026-10-01T01:21:05Z","summary":"network probe: pypi+github reachable; upstream HEAD f8489405600","touched":["/tmp/upstream-ha","delegate/8c0456373e784a5d8207f630fa10cad9.research.md"]}
+{"step":3,"ts":"2026-10-01T01:21:05Z","summary":"cloned upstream to /tmp/upstream-ha; merge-base v0.21.4; ahead 6626/behind 17","touched":["/tmp/upstream-ha","delegate/8c0456373e784a5d8207f630fa10cad9.research.md"]}
+{"step":4,"ts":"2026-10-01T01:21:05Z","summary":"sliced upstream diff: bot_desktop suite, api_server_memory_sessions, py3.14 markers","touched":["/tmp/upstream-ha","delegate/8c0456373e784a5d8207f630fa10cad9.research.md"]}
+{"step":5,"ts":"2026-10-01T01:21:05Z","summary":"verified our findings unfixed upstream (send_queue, _message_queue:307, urlopen retry)","touched":["/tmp/upstream-ha","delegate/8c0456373e784a5d8207f630fa10cad9.research.md"]}
+{"step":6,"ts":"2026-10-01T01:21:05Z","summary":"to_thread 23-vs-2, kanban fork-local; wrote research.md + result json","touched":["/tmp/upstream-ha","delegate/8c0456373e784a5d8207f630fa10cad9.research.md"]}

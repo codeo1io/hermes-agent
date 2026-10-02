@@ -38,6 +38,9 @@ API_BASE = "https://api.github.com"
 # backoff, honoring Retry-After / X-RateLimit-Reset when present.
 _RETRY_STATUSES = {403, 429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 5
+# A stalled GitHub API connection must fail into the retry ladder, not hang
+# the report past its own CI job timeout.
+API_TIMEOUT_SECONDS = 30
 _MAX_RETRY_WAIT_S = 120.0
 
 
@@ -71,7 +74,7 @@ def _urlopen_with_retry(req: urllib.request.Request):
     last_err: Exception | None = None
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=API_TIMEOUT_SECONDS) as resp:
                 return json.loads(resp.read()), resp.headers.get("Link", "")
         except urllib.error.HTTPError as e:
             last_err = e

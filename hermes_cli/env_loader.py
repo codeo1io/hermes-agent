@@ -36,6 +36,14 @@ _SECRET_SOURCES: dict[str, str] = {}
 _SECRET_SOURCE_VALUES_BY_HOME: dict[str, dict[str, str]] = {}
 # Per home: the subset of the snapshot a dotenv reload may re-assert — see ``AppliedVar.authoritative`` (#74265).
 _SECRET_SOURCE_RESTORE_BY_HOME: dict[str, dict[str, str]] = {}
+# Per home: what the process-global path WROTE into ``os.environ`` for an external source — name →
+# (source name, value written, value the name held before the first write or None). The per-home
+# snapshot above is republished on every pass, but ``os.environ`` is not: without this record a value a
+# since-removed or disabled source injected stayed in the process env, and single-profile
+# ``get_secret()`` kept serving it through its ``os.environ`` fallback until restart. Deliberately NOT
+# cleared by a per-home ``reset_secret_source_cache``: it describes ``os.environ``, which a reset does not
+# touch, and the next pass needs it to revoke.
+_SECRET_SOURCE_WRITES_BY_HOME: dict[str, dict[str, tuple[str, str, str | None]]] = {}
 # HERMES_HOME paths already pulled external secrets for: load_hermes_dotenv() runs at import time from
 # several hot modules, so without this the Bitwarden status line prints 3-5x per startup and the config
 # re-parse + ASCII sweep re-run each time (Bitwarden's own cache only saves the network call).
@@ -188,6 +196,7 @@ def reset_secret_source_cache(hermes_home: str | os.PathLike | None = None) -> N
         _SECRET_SOURCES.clear()
         _SECRET_SOURCE_VALUES_BY_HOME.clear()
         _SECRET_SOURCE_RESTORE_BY_HOME.clear()
+        _SECRET_SOURCE_WRITES_BY_HOME.clear()
         return
     home_key = str(Path(hermes_home).resolve())
     _APPLIED_HOMES.discard(home_key)
@@ -518,6 +527,87 @@ def _apply_managed_env(*, load_pass: int | None = None) -> None:
     _load_dotenv_with_fallback(managed_env, override=True, load_pass=load_pass)
 
 
+def _managed_dotenv_keys() -> set[str]:
+    """Names the administrator-managed overlay owns (``managed_scope``'s ``.env``): a revoked name listed
+    there is the overlay's to re-assert, not ours to strip."""
+    try:
+        from hermes_cli import managed_scope
+
+        managed_dir = managed_scope.get_managed_dir()
+        if managed_dir is None:
+            return set()
+        from agent.secret_scope import load_env_file
+
+        path = Path(managed_dir) / ".env"
+        return set(load_env_file(path)) if path.exists() else set()
+    except Exception:  # noqa: BLE001 — early bootstrap / managed scope absent
+        return set()
+
+
+def _revoke_secret_source_writes(home_path: Path, *, keep) -> None:
+    """Take back what a source wrote into ``os.environ`` for *home_path* once nothing backs it.
+
+    ``keep(name, source)`` says which recorded writes are still owned. Every other write is revoked,
+    but only while ``os.environ`` still holds exactly the value the source wrote: a value another owner
+    replaced since (the profile's ``.env``, the administrator-managed ``.env``, a shell export, a later
+    source) is theirs and stays. A revoked name gets back the value it held before the source's first
+    write, or is removed when it had none."""
+    home_key = str(Path(home_path).resolve())
+    writes = _SECRET_SOURCE_WRITES_BY_HOME.get(home_key)
+    if not writes:
+        return
+    try:
+        from agent.secret_scope import load_env_file
+
+        owned_by_dotenv = set(load_env_file(Path(home_path) / ".env")) | _managed_dotenv_keys()
+    except Exception:  # noqa: BLE001 — unreadable .env: treat nothing as dotenv-owned
+        owned_by_dotenv = _managed_dotenv_keys()
+    kept: dict[str, tuple[str, str, str | None]] = {}
+    for name, (source, value, prior) in writes.items():
+        if keep(name, source):
+            kept[name] = (source, value, prior)
+            continue
+        if name not in owned_by_dotenv and os.environ.get(name) == value:
+            if prior is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = prior
+        still_attributed = any(
+            other.get(name, ("",))[0] == source
+            for key, other in _SECRET_SOURCE_WRITES_BY_HOME.items() if key != home_key)
+        if _SECRET_SOURCES.get(name) == source and not still_attributed:
+            _SECRET_SOURCES.pop(name, None)
+    if kept:
+        _SECRET_SOURCE_WRITES_BY_HOME[home_key] = kept
+    else:
+        _SECRET_SOURCE_WRITES_BY_HOME.pop(home_key, None)
+
+
+def _record_secret_source_writes(home_key: str, report, supplied: set[str], environ_before: dict) -> None:
+    """Refresh ``_SECRET_SOURCE_WRITES_BY_HOME`` after one process-global pass, revoking a write its
+    still-enabled source has stopped supplying (rotated out, mapping removed). A source whose fetch
+    FAILED this pass keeps its earlier writes: a transient vault outage is not a revocation."""
+    failed = {src.name for src in report.sources if not src.result.ok}
+    previous = _SECRET_SOURCE_WRITES_BY_HOME.get(home_key, {})
+    _revoke_secret_source_writes(
+        Path(home_key),
+        keep=lambda name, source: name in report.provenance or name in supplied or source in failed)
+    writes = {name: rec for name, rec in _SECRET_SOURCE_WRITES_BY_HOME.get(home_key, {}).items()
+              if name not in report.provenance and os.environ.get(name) == rec[1]}
+    for name, applied in report.provenance.items():
+        if name not in os.environ:
+            continue
+        before = environ_before.get(name)
+        earlier = previous.get(name)
+        # Re-applied over our own earlier write: the pre-source value is the one recorded then.
+        prior = earlier[2] if earlier is not None and earlier[1] == before else before
+        writes[name] = (applied.source, os.environ[name], prior)
+    if writes:
+        _SECRET_SOURCE_WRITES_BY_HOME[home_key] = writes
+    else:
+        _SECRET_SOURCE_WRITES_BY_HOME.pop(home_key, None)
+
+
 def _apply_external_secret_sources(home_path: Path) -> None:
     """Pull secrets from every enabled external source into env — AFTER dotenv (sources need .env bootstrap
     tokens), BEFORE Hermes reads credentials; failures never block startup. Precedence/conflicts/provenance
@@ -535,7 +625,10 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     except Exception:  # noqa: BLE001 — config errors must not block startup
         # See #40597.
         return
+    # No source configured / enabled any more: whatever one wrote earlier is no longer backed (#126982
+    # review). A config READ failure above keeps them — fail-open, same as the fetch-failure path below.
     if not cfg:
+        _revoke_secret_source_writes(home_path, keep=lambda _name, _source: False)
         return
 
     # Defer the registry import until a source is enabled — bitwarden eagerly loads cryptography._rust.pyd,
@@ -543,12 +636,23 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     # flag), not names, so plugin/test sources pass and a plain dict entry never forces the crypto load.
     any_enabled = any(isinstance(v, dict) and v.get("enabled") is True for v in cfg.values())
     if not any_enabled:
+        _revoke_secret_source_writes(home_path, keep=lambda _name, _source: False)
         return
 
     try:
-        from agent.secret_sources.registry import apply_all
+        from agent.secret_sources.registry import apply_all, enabled_source_names
     except ImportError:
         return
+
+    # Revoke a removed/disabled source's writes BEFORE the pass: left in place, its stale value would make
+    # a still-enabled source that supplies the same name skip it as pre-existing (``skipped_existing``).
+    try:
+        active = enabled_source_names(cfg, home_path)
+    except Exception:  # noqa: BLE001 — cannot tell which sources remain: keep everything (fail-open)
+        active = None
+    if active is not None:
+        _revoke_secret_source_writes(home_path, keep=lambda _name, source: source in active)
+    environ_before = dict(os.environ)
 
     try:
         report = apply_all(cfg, home_path)
@@ -582,6 +686,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     for name in supplied:
         if name in os.environ:
             values[name] = os.environ[name]
+    _record_secret_source_writes(home_key, report, supplied, environ_before)
     if values:
         _SECRET_SOURCE_VALUES_BY_HOME[home_key] = values
     _SECRET_SOURCE_RESTORE_BY_HOME[home_key] = {

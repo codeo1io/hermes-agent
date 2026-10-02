@@ -1,0 +1,1 @@
+{"step":1,"ts":"2026-10-01T00:58:36Z","summary":"Adopted e47cae5a forensics: artifact absent, event log shows provider-fail death after setup only; redoing from scratch","touched":[".conductor/progress/808a7d97d67f4c24a45c7114b7f702bf.ndjson"]}

@@ -620,6 +620,33 @@ def test_desktop_macos_local_codesign_signs_native_binaries(tmp_path, monkeypatc
     assert str(app / "Contents" / "Frameworks" / "chrome_crashpad_handler") in signed
 
 
+def test_desktop_macos_local_codesign_helper_apps_keep_jit_entitlements(tmp_path, monkeypatch):
+    """Helper .app bundles must be signed with the inherit entitlements (#85532).
+
+    The NOTARIZED Electron frameworks land unsigned (ticket-only), so a Helper
+    signed without the JIT / unsigned-executable-memory entitlements aborts
+    at launch; ``entitlements.mac.inherit.plist`` is the plist that carries
+    them. Non-.app bundles (frameworks, XPC services) stay entitlement-free —
+    entitlements only apply to executable processes.
+    """
+    desktop_dir = tmp_path / "apps" / "desktop"
+    app = _make_signable_app(desktop_dir)
+    calls = _collect_codesign_calls(monkeypatch)
+
+    assert main_desktop._desktop_macos_local_codesign(app, desktop_dir=desktop_dir) is True
+
+    helper_cmds = [c for c in calls if any(p.endswith("Helper.app") for p in c)]
+    assert helper_cmds, calls
+    for cmd in helper_cmds:
+        i = next(i for i, p in enumerate(cmd) if p.endswith("Helper.app"))
+        args = cmd[:i]
+        assert "--entitlements" in args, cmd
+        assert args[args.index("--entitlements") + 1].endswith("entitlements.mac.inherit.plist"), cmd
+    for cmd in calls:
+        if any(".framework" in p for p in cmd):
+            assert "--entitlements" not in cmd, cmd
+
+
 
 
 @pytest.mark.macos_only
