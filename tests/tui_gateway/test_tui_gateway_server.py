@@ -22903,6 +22903,11 @@ def test_load_cfg_raw_sees_replacement_with_pinned_mtime_and_size(monkeypatch, t
     monkeypatch.setattr(server, "_cfg_path", None)
     assert server._load_cfg_raw()["model"]["default"] == "bbbb-route"
     st = cfg.stat()
+    # The cache key only sees this replacement through ctime_ns advancing past ``st``
+    # (mtime is pinned back, size matches, and copy2 keeps the inode). Inode timestamps
+    # are cached at jiffy granularity, so on a fast host the whole create->replace
+    # dance can land inside one tick and ctime never moves; force the tick forward.
+    time.sleep(0.05)
     other = tmp_path / "other.yaml"
     other.write_text("model:\n  default: aaaa-route\n", encoding="utf-8")
     shutil.copy2(other, cfg)
