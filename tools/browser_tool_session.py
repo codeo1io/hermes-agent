@@ -5,9 +5,11 @@ Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -140,13 +142,31 @@ def _unwrap_batch_result(result: Any, command: str) -> Dict[str, Any]:
     return {"success": bool(entry.get("success")), "data": entry.get("result"), "error": entry.get("error")}
 
 
+_SOCKET_DIR_SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _socket_dir_segment(session_name: str) -> str:
+    """Reduce a session name to ONE safe path segment. Internal names (``h_<hex>``,
+    ``cdp_<hex>``, ``rp_<hex>``, the real-profile constant) pass through unchanged;
+    anything that could escape ``os.path.join(tmpdir, ...)`` (an absolute prefix
+    replaces the base; ``..``/separators traverse it) becomes a deterministic digest
+    alias, so one session name still resolves to exactly one dir."""
+    name = str(session_name)
+    if _SOCKET_DIR_SAFE_NAME.match(name):
+        return name
+    return "s_" + hashlib.sha256(name.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _prepare_session_socket_dir(session_name: str) -> str:
     """Create the per-session socket dir (parallel workers must not share one) and claim it
     with our PID BEFORE first use — another hermes process's orphan reaper rmtree's any
-    ownerless agent-browser-* dir in the shared tmpdir."""
-    socket_dir = os.path.join(_bt._socket_safe_tmpdir(), f"agent-browser-{session_name}")
+    ownerless agent-browser-* dir in the shared tmpdir. The name is reduced to one safe
+    path segment first: the reaper reads ``<segment>.owner_pid`` derived from the dir
+    basename, so the dir and the claim file must always agree."""
+    segment = _socket_dir_segment(session_name)
+    socket_dir = os.path.join(_bt._socket_safe_tmpdir(), f"agent-browser-{segment}")
     os.makedirs(socket_dir, mode=0o700, exist_ok=True)
-    _lifecycle._write_owner_pid(socket_dir, session_name)
+    _lifecycle._write_owner_pid(socket_dir, segment)
     return socket_dir
 
 

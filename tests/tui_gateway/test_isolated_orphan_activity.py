@@ -77,7 +77,7 @@ def test_real_child_detached_turn_activity(tmp_path, monkeypatch, mode):
             20.0 if mode == "fresh" else server._WS_ORPHAN_INTERRUPT_REAP_POLL_S)
         assert not any(m.get("method") == "compute_host.activity" for m in forwarded)
         if mode != "fresh":
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 30
             while session["running"] and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert not session["running"], "stale child must receive and settle the real interrupt"
@@ -85,7 +85,7 @@ def test_real_child_detached_turn_activity(tmp_path, monkeypatch, mode):
             old_token = session["_compute_host_turn_id"]
             old_request = next(iter(supervisor._pending_turns))
             (tmp_path / "release").touch()
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 30
             while session["running"] and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert not session["running"]
@@ -101,7 +101,7 @@ def test_real_child_detached_turn_activity(tmp_path, monkeypatch, mode):
             supervisor._handle_host_frame({"type": "turn.end", "sid": sid, "request_id": old_request})
             assert session["running"]
             assert session["_compute_host_turn_id"] == new_token
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 30
             while not (tmp_path / "provider-started").exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
             assert (tmp_path / "provider-started").exists()

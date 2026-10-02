@@ -539,17 +539,6 @@ def auth_list_command(args) -> None:
             )
             print(row.rstrip())
         print()
-    if not provider_filter or provider_filter in EXTERNAL_LOGIN_PROVIDERS:
-        _print_external_login_notice()
-
-
-def _print_external_login_notice() -> None:
-    """One line telling the user why no Codex CLI / Claude Code login shows up when adoption is off."""
-    from agent.credential_sources import EXTERNAL_LOGINS_NOT_ADOPTED_NOTICE, adopt_external_logins_enabled
-    if not adopt_external_logins_enabled():
-        print(EXTERNAL_LOGINS_NOT_ADOPTED_NOTICE)
-
-
     _print_oauth_heal_notices()
     if not provider_filter or provider_filter in EXTERNAL_LOGIN_PROVIDERS:
         _print_external_login_notice()

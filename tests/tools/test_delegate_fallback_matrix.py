@@ -1,5 +1,6 @@
 """Pin x delegation.fallback_providers decision table for child agents (#80450, #65038)."""
 
+import unittest  # __main__ hatch below; the mock import alone leaves the name unbound
 from unittest.mock import MagicMock, patch
 
 import pytest

@@ -327,7 +327,7 @@ class CLIInitMixin:
             logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
             from hermes_state_user_copy import describe_storage_failure, storage_failure_details
             failure = describe_storage_failure(e)
-            def _present_store_warning():
+            def _present_store_warning(e=e):
                 try:
                     Console(stderr=True).print(
                         "[bold yellow]⚠ Session store unavailable[/bold yellow] — "
