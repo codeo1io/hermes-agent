@@ -320,6 +320,49 @@ def test_start_with_goal_on_dead_client_reopens_and_dispatches():
     assert not any("reland goal" in m for m in dead_client.messages)
 
 
+def test_pi_bootstrap_failure_recovers_with_fresh_native_session(monkeypatch):
+    """A dead durable Pi native id must not strand every later retry.
+
+    The logical delegate handle remains stable while recovery mints a fresh
+    native Pi session. This is explicitly not an OpenCode failover.
+    """
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    class BootstrapFailingPi(FakePiClient):
+        instances = []
+
+        def start(self, *, timeout=30.0):
+            if self.session_id == sid:
+                raise TimeoutError("pi did not answer command 'get_state'")
+            return super().start(timeout=timeout)
+
+    monkeypatch.setattr(ds, "PiRPCClient", BootstrapFailingPi)
+
+    resumed = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+
+    assert resumed["success"] is True
+    assert resumed["backend"] == "pi"
+    assert resumed["session_id"] == sid
+    assert resumed["native_session_id"] != sid
+    assert resumed["native_session_id"].startswith(f"{sid}-recovery-")
+    assert len(BootstrapFailingPi.instances) == 2
+    assert BootstrapFailingPi.instances[0].session_id == sid
+    assert BootstrapFailingPi.instances[1].session_id == resumed["native_session_id"]
+    assert ds._load_metadata(sid)["native_session_id"] == resumed["native_session_id"]
+
+
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))

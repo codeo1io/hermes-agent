@@ -52,6 +52,15 @@ def retry_enabled(cfg: Optional[dict] = None) -> bool:
     return cron_cfg.get("retry_unreachable") is not False
 
 
+# The provider answered HTTP 200 but closed the SSE stream before any event
+# (glmplus: "SSE headers sent before upstream recovery" + upstream timeout). The
+# agent dies with this RuntimeError text after its own stream retries; zero
+# responses were folded, so a re-run is spend-neutral exactly like DNS loss.
+# All three raise sites use the same "Provider returned an empty stream" prefix
+# (agent/chat_completion_helpers.py) — one needle covers them.
+_EMPTY_STREAM_NEEDLE = "provider returned an empty stream"
+
+
 def is_model_unreachable_failure(exc: BaseException, agent: Any = None) -> bool:
     """True when *exc* is a transient network/DNS failure and *agent* (may be ``None``)
     never completed a model call — the run consumed nothing and executed nothing."""
@@ -59,7 +68,20 @@ def is_model_unreachable_failure(exc: BaseException, agent: Any = None) -> bool:
         return False
     from cron.scheduler_preflight import _is_transient_provider_resolve_error
 
-    return _is_transient_provider_resolve_error(exc)
+    if _is_transient_provider_resolve_error(exc):
+        return True
+    # Empty-stream deaths (HTTP 200, zero events): the scheduler wraps the agent's
+    # EmptyStreamError in a plain RuntimeError, so match the canonical message text
+    # across the cause chain. Spend-neutrality is guaranteed by the session_api_calls
+    # guard above — a stream that folded even one response is not in this class.
+    seen: set = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _EMPTY_STREAM_NEEDLE in str(cur).lower():
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 
 def _is_recurring(job: Dict[str, Any]) -> bool:
