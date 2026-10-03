@@ -238,10 +238,18 @@ from unittest.mock import MagicMock
 
 
 def _fake_response(status, url, body):
-    """A minimal stand-in for the httpx.Response the SDK feeds our bridge."""
+    """A minimal stand-in for the httpx.Response the SDK feeds our bridge.
+
+    ``next_request=None`` matters: mcp 2.2.0's auth flow routes responses through
+    ``shared/_httpx_utils.next_request_within_origin``, which reads
+    ``response.next_request`` and, when it is not None, compares
+    ``next_request.method != sent.request.method`` — a bare MagicMock auto-creates
+    a truthy ``next_request`` and the SimpleNamespace ``request`` has no ``method``.
+    """
     resp = MagicMock()
     resp.status_code = status
-    resp.request = SimpleNamespace(url=url)
+    resp.request = SimpleNamespace(url=url, method="POST")
+    resp.next_request = None
 
     async def _aread():
         return body
