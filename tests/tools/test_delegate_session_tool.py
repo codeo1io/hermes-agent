@@ -9,6 +9,8 @@ import time
 
 import pytest
 
+from agent.delegate_errors import DelegateTurnStalled
+
 import tools.delegate_session_tool as ds
 
 
@@ -621,7 +623,7 @@ def test_legacy_v2_metadata_migrates_on_same_workspace_resume(tmp_path, monkeypa
     assert resumed["session_id"] == sid
     assert FakePiClient.instances[-1].session_id == sid
     upgraded = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
-    assert upgraded["version"] == 3
+    assert upgraded["version"] == 4
     assert upgraded["owner_scope"] == ds._scope_for_workspace(workspace)
 
 
@@ -924,7 +926,7 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     stale["client"].close()
 
     meta = ds._load_metadata(sid)
-    assert meta["version"] == 3
+    assert meta["version"] == 4
     assert meta["backend"] == "opencode"
     assert meta["native_session_id"] == native
 
@@ -963,7 +965,155 @@ def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     # pi session id is reused as the native session on resume
     assert resumed["native_session_id"] == "pi_native_123"
     # re-persisted using the current metadata schema
-    assert ds._load_metadata(sid)["version"] == 3
+    assert ds._load_metadata(sid)["version"] == 4
+
+
+# ------------------------- metadata v4: failure evidence (A4 remediation)
+# A failed delegate turn must persist WHY it died (class + provider retry
+# hint + streak) so a restarted supervisor resumes with the evidence instead
+# of re-entering the same dead provider blind.
+
+
+def wait_for_metadata(
+    sid: str, *, error_class: str | None, timeout: float = 2.0
+) -> dict:
+    """Poll durable metadata until the persisted outcome matches.
+
+    `wait_for_status` observes the in-memory flip, which precedes the
+    `_persist_metadata` file write; polling the file itself closes that gap.
+    """
+    deadline = time.time() + timeout
+    meta: dict = {}
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid)
+        if error_class is not None and meta.get("error_class") == error_class:
+            return meta
+        time.sleep(0.02)
+    return meta
+
+
+def test_failed_turn_persists_v4_failure_evidence():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    def rate_limited_turn(message, *, timeout_seconds=900.0):
+        raise RuntimeError(
+            "Rate limit: disabling model glm-4.6 for 1800 seconds (cooling down)"
+        )
+
+    client.run_session_prompt = rate_limited_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    meta = wait_for_metadata(sid, error_class="rate_limit")
+    assert meta["status"] == "error"
+    assert meta["version"] == 4
+    assert meta["error_class"] == "rate_limit"
+    assert meta["retry_after"] == 1800.0
+    assert meta["consecutive_failures"] == 1
+
+    # The class survives registry loss: offline rows still say WHY.
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid, None)
+    rows = payload(
+        ds.delegate_session(action="list", parent_agent=parent)
+    )["sessions"]
+    row = next(r for r in rows if r["session_id"] == sid)
+    assert row["status"] == "offline"
+    assert row["error_class"] == "rate_limit"
+    assert row["retry_after"] == 1800.0
+
+
+def test_typed_stall_turn_keeps_class_and_streak_survives_restart():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    def stalled_turn(message, *, timeout_seconds=900.0):
+        raise DelegateTurnStalled(
+            "pi session turn timed out: stalled after 1800s "
+            "without observable progress",
+            error_class="provider_stall",
+            zero_activity=True,
+        )
+
+    client.run_session_prompt = stalled_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    meta = wait_for_metadata(sid, error_class="provider_stall")
+    assert meta["retry_after"] is None
+    assert meta["consecutive_failures"] == 1
+
+    # Supervisor replacement: the resumed session inherits the durable streak
+    # until a turn completes successfully.
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+    assert resumed["success"] is True
+    with ds._SESSION_LOCK:
+        record = ds._SESSIONS[sid]
+        assert record["consecutive_failures"] == 1
+        assert record["error_class"] == "provider_stall"
+
+    # The resumed fake client is unpatched, so the next turn succeeds and
+    # clears the streak. The resumed session starts idle, so poll the durable
+    # outcome (not a status transition) for the clear.
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid)
+        if meta["error_class"] == "" and meta["consecutive_failures"] == 0:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("resumed successful turn did not clear the failure streak")
+    assert meta["status"] == "idle"
+    assert meta["retry_after"] is None
+
+
+def test_v4_metadata_with_unknown_fields_round_trips(tmp_path):
+    sid = "v4-forward-compatible"
+    data = {
+        "version": 4,
+        "backend": "pi",
+        "session_id": sid,
+        "native_session_id": sid,
+        "pi_session_id": sid,
+        "owner": "legacy-supervisor",
+        "cwd": str(tmp_path),
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "status": "error",
+        "error_class": "rate_limit",
+        "retry_after": 1800.0,
+        "last_turn_activity_at": 1.0,
+        "consecutive_failures": 2,
+        "future_field": {"anything": True},
+    }
+    path = ds._metadata_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    meta = ds._load_metadata(sid)
+    # Tolerant load: newer unknown fields pass through untouched.
+    assert meta["version"] == 4
+    assert meta["error_class"] == "rate_limit"
+    assert meta["future_field"] == {"anything": True}
 
 
 def test_list_includes_backend_field(monkeypatch):

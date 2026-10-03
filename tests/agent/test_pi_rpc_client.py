@@ -11,6 +11,7 @@ the real binary or network. Pins the behaviors the parent relies on:
 (3) the pi-rpc provider resolves without any ACP env vars set.
 """
 
+import re
 import stat
 import sys
 import threading
@@ -18,6 +19,7 @@ import time
 
 import pytest
 
+from agent.delegate_errors import DelegateTurnStalled
 from agent.pi_rpc_client import (
     PiRPCClient,
     PendingQuestion,
@@ -217,6 +219,93 @@ def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
         client.run_session_prompt("go", timeout_seconds=0.08)
     assert time.monotonic() - started < 0.8
     client.close()
+
+
+# ------------------------------------- typed stall classification (A4)
+# A stalled turn must say WHAT died: a silent provider, a wedged agent, or a
+# provider that announced its own outage. Regression for the 09-30 cooling-down
+# storm that stalled delegates for 1800-3600s and re-entered on every retry.
+
+def _stall_builder(tmp_path, name, after_ack):
+    """Fake pi that acks the prompt, runs `after_ack`, then never settles."""
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + after_ack
+        + "        time.sleep(30)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def _stall_after_ack(tmp_path, name, after_ack):
+    client = PiRPCClient(
+        acp_command=_stall_builder(tmp_path, name, after_ack),
+        base_url="pi://stall-classify",
+        persistent_session=True,
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        return excinfo.value
+    finally:
+        client.close()
+
+
+def test_zero_activity_stall_classifies_provider_stall(tmp_path):
+    err = _stall_after_ack(tmp_path, "fake-pi-silent", "        pass\n")
+    # Prompt acked, then no unsolicited event at all: the delegate agent
+    # itself produced nothing — the structural signature of a dead upstream.
+    assert err.error_class == "provider_stall"
+    assert err.zero_activity is True
+    assert isinstance(err, TimeoutError)
+
+
+def test_partial_activity_stall_classifies_agent_stall(tmp_path):
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-one-think",
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'considering'}})\n",
+    )
+    # The agent streamed something and then wedged: the provider answered.
+    assert err.error_class == "agent_stall"
+    assert err.zero_activity is False
+
+
+def test_streamed_provider_outage_line_classifies_rate_limit(tmp_path):
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-rate-limit",
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'text_delta','delta':'Rate limit: disabling model glm-4.6 "
+        "for 1800 seconds (cooling down)'}})\n",
+    )
+    assert err.error_class == "rate_limit"
+    assert "Rate limit" in err.provider_signal
+    assert err.retry_after == 1800.0
+
+
+def test_stall_message_keeps_suffix_and_gains_timeout_prefix(tmp_path):
+    err = _stall_after_ack(tmp_path, "fake-pi-prefix-suffix", "        pass\n")
+    # Conductor's spool classifier keys on both markers: the new start-failure
+    # prefix gets a fresh-session retry, and the legacy stall suffix keeps
+    # existing `except TimeoutError` / marker consumers working.
+    assert re.match(
+        r"pi session turn timed out: stalled after \d+s without observable progress",
+        str(err),
+    )
+    assert re.search(r"stalled after .* without observable progress", str(err))
 
 
 # ------------------------------------------------- answer text mapping

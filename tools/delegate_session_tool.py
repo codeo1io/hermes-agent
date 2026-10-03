@@ -23,6 +23,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent.delegate_errors import classify_delegate_failure
 from agent.opencode_client import OpenCodeClient
 from agent.pi_rpc_client import PiRPCClient, pending_question_for_owner
 from agent.runtime_cwd import resolve_agent_cwd
@@ -37,6 +38,12 @@ _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
 
 _KNOWN_BACKENDS = ("pi", "opencode")
+
+# Durable metadata schema version. v4 (2026-10, finding
+# cognitive-continuity.autonomy-recovery-workers-fail-closed-loop) added
+# outcome evidence fields; loading stays tolerant — older files load
+# unchanged and unknown fields from newer files pass through.
+_METADATA_VERSION = 4
 
 # Owners without a conversation id fall back to a process-local handle. Such
 # handles are meaningless in a later process, so they must never authorize
@@ -84,8 +91,10 @@ def _metadata_path(session_id: str) -> Path:
 
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+    client = record.get("client")
+    activity = getattr(client, "last_turn_activity_at", None)
     return {
-        "version": 3,
+        "version": _METADATA_VERSION,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -97,6 +106,15 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # v4: outcome evidence — a stalled/circuit-broken session must survive
+        # restart with its failure class, not just prose, so the supervisor
+        # that resumes it (or the operator reading the file) can tell a dead
+        # provider from a wedged agent without replaying logs.
+        "status": record.get("status") or "idle",
+        "error_class": record.get("error_class") or "",
+        "retry_after": record.get("retry_after"),
+        "last_turn_activity_at": float(activity) if activity else 0.0,
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
     }
 
 
@@ -601,6 +619,10 @@ def _durable_summary(
         "updated_at": meta.get("updated_at"),
         "pending_question": None,
         "error": None,
+        # v4: failure class + provider retry hint survive restarts so an
+        # offline row still tells the supervisor WHY the session died.
+        "error_class": meta.get("error_class") or "",
+        "retry_after": meta.get("retry_after"),
     }
     if note:
         out["note"] = note
@@ -690,6 +712,24 @@ def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
     return changed
 
 
+def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
+    """(error_class, retry_after) for a failed delegate turn.
+
+    Typed attributes win: ``DelegateTurnStalled`` already derived its class
+    from streamed evidence at the client. Anything else falls back to
+    classifying the exception text, so plain failures still land in the
+    shared vocabulary.
+    """
+    typed = str(getattr(exc, "error_class", "") or "").strip()
+    if typed:
+        return typed, getattr(exc, "retry_after", None)
+    error_class, _signal, retry_after = classify_delegate_failure(
+        f"{type(exc).__name__}: {exc}",
+        zero_activity=bool(getattr(exc, "zero_activity", False)),
+    )
+    return error_class, retry_after
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
     with _SESSION_CONDITION:
@@ -707,6 +747,10 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 or record.get("native_session_id")
                 or record["session_id"]
             )
+            # A completed turn clears the failure streak.
+            record["error_class"] = ""
+            record["retry_after"] = None
+            record["consecutive_failures"] = 0
             if record.get("status") != "closed":
                 _transition_status_locked(record, "idle")
             else:
@@ -714,8 +758,14 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         _persist_metadata(record)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
+        error_class, retry_after = _classify_turn_exception(exc)
         with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
+            record["error_class"] = error_class
+            record["retry_after"] = retry_after
+            record["consecutive_failures"] = (
+                int(record.get("consecutive_failures") or 0) + 1
+            )
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
@@ -1009,6 +1059,12 @@ def delegate_session(
             "updated_at": now,
             "last_result": None,
             "error": "",
+            # Failure evidence survives supervisor replacement / gateway
+            # restart: a resumed session keeps its streak until a turn
+            # completes successfully.
+            "error_class": str((saved or {}).get("error_class") or ""),
+            "retry_after": (saved or {}).get("retry_after"),
+            "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
             "thread": None,
         }
         with _SESSION_LOCK:
