@@ -1,8 +1,10 @@
 """pytest's basetemp must never sit inside the operator's platform-native Hermes home.
 
-Every per-test sandbox is ``<basetemp>/.../hermes_test`` and ``get_default_hermes_root()``
-prefers the platform-native home whenever ``HERMES_HOME`` sits *under* it — so a basetemp
-inside the home silently turns the sandbox back into the live install (#111101).
+Every per-test sandbox is ``<basetemp>/.../hermes_test``. ``get_default_hermes_root()``
+no longer collapses a non-profile ``HERMES_HOME`` under the native home onto it (2026-09-17
+sandbox-root fix), but relocation stays belt-and-suspenders: it keeps the whole sandbox tree
+out of the operator's home, so profile-shaped sandboxes and consumers that key on the native
+home directly can never touch the live install either (#111101).
 """
 from __future__ import annotations
 
