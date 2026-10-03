@@ -34,11 +34,18 @@ delegate_session(action="status", session_id="...")
 delegate_session(action="send", session_id="...", message="Now add regression tests")
 delegate_session(action="steer", session_id="...", message="Focus on the parser, not the transport")
 delegate_session(action="messages", session_id="...")
+delegate_session(action="health")
 delegate_session(action="stop", session_id="...")
 delegate_session(action="resume", session_id="...")
 ```
 
-`resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata contains IDs/timestamps/workspace only; prompt text remains in Pi's native session history.
+`resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata persists IDs, timestamps, workspace, and last-known status with bounded failure diagnostics (`error`, `error_class`, consecutive provider failures). It never stores prompt text: conversation stays in Pi's native session history.
+
+## Provider health and stalled turns
+
+`delegate_session` keeps a small provider-health circuit per Pi backend and model. Two consecutive provider-class turn failures (rate limits, credential exhaustion, provider unavailability) open that circuit: the next `start` fails fast with a `provider_unavailable` error instead of paying the spawn-and-stall cost again, and `action="health"` reports each circuit's state, failure counts, and last error classes so the supervising model can steer to another backend or wait out the cooldown. Host-level failures (out of memory, thread/fork exhaustion, disk full) are recorded as evidence but never open a circuit.
+
+A running turn is bounded by an **inactivity** window, not an absolute deadline: streaming deltas, tool activity, and reasoning all count as progress, so a productive multi-hour turn is never cut off while a genuinely wedged one always is. When a turn stalls, Hermes aborts it, terminates the native process (a stalled delegate holds its process slot for nothing), and records the failure class. The next lifecycle action reopens the native session with its conversation intact. Session `status` rows carry an `error_class` (`rate_limit`, `provider_unavailable`, `transport`, `resource_exhausted`, …) that survives gateway restarts via the durable metadata above.
 
 ## Completion delivery
 

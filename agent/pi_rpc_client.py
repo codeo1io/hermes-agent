@@ -69,6 +69,39 @@ _DEFAULT_QUESTION_TIMEOUT = _env_float("HERMES_PI_QUESTION_TIMEOUT", 600.0)
 _registry_lock = threading.Lock()
 pending_questions: dict[str, "PendingQuestion"] = {}
 
+_STALL_TAIL_CHARS = 2000
+
+
+class DelegateTurnStalled(TimeoutError):
+    """A delegated turn stalled with no observable inactivity-window progress.
+
+    ``str()`` is byte-identical to the legacy stall message so bounded error
+    text and downstream regex consumers are unaffected. The attributes carry
+    the structural evidence failure classification needs: a provider that
+    produced nothing unsolicited after prompt-ack
+    (``had_unsolicited_activity=False``) is a provider stall, one that
+    streamed and then went silent (``True``) is an agent stall, and
+    ``captured_tail`` is the bounded final fragment of what was produced.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        had_unsolicited_activity: bool = False,
+        captured_tail: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.had_unsolicited_activity = bool(had_unsolicited_activity)
+        self.captured_tail = captured_tail
+
+
+def _bounded_capture_tail(text: str, limit: int = _STALL_TAIL_CHARS) -> str:
+    """Last ``limit`` characters of captured turn output, marked when cut."""
+    if len(text) <= limit:
+        return text
+    return "..." + text[-(limit - 3):]
+
 
 class PendingQuestion:
     """One unanswered extension_ui_request from a pi child."""
@@ -804,6 +837,14 @@ class PiRPCClient:
                 if not response.get("success"):
                     raise RuntimeError(response.get("error") or "pi prompt rejected")
 
+                # Baseline for the stall split, taken after the prompt ack: the
+                # single reader thread dispatches boot handshake messages in
+                # order, so once the ack has landed, unsolicited events past
+                # this point are the delegate's own turn activity (prompt-ack
+                # itself is transport, not progress).
+                with self._turn_activity_lock:
+                    activity_baseline = self._last_turn_activity
+
                 poll_interval = min(1.0, max(0.02, stall_timeout / 4.0))
                 while not self._settled.wait(poll_interval):
                     if self._process_exited_error:
@@ -815,10 +856,44 @@ class PiRPCClient:
                         self._send_pi({"type": "abort"})
                     except Exception:
                         pass
-                    self._settled.wait(min(10.0, max(0.1, stall_timeout)))
-                    raise TimeoutError(
+                    # Structural evidence at the moment of the stall decision:
+                    # did the delegate produce anything unsolicited after the
+                    # prompt was accepted, and what was the last fragment? The
+                    # abort's own control ack never counts as progress.
+                    with self._turn_activity_lock:
+                        activity_advanced = self._last_turn_activity > activity_baseline
+                    had_unsolicited_activity = (
+                        activity_advanced
+                        or self.text_streamed
+                        or bool(self._text_parts)
+                        or bool(self._reasoning_parts)
+                    )
+                    captured_tail = _bounded_capture_tail(
+                        "".join(self._text_parts[:])
+                        + "".join(self._reasoning_parts[:])
+                    )
+                    if not self._settled.wait(min(10.0, max(0.1, stall_timeout))):
+                        # Zombie-capacity rider (2026-10-02 storm): a turn
+                        # declared stalled has already failed; leaving the
+                        # process alive pins its spawn slot (threads, fork,
+                        # ENOSPC budget) for the rest of the session and
+                        # compounded the outage into host exhaustion. Terminate
+                        # it here — the stall exception still propagates, and
+                        # _spawn() transparently respawns the same native
+                        # session (same --session-id) on the next turn, so the
+                        # conversation survives. Full close() stays out of the
+                        # turn thread: it would make the client un-reopenable.
+                        proc = self._proc
+                        if proc is not None and proc.poll() is None:
+                            try:
+                                proc.terminate()
+                            except Exception:
+                                pass
+                    raise DelegateTurnStalled(
                         "pi session turn stalled after "
-                        f"{stall_timeout:.0f}s without observable progress"
+                        f"{stall_timeout:.0f}s without observable progress",
+                        had_unsolicited_activity=had_unsolicited_activity,
+                        captured_tail=captured_tail,
                     )
 
                 if self._process_exited_error:
