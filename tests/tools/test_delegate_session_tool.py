@@ -9,9 +9,9 @@ import time
 
 import pytest
 
-from agent.delegate_errors import DelegateTurnStalled
-
 import tools.delegate_session_tool as ds
+from agent.delegate_errors import DelegateTurnStalled
+from agent.delegate_health import reset_delegate_health_ledger
 
 
 class Parent:
@@ -93,6 +93,10 @@ class FakePiClient:
 
 @pytest.fixture(autouse=True)
 def clean_sessions(monkeypatch, tmp_path):
+    # T4: every test starts with a fresh provider breaker — turns now record
+    # into the process-wide ledger, and a circuit opened by one test must not
+    # gate dispatches in the next.
+    reset_delegate_health_ledger()
     with ds._SESSION_LOCK:
         for record in ds._SESSIONS.values():
             try:
@@ -1311,3 +1315,241 @@ def test_dispatch_turn_uses_non_daemon_thread(monkeypatch):
     assert captured["started"] is True
     assert captured["daemon"] is False
     assert record["status"] == "running"
+
+
+# --- T4 (D3/D4): provider circuit gates + ledger recording -----------------
+
+
+class RateLimitPiClient(FakePiClient):
+    """Every turn fails with a typed provider-class stall (rate_limit)."""
+
+    def run_session_prompt(self, message, *, timeout_seconds=900.0):
+        self.messages.append(message)
+        self.last_turn_activity_at = time.time()
+        raise DelegateTurnStalled(
+            "pi session turn timed out: stalled after 900s without observable progress",
+            error_class="rate_limit",
+            provider_signal="Rate limit: disabling model glm-4.6 for 1800 seconds",
+            retry_after=1800.0,
+        )
+
+
+def _open_circuit(backend: str = "pi", model: str = "glm-4.6") -> None:
+    ledger = reset_delegate_health_ledger()
+    for _ in range(3):
+        ledger.record_failure((backend, model), "rate_limit")
+
+
+def test_open_circuit_refuses_fresh_dispatch_before_spawn(monkeypatch, tmp_path):
+    """Gate site 1: an open (backend, model) circuit refuses the turn before
+    any child process is spawned — no client, no stall window, structured
+    error with the retry hint."""
+    _open_circuit()
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+    parent = Parent()
+
+    result = payload(
+        ds.delegate_session(action="start", parent_agent=parent, goal="do work")
+    )
+
+    assert "error" in result  # tool_error body, not a success payload
+    assert "circuit open" in result["error"]
+    assert "error_class=provider_unavailable" in result["error"]
+    assert "retry after" in result["error"]
+    assert FakePiClient.instances == []  # refused pre-bootstrap, nothing spawned
+
+
+def test_open_circuit_refuses_followup_send_and_degraded_steer(monkeypatch, tmp_path):
+    """Gate sites 2-4: an open circuit refuses live-session follow-ups (start
+    with goal), sends, and steers that would degrade to a fresh dispatch."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    model = str(ds._SESSIONS[sid]["model"])
+    _open_circuit("pi", model)
+
+    send = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="again", parent_agent=parent
+        )
+    )
+    assert "error" in send
+    assert "circuit open" in send["error"]
+
+    followup = payload(
+        ds.delegate_session(
+            action="start", session_id=sid, parent_agent=parent, goal="next phase"
+        )
+    )
+    assert "error" in followup
+    assert "circuit open" in followup["error"]
+
+    steer = payload(
+        ds.delegate_session(
+            action="steer", session_id=sid, message="redirect", parent_agent=parent
+        )
+    )
+    assert "error" in steer
+    assert "circuit open" in steer["error"]
+
+    # No turn was dispatched through any of the three paths.
+    assert ds._SESSIONS[sid]["client"].messages == []
+
+
+def test_provider_failures_from_turns_open_the_circuit(monkeypatch, tmp_path):
+    """Recording (A2): three provider-class turn failures on the same
+    (backend, model) key open the circuit; the fourth dispatch is refused
+    without ever reaching the client, and a healthy turn closes it again."""
+    monkeypatch.setattr(ds, "PiRPCClient", RateLimitPiClient)
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    for expected_streak in (1, 2, 3):
+        payload(
+            ds.delegate_session(
+                action="send", session_id=sid, message=f"go {expected_streak}",
+                parent_agent=parent,
+            )
+        )
+        summary = wait_for_status(parent, sid, "error")
+        assert summary["error_class"] == "rate_limit"
+        assert summary["retry_after"] == 1800.0
+        assert summary["consecutive_failures"] == expected_streak
+
+    # record_failure lands right after the last status transition (same
+    # pattern as record_success) — wait for the breaker to actually open
+    # before probing the gate: the 3rd failure must be durable when dispatch
+    # #4 arrives, or the gate would still see only two.
+    ledger = ds.get_delegate_health_ledger()
+    key = ("pi", str(ds._SESSIONS[sid]["model"]))
+    deadline = time.time() + 2.0
+    circuit = ledger.check(key)
+    while circuit is None and time.time() < deadline:
+        time.sleep(0.01)
+        circuit = ledger.check(key)
+    assert circuit is not None  # 3 provider failures opened it
+
+    fourth = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="doomed", parent_agent=parent
+        )
+    )
+    assert "error" in fourth
+    assert "circuit open" in fourth["error"]
+    # State-level: the circuit is open for this exact key (half-open probing
+    # and success-closing are covered by the ledger's own unit tests).
+    assert circuit.last_error_class == "rate_limit"
+
+
+@pytest.mark.parametrize(
+    "error_class", ["agent_stall", "resource_exhausted", "unknown"]
+)
+def test_non_provider_failures_do_not_open_the_circuit(error_class, monkeypatch, tmp_path):
+    """Non-provider classes are not the provider's fault: any number of them
+    must not stop delegate traffic on that key (fail-open, no shadow gating).
+    agent_stall = the delegate wedged; resource_exhausted = the local host;
+    unknown = unclassified noise."""
+
+    class StallingPiClient(FakePiClient):
+        def run_session_prompt(self, message, *, timeout_seconds=900.0):
+            self.messages.append(message)
+            raise DelegateTurnStalled(
+                "pi session turn timed out: stalled after 900s without observable progress",
+                error_class=error_class,
+            )
+
+    monkeypatch.setattr(ds, "PiRPCClient", StallingPiClient)
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    for i in range(4):
+        payload(
+            ds.delegate_session(
+                action="send", session_id=sid, message=f"go {i}", parent_agent=parent
+            )
+        )
+        wait_for_status(parent, sid, "error")
+
+    accepted = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="still trying", parent_agent=parent
+        )
+    )
+    assert accepted["success"] is True
+    assert accepted["accepted"] is True
+
+
+def test_open_circuit_is_keyed_per_model(monkeypatch, tmp_path):
+    """The breaker key is (backend, model): a circuit opened for one model
+    never gates dispatches to a different model on the same backend — a dead
+    glm-4.6 must not take delegation to other providers down with it."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    session_model = str(ds._SESSIONS[sid]["model"])
+    other_model = "totally-other-model"
+    assert other_model != session_model
+    _open_circuit("pi", other_model)
+
+    send = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="unaffected", parent_agent=parent
+        )
+    )
+
+    assert send["success"] is True
+    assert ds._SESSIONS[sid]["client"].messages == ["unaffected"]
+
+
+def test_successful_probe_turn_closes_the_circuit(monkeypatch, tmp_path):
+    """Half-open probe -> healthy turn -> circuit fully closed. After the
+    cooldown the gate grants exactly one dispatch; if that turn succeeds the
+    provider is healthy again and the next dispatch flows too (a success ends
+    the outage for that (backend, model) pair, not just one turn)."""
+    import agent.delegate_health as dh
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        dh, "_LEDGER", dh.DelegateHealthLedger(now=lambda: clock["t"])
+    )
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    key = ("pi", str(ds._SESSIONS[sid]["model"]))
+    ledger = ds.get_delegate_health_ledger()
+    for _ in range(3):
+        ledger.record_failure(key, "rate_limit")  # opened_at == 1000, cooldown 900
+
+    clock["t"] = 1500.0  # still cooling down: the gate must refuse
+    assert ledger.check(key) is not None
+
+    clock["t"] = 1000.0 + 901.0  # cooldown elapsed: the gate grants the probe
+    probe = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="probe", parent_agent=parent
+        )
+    )
+    assert probe["success"] is True
+    summary = wait_for_status(parent, sid, "idle")
+    assert summary["error_class"] is None  # success cleared the failure state
+
+    # record_success lands right after the status transition — wait for it
+    # (bounded positive wait; a probe still in flight keeps refusing).
+    deadline = time.time() + 2.0
+    circuit = ledger.check(key)
+    while circuit is not None and time.time() < deadline:
+        time.sleep(0.01)
+        circuit = ledger.check(key)
+    # Closed, not still probing: a probe-in-flight would refuse the check; a
+    # closed circuit answers None.
+    assert circuit is None
+
+    followup = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="after recovery", parent_agent=parent
+        )
+    )
+    assert followup["success"] is True

@@ -253,6 +253,10 @@ class PiRPCClient:
         self.chat = _PiChatNamespace(self)
         self.is_closed = False
         self._proc: subprocess.Popen[str] | None = None
+        # Reader threads of the CURRENT `_proc`, replaced on every `_spawn`.
+        # Tracked so `_terminate_after_stall` can wait for their EOF cleanup
+        # before a respawn supersedes the state they write.
+        self._reader_threads: list[threading.Thread] = []
         self._stdin_lock = threading.Lock()
         self._prompt_lock = threading.Lock()
         self._pending: dict[int, list] = {}
@@ -462,8 +466,12 @@ class PiRPCClient:
             raise RuntimeError("pi rpc process did not expose stdin/stdout pipes.")
         self._proc = proc
         self._process_exited_error = None
-        threading.Thread(target=self._reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+        self._reader_threads = [
+            threading.Thread(target=self._reader, daemon=True),
+            threading.Thread(target=self._stderr_reader, daemon=True),
+        ]
+        for thread in self._reader_threads:
+            thread.start()
         return proc
 
     def _reader(self) -> None:
@@ -778,6 +786,38 @@ class PiRPCClient:
         self._spawn()
         return self._request_pi({"type": "abort"}, timeout=timeout)
 
+    def _terminate_after_stall(self) -> None:
+        """Kill a pi child that ignored the abort handshake (zombie rider).
+
+        The caller already declared this turn dead; a child that survives
+        holds delegate capacity while producing nothing until a supervisor
+        notices. A dead `_proc` makes the next `_spawn` respawn the same
+        `--session-id`, so the session binding survives transparently. Reader
+        threads EOF-exit on their own; we join them (bounded) so their cleanup
+        writes (`_settled.set()`, `_process_exited_error`, pending waiters)
+        land BEFORE a follow-up turn replaces that state, instead of racing
+        it. Fail-open by design: every failure mode still lets the caller
+        raise the typed stall.
+        """
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except Exception:
+                pass
+        for thread in self._reader_threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+        self._reader_threads = []
+
     def run_session_prompt(
         self,
         message: str,
@@ -844,7 +884,15 @@ class PiRPCClient:
                         self._send_pi({"type": "abort"})
                     except Exception:
                         pass
-                    self._settled.wait(min(10.0, max(0.1, stall_timeout)))
+                    if not self._settled.wait(min(10.0, max(0.1, stall_timeout))):
+                        # Zombie-capacity rider: the child ignored the abort
+                        # for the whole settle grace, so it is wedged mid-turn
+                        # holding delegate capacity while producing nothing
+                        # (the leaked-worker half of the A4 incident). Kill it;
+                        # the next `_spawn` respawns the SAME `--session-id`,
+                        # so recovery is a transparent respawn of the same
+                        # native session, not a lost one.
+                        self._terminate_after_stall()
                     error_class, provider_signal, retry_after = (
                         classify_delegate_failure(evidence, zero_activity=zero_activity)
                     )
