@@ -133,8 +133,12 @@ class SkillsShSource(SkillSource):
 
         # Step 1: sitemap index -> per-skill sitemap URLs.
         index_xml = _xml(self.SITEMAP_INDEX_URL, 20)
+        # <loc> targets are remote-party-controlled — a hostile index could point a
+        # sitemap at an internal address; skip anything the SSRF guard rejects.
+        # Routed through hub() (call-time module lookup) so the hub's guard — and
+        # tests — see the same function _guarded_http_get re-checks on every hop.
         skill_sitemap_urls = [m.group(1).strip() for m in self._SITEMAP_LOC_RE.finditer(index_xml or "")
-                              if "sitemap-skills" in m.group(1) and is_safe_url(m.group(1).strip())]
+                              if "sitemap-skills" in m.group(1) and hub().is_safe_url(m.group(1).strip())]
         if not skill_sitemap_urls:
             return self._featured_skills(limit)
 
