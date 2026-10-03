@@ -621,7 +621,7 @@ def test_legacy_v2_metadata_migrates_on_same_workspace_resume(tmp_path, monkeypa
     assert resumed["session_id"] == sid
     assert FakePiClient.instances[-1].session_id == sid
     upgraded = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
-    assert upgraded["version"] == 3
+    assert upgraded["version"] == 4
     assert upgraded["owner_scope"] == ds._scope_for_workspace(workspace)
 
 
@@ -924,7 +924,7 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     stale["client"].close()
 
     meta = ds._load_metadata(sid)
-    assert meta["version"] == 3
+    assert meta["version"] == 4
     assert meta["backend"] == "opencode"
     assert meta["native_session_id"] == native
 
@@ -963,7 +963,7 @@ def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     # pi session id is reused as the native session on resume
     assert resumed["native_session_id"] == "pi_native_123"
     # re-persisted using the current metadata schema
-    assert ds._load_metadata(sid)["version"] == 3
+    assert ds._load_metadata(sid)["version"] == 4
 
 
 def test_list_includes_backend_field(monkeypatch):
@@ -1468,6 +1468,9 @@ def test_prune_never_deletes_provider_health_ledger(tmp_path, monkeypatch):
     wait_for_error_text(parent, first["session_id"], "(attempt 1)")
 
     ledger = _Path(get_hermes_home()) / "cache" / "delegate-provider-health.json"
+    deadline = time.monotonic() + 5.0
+    while not ledger.is_file() and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert ledger.is_file(), "ledger must be recorded on turn failure"
 
     store = ds._session_store_root()
@@ -1479,3 +1482,132 @@ def test_prune_never_deletes_provider_health_ledger(tmp_path, monkeypatch):
     remaining = sorted(p.name for p in store.glob("*.json"))
     assert len(remaining) == 500
     assert ledger.is_file()
+
+
+# -- durable failure evidence (v4 metadata; 2026-10-02 storm) -----------------
+
+
+def wait_for_durable(sid, predicate, timeout=5.0):
+    """Wait until the persisted metadata reflects ``predicate``.
+
+    The turn thread updates the live record before its final
+    ``_persist_metadata`` write; waiting on the durable file is what proves
+    persistence actually happened (not just the in-memory state).
+    """
+    deadline = time.monotonic() + timeout
+    last = {}
+    while time.monotonic() < deadline:
+        last = ds._load_metadata(sid) or {}
+        if predicate(last):
+            return last
+        time.sleep(0.01)
+    return last
+
+
+def test_durable_metadata_persists_failure_evidence(monkeypatch):
+    """v4 metadata snapshot: status/error_class/error/consecutive_failures
+    persist durably so a restarted supervisor inherits the failure diagnosis
+    instead of rediscovering it by paying the spawn + stall cost again."""
+    parent = Parent()
+    _arm_storm(monkeypatch, 1)
+    first = _start(parent, goal="storm goal prompt text")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "(attempt 1)")
+
+    meta = wait_for_durable(
+        sid, lambda m: m.get("status") == "error" and m.get("error_class") == "rate_limit"
+    )
+    assert meta["version"] == 4
+    assert "(attempt 1)" in str(meta["error"])
+    assert meta["consecutive_failures"] == 1
+    assert isinstance(meta["pi_model"], str)
+    assert isinstance(meta["last_turn_activity_at"], float)
+    # Evidence, never conversation: durable metadata still stores no prompt
+    # text (the module's authorization surface stays IDs/cwd/workspace).
+    raw = ds._metadata_path(sid).read_text(encoding="utf-8")
+    assert "storm goal prompt text" not in raw
+
+
+def test_durable_error_text_is_bounded(monkeypatch):
+    parent = Parent()
+    _arm_storm(monkeypatch, 1, text="x" * 5000)
+    first = _start(parent, goal="long failure text")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "xxx")
+
+    meta = wait_for_durable(
+        sid, lambda m: m.get("status") == "error" and len(str(m.get("error"))) > 2000
+    )
+    assert len(str(meta["error"])) <= 2000
+
+
+def test_offline_status_survives_registry_loss(monkeypatch):
+    """The storm diagnosis must survive a gateway restart: after registry
+    loss, offline status/list rows report the persisted error state and
+    error_class instead of a bare "offline"."""
+    parent = Parent()
+    _arm_storm(monkeypatch, 1)
+    first = _start(parent, goal="will fail once")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "(attempt 1)")
+    wait_for_durable(
+        sid, lambda m: m.get("status") == "error" and m.get("error_class") == "rate_limit"
+    )
+
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    offline = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert offline["success"] is True
+    assert offline["status"] == "error"
+    assert offline["error_class"] == "rate_limit"
+    assert "(attempt 1)" in str(offline["error"])
+    assert "resume" in (offline.get("note") or "").lower()
+
+    listed = payload(ds.delegate_session(action="list", parent_agent=parent))
+    row = next(r for r in listed["sessions"] if r["session_id"] == sid)
+    assert row["status"] == "error"
+    assert row["error_class"] == "rate_limit"
+
+
+def test_offline_rows_report_liveness_not_last_idle_state():
+    """Liveness does not survive a restart: an unloaded idle session stays
+    "offline" rather than masquerading as a live idle row; only durable
+    terminal facts (error/closed) are reflected in offline rows."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+    idle = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert idle["status"] == "offline"
+
+    stopped = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid2 = stopped["session_id"]
+    payload(ds.delegate_session(action="stop", session_id=sid2, parent_agent=parent))
+    with ds._SESSION_LOCK:
+        stale2 = ds._SESSIONS.pop(sid2)
+    closed = payload(
+        ds.delegate_session(action="status", session_id=sid2, parent_agent=parent)
+    )
+    assert closed["status"] == "closed"
+
+
+def test_clean_turn_persists_clean_durable_state():
+    parent = Parent()
+    started = _start(parent, goal="succeeds")
+    sid = started["session_id"]
+    wait_for_status(parent, sid, "idle")
+
+    meta = wait_for_durable(
+        sid, lambda m: m.get("version") == 4 and m.get("status") == "idle"
+    )
+    assert meta["error"] is None
+    assert meta["error_class"] is None
+    assert meta["consecutive_failures"] == 0

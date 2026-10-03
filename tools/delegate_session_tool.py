@@ -90,8 +90,10 @@ def _metadata_path(session_id: str) -> Path:
 
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+    client = record.get("client")
+    activity_at = getattr(client, "last_turn_activity_at", None)
     return {
-        "version": 3,
+        "version": 4,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -103,6 +105,18 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # v4 (2026-10-02 provider storm): durable failure evidence. The IDs
+        # above remain the whole authorization surface — these fields are
+        # read-only forensics so a restarted supervisor can see WHY a session
+        # died, not merely that it is recoverable. Never prompt text.
+        "status": record.get("status") or "idle",
+        "error": _bounded(record.get("error"), 2000) or None,
+        "error_class": record.get("error_class"),
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "pi_model": record.get("pi_model", ""),
+        "last_turn_activity_at": (
+            float(activity_at) if isinstance(activity_at, (int, float)) else None
+        ),
     }
 
 
@@ -597,17 +611,26 @@ def _durable_summary(
     """Offline summary rebuilt from durable metadata (no client loaded)."""
     sid = str(meta.get("session_id") or "")
     native = str(meta.get("native_session_id") or meta.get("pi_session_id") or sid)
+    # v4 durable evidence: surface the persisted terminal state instead of a
+    # blanket "offline" so a restarted supervisor inherits the failure
+    # diagnosis across the restart. Liveness never survives a restart — idle
+    # rows stay "offline"; only durable facts (error/closed) are reflected.
+    persisted_status = meta.get("status")
     out: dict[str, Any] = {
         "session_id": sid,
         "backend": meta.get("backend") or "pi",
         "native_session_id": native,
         "pi_session_id": native,  # kept for model-callers
-        "status": "offline",
+        "status": persisted_status
+        if persisted_status in {"error", "closed"}
+        else "offline",
         "cwd": meta.get("cwd"),
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
+        "last_activity_at": meta.get("last_turn_activity_at")
+        or meta.get("updated_at"),
         "pending_question": None,
-        "error": None,
+        "error": meta.get("error") or None,
         "error_class": meta.get("error_class"),
     }
     if note:
