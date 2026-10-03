@@ -65,6 +65,47 @@ def test_default_root_dot_profile_home_keeps_existing_mapping(monkeypatch, tmp_p
     assert root == tmp_path / "hermes"
 
 
+def test_default_root_sandbox_under_a_pinned_native_home_stays_a_sandbox(
+    monkeypatch, tmp_path
+):
+    """Invariant, pinned against a native home we control (the tests above only
+    exercise the collapse when pytest's own HOME happens to be the operator's —
+    the parallel runner hands every worker a throwaway HOME, so they pass
+    vacuously there). A non-profile ``HERMES_HOME`` under the native root must
+    resolve to itself, never collapse onto the production root; a profile home
+    under the same root must keep resolving to the root. Kanban resolution
+    follows the root, so this is the wave-9/wave-12 leak precondition."""
+    import hermes_constants
+    from hermes_cli import kanban_db as kb
+
+    native = tmp_path / "native-home"
+    native.mkdir()
+    monkeypatch.setattr(
+        hermes_constants, "_get_platform_default_hermes_home", lambda: native
+    )
+    monkeypatch.setattr(
+        hermes_constants, "_default_hermes_root_memo", None, raising=False
+    )
+
+    sandbox = native / "tmp" / "pytest-something" / "worker-home"
+    monkeypatch.setenv("HERMES_HOME", str(sandbox))
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    assert hermes_constants.get_default_hermes_root() == sandbox
+    assert kb.kanban_home() == sandbox
+    assert kb.kanban_db_path() == sandbox / "kanban.db"
+
+    # The profile shape under the SAME native root keeps collapsing to it:
+    # the board is shared across profiles by design (kanban_home docstring).
+    profile = native / "profiles" / "worker"
+    monkeypatch.setattr(
+        hermes_constants, "_default_hermes_root_memo", None, raising=False
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    assert hermes_constants.get_default_hermes_root() == native
+
+
 # ---------------------------------------------------------------------------
 # kanban choke-point guard: production board refused from a test context,
 # regardless of conftest patch timing
