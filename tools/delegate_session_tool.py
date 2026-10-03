@@ -23,6 +23,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent.delegate_provider_health import (
+    classify_delegate_failure,
+    health_snapshot,
+    provider_unavailable_error,
+    record_outcome,
+)
 from agent.opencode_client import OpenCodeClient
 from agent.pi_rpc_client import PiRPCClient, pending_question_for_owner
 from agent.runtime_cwd import resolve_agent_cwd
@@ -546,6 +552,7 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         ),
         "pending_question": _pending_payload(record),
         "error": record.get("error") or None,
+        "error_class": record.get("error_class"),
     }
     if include_result and record.get("last_result"):
         result = record["last_result"]
@@ -601,6 +608,7 @@ def _durable_summary(
         "updated_at": meta.get("updated_at"),
         "pending_question": None,
         "error": None,
+        "error_class": meta.get("error_class"),
     }
     if note:
         out["note"] = note
@@ -635,7 +643,14 @@ def _dead_client_error(record: Dict[str, Any], backend: str) -> Optional[str]:
     with _SESSION_LOCK:
         record["status"] = "error"
         record["error"] = f"{backend} delegate process exited with code {exit_code}"
+        record["error_class"] = "transport"
+        record["consecutive_failures"] = (
+            int(record.get("consecutive_failures") or 0) + 1
+        )
         record["updated_at"] = time.time()
+    record_outcome(
+        record.get("backend") or "pi", record.get("pi_model", ""), "transport"
+    )
     _persist_metadata(record)
     return (
         f"{backend} delegate process exited with code {exit_code}. "
@@ -684,8 +699,15 @@ def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
     backend = record.get("backend") or "pi"
     with _SESSION_CONDITION:
         record["error"] = f"{backend} delegate process exited with code {exit_code}"
+        record["error_class"] = "transport"
+        record["consecutive_failures"] = (
+            int(record.get("consecutive_failures") or 0) + 1
+        )
         changed = _transition_status_locked(record, "error")
     if changed:
+        record_outcome(
+            record.get("backend") or "pi", record.get("pi_model", ""), "transport"
+        )
         _persist_metadata(record)
     return changed
 
@@ -711,15 +733,30 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 _transition_status_locked(record, "idle")
             else:
                 record["updated_at"] = time.time()
+            record["error_class"] = None
+            record["consecutive_failures"] = 0
+        record_outcome(record.get("backend") or "pi", record.get("pi_model", ""), None)
         _persist_metadata(record)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
+        error_class = classify_delegate_failure(
+            exc,
+            backend=record.get("backend") or "pi",
+            model=record.get("pi_model", ""),
+        )
         with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
+            record["error_class"] = error_class
+            record["consecutive_failures"] = (
+                int(record.get("consecutive_failures") or 0) + 1
+            )
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
                 record["updated_at"] = time.time()
+        record_outcome(
+            record.get("backend") or "pi", record.get("pi_model", ""), error_class
+        )
         _persist_metadata(record)
 
 
@@ -783,9 +820,10 @@ def delegate_session(
         "messages",
         "list",
         "stop",
+        "health",
     }:
         return tool_error(
-            "Unknown action. Use start, resume, send, steer, status, wait, messages, list, or stop."
+            "Unknown action. Use start, resume, send, steer, status, wait, messages, list, stop, or health."
         )
     if backend is not None and str(backend).strip().lower() not in _KNOWN_BACKENDS:
         return tool_error(f"Unknown backend {backend!r}. Use 'pi' or 'opencode'.")
@@ -800,6 +838,14 @@ def delegate_session(
     except (TypeError, ValueError):
         return tool_error("wait_seconds must be a number between 0 and 3600.")
     owner = _owner_key(parent_agent)
+
+    if normalized == "health":
+        # Read-only evidence plane for the provider-health ledger: rows for
+        # every (backend, model) pair with recorded delegate outcomes,
+        # including open circuits. Never gated itself.
+        return json.dumps(
+            {"success": True, "providers": health_snapshot()}, ensure_ascii=False
+        )
 
     if normalized == "list":
         caller_scope = _scope_for_workspace()
@@ -872,6 +918,12 @@ def delegate_session(
                         # no-op: silently dropping the goal made every later
                         # phase of a multi-turn delegation appear to succeed
                         # while no work ran (conductor v5/v6 cycles).
+                        gate = provider_unavailable_error(
+                            existing.get("backend") or "pi",
+                            existing.get("pi_model", ""),
+                        )
+                        if gate:
+                            return tool_error(gate)
                         _dispatch_turn(
                             existing, _initial_prompt(goal, context), effective_timeout
                         )
@@ -920,6 +972,7 @@ def delegate_session(
                 )
 
         client_kwargs: dict[str, Any] = {}
+        model_arg = ""
         if backend_name == "pi":
             # Without an explicit model pi falls back to its built-in
             # Anthropic model and dies with 401 on keyless installs.
@@ -929,6 +982,14 @@ def delegate_session(
             model_arg = explicit_model or _pi_model_for_parent(parent_agent)
             if model_arg:
                 client_kwargs["args"] = ["--model", model_arg]
+        # Provider-health gate (2026-10-02 storm): when this (backend, model)
+        # pair's circuit is open, fail fast BEFORE spawning a client — every
+        # dispatch would otherwise pay the full spawn + turn + stall-timeout
+        # cost again while the provider is down, and those retries amplified
+        # the storm into host thread/fork/ENOSPC exhaustion.
+        gate = provider_unavailable_error(backend_name, model_arg)
+        if gate:
+            return tool_error(gate)
         def _make_client(native_session_id: str):
             created = client_class(
                 persistent_session=True,
@@ -985,12 +1046,26 @@ def delegate_session(
                             "Could not close failed Pi recovery delegate client",
                             exc_info=True,
                         )
+                    record_outcome(
+                        backend_name,
+                        model_arg,
+                        classify_delegate_failure(
+                            recovery_exc, backend=backend_name, model=model_arg
+                        ),
+                    )
                     return tool_error(
                         "Could not start pi delegate session after fresh-native "
                         f"recovery: {_bounded(recovery_exc, 1000)} "
                         f"(original: {_bounded(exc, 400)})"
                     )
             else:
+                record_outcome(
+                    backend_name,
+                    model_arg,
+                    classify_delegate_failure(
+                        exc, backend=backend_name, model=model_arg
+                    ),
+                )
                 return tool_error(
                     f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
                 )
@@ -999,6 +1074,9 @@ def delegate_session(
         record: Dict[str, Any] = {
             "session_id": handle,
             "backend": backend_name,
+            "pi_model": model_arg,
+            "error_class": None,
+            "consecutive_failures": 0,
             "native_session_id": native_id,
             "owner": owner,
             "owner_scope": _scope_for_workspace(cwd),
@@ -1150,6 +1228,11 @@ def delegate_session(
                 return tool_error(
                     "Delegate session is closed. Use action='resume' to reopen it."
                 )
+        gate = provider_unavailable_error(
+            session_backend, record.get("pi_model", "")
+        )
+        if gate:
+            return tool_error(gate)
         _dispatch_turn(record, text, effective_timeout)
         return json.dumps(
             {
@@ -1177,6 +1260,11 @@ def delegate_session(
                 # Auto-degrade: the turn already ended (or the backend has no
                 # live steer), so route the message through the send path so
                 # the course-correction is not lost to a race window.
+                gate = provider_unavailable_error(
+                    session_backend, record.get("pi_model", "")
+                )
+                if gate:
+                    return tool_error(gate)
                 _dispatch_turn(record, text, effective_timeout)
                 return json.dumps(
                     {
@@ -1232,7 +1320,11 @@ DELEGATE_SESSION_SCHEMA = {
         "Backend questions are answered automatically by the supervising "
         "Hermes agent rather than forwarded to the user. Pi is the default "
         "backend; pass backend='opencode' to delegate to OpenCode via its "
-        "server API. delegate_task remains the Hermes child-agent primitive."
+        "server API. delegate_task remains the Hermes child-agent primitive. "
+        "Provider health: after repeated provider failures on a (backend, "
+        "model) pair, dispatch fails fast with a typed provider_unavailable "
+        "error until the circuit half-opens; action='health' reports the "
+        "per-provider circuit state."
     ),
     "parameters": {
         "type": "object",
@@ -1249,8 +1341,13 @@ DELEGATE_SESSION_SCHEMA = {
                     "messages",
                     "list",
                     "stop",
+                    "health",
                 ],
-                "description": "Session lifecycle/control action. Omit for start.",
+                "description": (
+                    "Session lifecycle/control action. Omit for start. "
+                    "action='health' reports per-provider circuit state "
+                    "(no session_id needed, read-only)."
+                ),
             },
             "session_id": {
                 "type": "string",

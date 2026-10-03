@@ -1161,3 +1161,321 @@ def test_dispatch_turn_uses_non_daemon_thread(monkeypatch):
     assert captured["started"] is True
     assert captured["daemon"] is False
     assert record["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# Provider-health surface: typed failure classes + (backend, model)-keyed
+# fail-fast breaker (2026-10-02 storm regression).
+# ---------------------------------------------------------------------------
+
+
+class StormPiClient(FakePiClient):
+    """pi backend mid provider-storm: armed turns fail with storm text.
+
+    Each armed failure raises ``<failure_text> (attempt N)`` where N is the
+    1-based ordinal among the armed failures — the async dispatch makes a
+    specific turn's failure observable only through the status payload's
+    bounded error text, so tests wait on that ordinal.
+    """
+
+    fail_next = 0
+    armed = 0
+    failure_text = (
+        "429 rate_limit_error: All credentials for model glm-4.6 are cooling down"
+    )
+
+    def run_session_prompt(self, message, *, timeout_seconds=900.0):
+        cls = type(self)
+        if cls.fail_next > 0:
+            ordinal = cls.armed - cls.fail_next + 1
+            cls.fail_next -= 1
+            raise Exception(f"{cls.failure_text} (attempt {ordinal})")
+        return super().run_session_prompt(message, timeout_seconds=timeout_seconds)
+
+
+def _arm_storm(monkeypatch, failures: int, text: str | None = None) -> None:
+    """Point the tool at ``StormPiClient`` and arm ``failures`` failing turns.
+
+    Armed through monkeypatch so the class state (including the failure
+    text) is restored after each test — a bare class assignment would leak
+    the storm into later tests sharing this file's process.
+    """
+    monkeypatch.setattr(ds, "PiRPCClient", StormPiClient)
+    monkeypatch.setattr(StormPiClient, "fail_next", failures)
+    monkeypatch.setattr(StormPiClient, "armed", failures)
+    if text is not None:
+        monkeypatch.setattr(StormPiClient, "failure_text", text)
+
+
+def _start(parent: Parent, *, goal: str | None = None) -> dict:
+    return payload(
+        ds.delegate_session(action="start", goal=goal, parent_agent=parent)
+    )
+
+
+def wait_for_error_text(
+    parent: Parent, sid: str, needle: str, timeout: float = 2.0
+) -> dict:
+    deadline = time.time() + timeout
+    latest: dict = {}
+    while time.time() < deadline:
+        latest = payload(
+            ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+        )
+        if needle in str(latest.get("error") or ""):
+            return latest
+        time.sleep(0.01)
+    raise AssertionError(f"session error never contained {needle!r}: {latest}")
+
+
+def test_start_fails_fast_when_provider_circuit_opens(monkeypatch):
+    """2026-10-02 storm regression: after two provider-class turn failures the
+    next dispatch must fail fast instead of paying the full spawn + turn +
+    stall-timeout cost again — retries amplified the storm into host
+    thread/fork/ENOSPC exhaustion."""
+    parent = Parent()
+    _arm_storm(monkeypatch, 2)
+
+    first = _start(parent, goal="first dispatch")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "(attempt 1)")
+
+    second = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="second dispatch", parent_agent=parent
+        )
+    )
+    assert second["success"] is True
+    wait_for_error_text(parent, sid, "(attempt 2)")
+
+    # Circuit open: a third start must fail fast BEFORE spawning any client.
+    gate = _start(parent, goal="third dispatch")
+    assert "provider_unavailable: pi/" in gate["error"], gate
+    assert len(StormPiClient.instances) == 1
+
+    # The health action is itself part of the evidence plane: it reports the
+    # open circuit while the outage is in progress.
+    health = payload(ds.delegate_session(action="health", parent_agent=parent))
+    assert health["providers"]["pi/"]["state"] == "open"
+    assert health["providers"]["pi/"]["error_class"] == "rate_limit"
+    assert health["providers"]["pi/"]["retry_after_s"] >= 1
+
+    # D4 invariant: read actions stay available while the circuit is open —
+    # the evidence plane must never be gated by the outage it describes.
+    readable = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert readable["success"] is True
+    assert readable["error_class"] == "rate_limit"
+    listed = payload(ds.delegate_session(action="list", parent_agent=parent))
+    assert listed["success"] is True
+    assert any(row.get("session_id") == sid for row in listed["sessions"])
+
+    # The same lane's follow-up paths are gated too.
+    steer = payload(
+        ds.delegate_session(
+            action="steer", session_id=sid, message="redirect", parent_agent=parent
+        )
+    )
+    assert "provider_unavailable: pi/" in steer["error"], steer
+    send = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="another", parent_agent=parent
+        )
+    )
+    assert "provider_unavailable: pi/" in send["error"], send
+
+
+def test_followup_start_on_live_session_respects_provider_gate(monkeypatch):
+    parent = Parent()
+    _arm_storm(monkeypatch, 2)
+
+    stormy = _start(parent, goal="will fail once")
+    sid_a = stormy["session_id"]
+    wait_for_error_text(parent, sid_a, "(attempt 1)")
+    idle = _start(parent)
+    sid_b = idle["session_id"]
+
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid_a, message="second failure", parent_agent=parent
+        )
+    )
+    wait_for_error_text(parent, sid_a, "(attempt 2)")
+
+    follow = payload(
+        ds.delegate_session(
+            action="start", session_id=sid_b, goal="follow-up turn", parent_agent=parent
+        )
+    )
+    assert "provider_unavailable: pi/" in follow["error"], follow
+    # No prompt was delivered to the idle session's client.
+    client_b = StormPiClient.instances[-1]
+    assert client_b.messages == []
+
+
+def test_health_action_reports_provider_rows(monkeypatch):
+    parent = Parent()
+    _arm_storm(monkeypatch, 1)
+    first = _start(parent, goal="single provider failure")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "(attempt 1)")
+
+    health = payload(ds.delegate_session(action="health", parent_agent=parent))
+    assert health["success"] is True
+    row = health["providers"]["pi/"]
+    assert row["error_class"] == "rate_limit"
+    # One provider failure is evidence, not an outage: no circuit opened.
+    assert row["state"] == "closed"
+
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert status["error_class"] == "rate_limit"
+
+
+def test_successful_turn_clears_error_class(monkeypatch):
+    parent = Parent()
+    _arm_storm(monkeypatch, 1)
+    first = _start(parent, goal="fail once")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "(attempt 1)")
+
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="now succeed", parent_agent=parent
+        )
+    )
+    wait_for_status(parent, sid, "idle")
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert status["error_class"] is None
+    # The ledger row keeps the last failure class as durable evidence (the
+    # storm story must survive recovery) but reports health: counters reset.
+    health = payload(ds.delegate_session(action="health", parent_agent=parent))
+    row = health["providers"]["pi/"]
+    assert row["state"] == "closed"
+    assert row["consecutive_failures"] == 0
+    assert row["opens"] == 0
+
+
+def test_host_pressure_failure_is_evidence_but_never_gates(monkeypatch):
+    """Host-resource casualties of a storm (thread/fork/ENOSPC) are typed
+    evidence but must not gate dispatch: gating on them would amplify the
+    very outage being survived."""
+    parent = Parent()
+    _arm_storm(monkeypatch, 2, "can't start new thread")
+
+    first = _start(parent, goal="fails")
+    sid = first["session_id"]
+    wait_for_error_text(parent, sid, "(attempt 1)")
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="fails again", parent_agent=parent
+        )
+    )
+    wait_for_error_text(parent, sid, "(attempt 2)")
+
+    health = payload(ds.delegate_session(action="health", parent_agent=parent))
+    assert health["providers"]["pi/"]["error_class"] == "resource_exhausted"
+    assert health["providers"]["pi/"]["state"] == "closed"
+
+    # Even after two host-pressure failures a fresh dispatch still runs.
+    third = _start(parent, goal="still allowed")
+    assert third["success"] is True, third
+    sid3 = third["session_id"]
+    wait_for_status(parent, sid3, "idle")
+
+
+def test_bootstrap_failure_is_classified_without_gating(monkeypatch):
+    """A start that cannot even bootstrap its client is typed evidence
+    (transport) with today's bounded error text unchanged — and never opens
+    the provider circuit: a spawn hiccup must not strand the lane."""
+    parent = Parent()
+
+    class NeverStartingPi(FakePiClient):
+        instances = []
+
+        def start(self, *, timeout=30.0):
+            raise TimeoutError("pi did not answer command 'get_state'")
+
+    monkeypatch.setattr(ds, "PiRPCClient", NeverStartingPi)
+
+    result = _start(parent)
+    assert result["error"] == (
+        "Could not start pi delegate session: pi did not answer command 'get_state'"
+    )
+
+    health = payload(ds.delegate_session(action="health", parent_agent=parent))
+    row = health["providers"]["pi/"]
+    assert row["error_class"] == "transport"
+    assert row["state"] == "closed"
+
+
+def test_dead_process_failure_is_transport_evidence_not_gating(monkeypatch):
+    """A pi RPC process that died mid-session surfaces the existing
+    dead-client error plus error_class='transport' — evidence only, never a
+    provider-circuit opening (process death is not provider health)."""
+    parent = Parent()
+    started = _start(parent)
+    sid = started["session_id"]
+    wait_for_status(parent, sid, "idle")
+    client = FakePiClient.instances[-1]
+
+    class _DeadProc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    client._proc = _DeadProc()
+
+    send = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="into the void", parent_agent=parent
+        )
+    )
+    assert "exited with code 1" in send["error"], send
+
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert status["error_class"] == "transport"
+    health = payload(ds.delegate_session(action="health", parent_agent=parent))
+    assert health["providers"]["pi/"]["error_class"] == "transport"
+    assert health["providers"]["pi/"]["state"] == "closed"
+
+
+def test_unknown_action_message_lists_health():
+    parent = Parent()
+    result = payload(ds.delegate_session(action="bogus", parent_agent=parent))
+    assert "health" in result["error"]
+
+
+def test_prune_never_deletes_provider_health_ledger(tmp_path, monkeypatch):
+    """The provider-health ledger lives in cache/ OUTSIDE the pruned
+    delegate-sessions store: durable health memory must survive the 500-file
+    metadata cap."""
+    from pathlib import Path as _Path
+
+    import agent.delegate_provider_health as dph
+    from hermes_constants import get_hermes_home
+
+    parent = Parent()
+    _arm_storm(monkeypatch, 1)
+    first = _start(parent, goal="one recorded failure")
+    wait_for_error_text(parent, first["session_id"], "(attempt 1)")
+
+    ledger = _Path(get_hermes_home()) / "cache" / "delegate-provider-health.json"
+    assert ledger.is_file(), "ledger must be recorded on turn failure"
+
+    store = ds._session_store_root()
+    store.mkdir(parents=True, exist_ok=True)
+    for i in range(505):
+        (store / f"s{i:04d}.json").write_text("{}", encoding="utf-8")
+    ds._prune_durable_metadata(store)
+
+    remaining = sorted(p.name for p in store.glob("*.json"))
+    assert len(remaining) == 500
+    assert ledger.is_file()
