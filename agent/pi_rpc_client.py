@@ -857,7 +857,7 @@ class PiRPCClient:
             proc = subprocess.run(
                 ["git", "-C", self._cwd, "status", "--porcelain"],
                 capture_output=True,
-                text=True,
+                text=True, errors="replace",
                 timeout=15,
             )
         except Exception:
