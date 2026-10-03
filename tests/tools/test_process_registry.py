@@ -3202,6 +3202,29 @@ def test_model_not_found_notice_absent_when_configured_model_not_named(monkeypat
     assert "SUBAGENT MODEL REJECTED" not in text
 
 
+def test_model_not_found_notice_absent_when_only_completed_tasks_quote_rejection(monkeypatch):
+    """A completed task's summary can quote a model rejection it merely investigated;
+    with every task completed there was no config-level rejection (#129450)."""
+    evt = _make_delegation_batch_evt([
+        {
+            "task_index": 0,
+            "status": "completed",
+            "goal": "Investigate the bad model report",
+            "summary": "Root cause: HTTP 400 said upstage/solar-pro-4 is not a valid model ID",
+            "api_calls": 2,
+        },
+        {
+            "task_index": 1,
+            "status": "success",
+            "goal": "B",
+            "summary": "ok",
+        },
+    ])
+    _patch_delegation_config(monkeypatch)
+    text = _format_async(evt)
+    assert "SUBAGENT MODEL REJECTED" not in text
+
+
 def test_model_not_found_notice_single_dispatch(monkeypatch):
     evt = {
         "type": "async_delegation",

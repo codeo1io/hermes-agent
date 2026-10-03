@@ -32,6 +32,16 @@ from gateway.shutdown_watchdog import arm_shutdown_watchdog, resolve_shutdown_wa
 logger = logging.getLogger("gateway.run")
 
 
+class _RestartRequesterGone(Exception):
+    """The process that requested a plain planned-stop restart died mid-wait.
+
+    Only that requester ever performs the restart, so continuing to wait would
+    strand the gateway draining with nothing left to revive it. Raised by
+    ``_raise_if_restart_requester_gone``; the restart task catches it, clears
+    the orphaned marker and resumes serving instead.
+    """
+
+
 def _exit_with_failure_verdict(runner) -> bool:
     """True (after logging the reason) when the runner asked for a failure exit."""
     if not runner.should_exit_with_failure:

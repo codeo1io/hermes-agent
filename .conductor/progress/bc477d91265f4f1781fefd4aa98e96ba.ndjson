@@ -1,0 +1,3 @@
+{"step":2,"ts":"2026-09-30T18:12:49Z","summary":"rm-049a authored _RestartRequesterGone in gateway/run_shutdown.py; 4 symbols import OK","touched":["gateway/run_shutdown.py"]}
+{"step":2,"ts":"2026-09-30T18:15:05Z","summary":"rm-049a authored _RestartRequesterGone; battery 12p/0f","touched":["gateway/run_shutdown.py"]}
+{"step":3,"ts":"2026-09-30T18:15:39Z","summary":"rm-049a DONE: _RestartRequesterGone authored in gateway/run_shutdown.py; battery 11 passed (was collection error)","touched":["gateway/run_shutdown.py","tests/gateway/test_stale_planned_stop_cancel.py"]}

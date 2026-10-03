@@ -38,8 +38,9 @@ _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "api_server"})
 
 # Gateway platforms whose adapter declares ``supports_async_delivery = False`` (request/response
-# only, ``send()`` is a stub) — a cron report can never reach them, so they are never a
-# deliver=origin destination.
+# only, ``send()`` is a stub) — honouring such an origin as a deliver=origin PUSH destination fails
+# every fire, so _resolve_origin treats it as missing (home-channel fallback, #69304). The explicit
+# bare ``api_server`` deliver token bypasses this via the transcript lane instead.
 _NON_PUSH_ORIGIN_PLATFORMS = frozenset({"api_server"})
 
 # Platforms supporting a cron/notification home target -> env var used by gateway config.
@@ -93,12 +94,16 @@ def _resolve_origin(job: dict) -> Optional[dict]:
     attempt with ``'str' object has no attribute 'get'`` — ``mark_job_run`` recorded the failure, but the
     next tick re-loaded the same poisoned origin and crashed identically until the field was patched
     manually (#18722).
+
+    api_server origins stay suppressed here (#69304): ``deliver=origin`` keeps its home-channel
+    fallback. The explicit bare ``api_server`` deliver token reads the RAW origin instead — see
+    ``_resolve_single_delivery_target`` — because that token names the transcript lane itself.
     """
     origin = job.get("origin")
     if isinstance(origin, dict) and origin.get("platform") and origin.get("chat_id"):
-        # Jobs stamped before non-push origins stopped being captured (#69304): the api_server
-        # adapter's send() is a stub, so honouring this origin fails every fire with
-        # last_status=ok. Treat it as missing so deliver=origin takes the home-channel fallback.
+        # The api_server adapter's send() is a stub, so honouring this origin as a push
+        # destination fails every fire with last_status=ok. Treat it as missing so
+        # deliver=origin takes the home-channel fallback instead of losing the report.
         if str(origin["platform"]).lower() in _NON_PUSH_ORIGIN_PLATFORMS:
             return None
         return origin
@@ -677,13 +682,19 @@ def _resolve_single_delivery_target(
     platform_name = deliver_value
     # Bare "api_server" is a transcript address, not a home-channel platform: the
     # target is the ORIGIN session id (chat_id IS the session id for this
-    # surface; _deliver_to_api_server_transcript appends there). No env/home
-    # fallback exists — with no origin the target does not resolve.
+    # surface; _deliver_to_api_server_transcript appends there). The RAW job
+    # origin is read — _resolve_origin() suppresses api_server origins (#69304)
+    # for deliver=origin routing — because this explicit token names the
+    # transcript lane itself. No env/home fallback exists: with no origin the
+    # target does not resolve.
     if platform_name.lower() == "api_server":
-        if origin and str(origin.get("platform") or "").lower() == "api_server":
+        raw_origin = job.get("origin")
+        if (isinstance(raw_origin, dict)
+                and str(raw_origin.get("platform") or "").lower() == "api_server"
+                and raw_origin.get("chat_id")):
             return {
                 "platform": platform_name,
-                "chat_id": str(origin["chat_id"]),
+                "chat_id": str(raw_origin["chat_id"]),
                 "thread_id": None,
                 "_resolved_from": "home",  # mirror-eligible primary conversation
             }
@@ -785,6 +796,56 @@ def _format_failure_streams(result) -> str:
             f"stdout: {kept[-_BOT_CHAT_STDOUT_TAIL:]}" if kept
             else "stdout was only the resume banner")
     return redact_sensitive_text(" | ".join(parts), force=True, redact_url_credentials=True)
+
+
+def _deliver_to_api_server_transcript(job: dict, session_id: str, content: str) -> Optional[str]:
+    """Append an api_server cron result to the target session's transcript.
+
+    api_server is a request/response surface with no push lane (``send()`` is a permanent
+    stub), so a cron result reaches the operator by becoming the next inbound turn of the
+    session that owns the job — the same visibility model the Bot Chat and kanban wake
+    lanes use. Output becomes visible when the client next polls history. ``session_id``
+    is the RAW state.db key (an api_server origin's ``chat_id`` IS the session id).
+
+    None means appended (or nothing to append); otherwise an honest error string that
+    never claims a send was attempted — this surface has no send to fail.
+    """
+    text = (content or "").strip()
+    if not text:
+        return None  # nothing to append; do not even open the DB
+    job_label = _redact_cron_payload(str(job.get("name") or job.get("id") or "cron"), "job name")
+    message = (
+        f'[Cronjob "{job_label}" output — scheduled job, not the user. '
+        f"Review it, act on anything that needs action, and summarize.]\n\n{text}"
+    )
+    db = None
+    try:
+        from hermes_state import SessionDB  # call-time binding: patchable per delivery
+        db = SessionDB()
+        row = db.get_session(session_id)
+        target_id = session_id
+        if not row:
+            # Rotation lineage: a resumed/rotated id may be historical — follow the chain
+            # to the live tip before declaring the target gone.
+            redirected = None
+            with contextlib.suppress(Exception):
+                redirected = db.resolve_resume_session_id(session_id)
+            if redirected and redirected != session_id:
+                row = db.get_session(redirected)
+                if row:
+                    target_id = redirected
+        if not row:
+            return (f"api_server delivery target session {session_id} does not exist; "
+                    "nothing was appended")
+        try:
+            db.append_message(session_id=target_id, role="user", content=message)
+        except Exception as exc:
+            return f"api_server transcript append failed for session {target_id}: {exc}"
+        return None
+    finally:
+        if db is not None:
+            with contextlib.suppress(Exception):
+                db.close()
 
 
 def _deliver_to_bot_chat(job: dict, content: str, profile: str, *, deferred: Optional[dict] = None,

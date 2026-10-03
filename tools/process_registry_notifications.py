@@ -94,12 +94,21 @@ def _delegation_config() -> dict:
 def _delegation_model_not_found(results, config) -> bool:
     """True when a result reflects a config-level model_not_found rejection: needs a
     model-not-found phrase AND the currently-configured model name in the same text,
-    so a stale task failing on a removed model is not mis-attributed to the config."""
+    so a stale task failing on a removed model is not mis-attributed to the config.
+
+    Only results that did NOT complete are evidence: a config-level rejection fails
+    every task before any work, so a completed task whose summary quotes a model
+    rejection (a child that investigated a bad model name) must not misreport the
+    whole batch as rejected (#129450)."""
     model = str((config or {}).get("model") or "").lower()
     if not model:
         return False
     patterns = _model_not_found_patterns()
-    texts = (" ".join(str(x) for x in (r.get("error"), r.get("summary")) if x).lower() for r in results or [])
+    texts = (
+        " ".join(str(x) for x in (r.get("error"), r.get("summary")) if x).lower()
+        for r in results or []
+        if r.get("status") not in _DONE
+    )
     return any(model in text and any(p in text for p in patterns) for text in texts)
 
 

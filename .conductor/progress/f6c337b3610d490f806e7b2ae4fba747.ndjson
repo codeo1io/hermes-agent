@@ -1,0 +1,4 @@
+{"step":1,"ts":"2026-10-03T00:00:00Z","summary":"verified prior dead attempts' in-tree work (4 product units), found 1 gap: bare-token api_server resolution defeated by #69304 origin suppression","touched":[]}
+{"step":2,"ts":"2026-10-03T00:00:00Z","summary":"redesigned: _resolve_origin keeps #69304 suppression for deliver=origin; bare 'api_server' token reads RAW job origin — both contract files green (15/15)","touched":["cron/scheduler_delivery.py"]}
+{"step":3,"ts":"2026-10-03T00:00:00Z","summary":"authored #129450 invariant test (completed-task summary quoting rejection => no notice), proven red on base via stash/apply","touched":["tools/process_registry_notifications.py","tests/tools/test_process_registry.py"]}
+{"step":4,"ts":"2026-10-03T00:00:00Z","summary":"focused battery green: 152 files / 1951 passed / 0 failed (tests/cron/ + gateway shutdown + tools delegate/registry + agent interrupt); collection sweep 56196 collected 0 errors","touched":[]}
