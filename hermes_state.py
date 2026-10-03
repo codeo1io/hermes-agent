@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from hermes_constants import get_hermes_home, mkdir_under_hermes_home
@@ -175,6 +175,11 @@ _READ_OPEN_RETRY_SECONDS = 60.0
 # Deliberately NOT for writable opens: a writer owns the transition, so an IOERR there is a real
 # storage/fd problem. A persistent IOERR still exhausts the budget and propagates.
 _READ_ONLY_IOERR_RETRY_ATTEMPTS, _READ_ONLY_IOERR_RETRY_BACKOFF_S = 3, 0.05
+
+# A reader waits out a sibling PROCESS's commit (its journal+db fsyncs) instead of
+# surfacing "database is locked" to the dashboard / `hermes sessions list`.
+# Writes keep their short busy timeout and retry at application level with jitter.
+_READ_BUSY_TIMEOUT_S = 5.0
 
 
 def _default_db_path() -> Path:
@@ -684,7 +689,7 @@ class SessionDB(
         leaked tracked connection cannot block the forensic backup the writable heal takes next."""
         for attempt in range(_READ_ONLY_IOERR_RETRY_ATTEMPTS + 1):
             try:
-                self._conn = conn = self._connect_read_only(timeout=1.0)
+                self._conn = conn = self._connect_read_only(timeout=_READ_BUSY_TIMEOUT_S)
                 try:
                     apply_database_pragmas(conn, db_label="state.db")
                     cursor = conn.cursor()
@@ -828,7 +833,7 @@ class SessionDB(
             return None
         conn = None  # bound before the try so the handlers can close a half-open one
         try:
-            conn = self._connect_read_only(timeout=5.0)
+            conn = self._connect_read_only(timeout=_READ_BUSY_TIMEOUT_S)
             apply_database_pragmas(conn, db_label="state.db")
             if self._fts_cjk_loaded:  # registers in the connection, not the file: ro is fine
                 load_fts5_cjk_extension(conn)
@@ -901,7 +906,20 @@ class SessionDB(
         with self._lock:
             if self._conn is None:  # close() raced a still-unwinding reader
                 self._reopen_after_close_locked(context="read")
-            yield cast(sqlite3.Connection, self._conn)
+            if self._wal_active or self.read_only:
+                yield cast(sqlite3.Connection, self._conn)
+                return
+            conn = cast(sqlite3.Connection, self._conn)
+            busy_timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            if busy_timeout_ms < int(_READ_BUSY_TIMEOUT_S * 1000):
+                conn.execute(f"PRAGMA busy_timeout = {int(_READ_BUSY_TIMEOUT_S * 1000)}")
+                try:
+                    yield conn
+                finally:
+                    with suppress(sqlite3.Error):
+                        conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+            else:
+                yield conn
 
     def _reopen_after_close_locked(self, context: str = "write") -> None:
         """Reopen the writer after ``close()`` raced a live caller (a teardown owner
