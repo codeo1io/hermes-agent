@@ -4,7 +4,8 @@
 The minimum-viable replacement for pytest-xdist + a subprocess-isolation
 plugin. Discovers test files under ``tests/`` (excluding integration/e2e
 unless explicitly requested), then runs one ``python -m pytest <file>``
-subprocess per file, with bounded parallelism (default: ``os.cpu_count()``).
+subprocess per file, with bounded parallelism (default: cpu_count*2, bounded
+by the ambient cgroup's CPU/pids limits — see the Env section).
 
 Why per-file rather than per-test?
     Per-test spawn overhead (~250ms × 17k tests = 70min CPU minimum)
@@ -34,7 +35,16 @@ Usage:
     pytest failure. Tokens after ``--`` are never validated.
 
 Environment:
-    HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
+    HERMES_TEST_WORKERS  Hard override of the worker count (never
+                         cgroup-capped). The default is cpu_count*2
+                         bounded by the ambient cgroup: at most the most
+                         binding cpu.max over the self→root chain,
+                         pids.max/32, and (pids.max - pids.current)/8 of
+                         live headroom — so concurrent test sessions
+                         sharing one pids budget bound each other instead
+                         of oversubscribing it past EAGAIN. Fails open to
+                         plain cpu_count*2 when no cgroup truth is
+                         readable (bare-metal, exotic sandboxes).
     HERMES_TEST_PATHS    Override discovery roots (colon-sep; on Windows
                          ';' also works and drive letters are handled;
                          default: 'tests')
@@ -46,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -54,6 +65,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -121,6 +133,28 @@ _DEFAULT_FILE_RETRIES = 1
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+
+# --- cgroup-derived default worker bound ---------------------------------
+#
+# WHY cgroup truth at all: the fleet runs many concurrent test sessions
+# inside one systemd unit (shared pids/TasksMax budget). A pure
+# cpu_count()*2 default lets N simultaneous sessions each plan ~2×cores
+# pytest subprocesses; past pids.max every further spawn dies with EAGAIN —
+# the "tests dispatch but never run" failure mode. The bound is derived
+# from the same numbers the kernel enforces, so sessions coordinate with
+# no config knob. Systemd TasksMax sizing itself stays the ops lane.
+_CGROUP_V2_MOUNT_ROOT = "/sys/fs/cgroup"  # monkeypatch/inject in tests
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
+
+# Static pids ceiling: never plan more than 1/32 of pids.max in workers
+# alone (16 concurrent sessions × 768/32 = 384 planned processes — an
+# order below a TasksMax of 768).
+_PIDS_STATIC_DIVISOR = 32
+
+# Live headroom: a starting runner claims at most 1/8 of the pids budget
+# still free, so a fleet already nearing pids.max progressively starves
+# new fan-outs instead of tripping EAGAIN mid-suite. Read once at start.
+_PIDS_HEADROOM_DIVISOR = 8
 
 
 def _split_pathspec(value: str) -> List[str]:
@@ -961,8 +995,225 @@ def _pytest_flag_error(tokens: List[str]) -> Optional[str]:
     return f"unrecognized arguments: {' '.join(unknown)}" if unknown else None
 
 
+# All helpers below are pure over injectable paths so tests can drive them
+# against fixture cgroup trees instead of the live host; every read
+# fail-opens to "no limit" (missing file, wrong shape, "max", no cgroups).
+
+
+def _read_text(path) -> Optional[str]:
+    """File content, or None — an unreadable file means "no truth", never
+    an error: each term of the worker bound is independently optional."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _read_int_file(path) -> Optional[int]:
+    """A single-int cgroup file ("768\n") as an int; "max", empty or
+    malformed content → None (treated as no limit)."""
+    text = _read_text(path)
+    if text is None:
+        return None
+    value = text.strip()
+    if not value or value == "max":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _parse_cpu_max(content: str) -> Optional[float]:
+    """A cgroup v2 ``cpu.max`` value ("<quota> <period>") as CPU cores
+    ("600000 100000" → 6.0). "max <period>", malformed, or non-positive
+    numbers → None (no limit)."""
+    parts = content.split()
+    if len(parts) != 2:
+        return None
+    quota_str, period_str = parts
+    if quota_str == "max":
+        return None
+    try:
+        quota, period = int(quota_str), int(period_str)
+    except ValueError:
+        return None
+    if quota <= 0 or period <= 0:
+        return None
+    return quota / period
+
+
+def _scan_cgroup_node(node: Path) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+    """One cgroup dir's (cpu cores, pids.max, pids.current), each fail-open.
+
+    v1 quota files are read alongside v2 ``cpu.max`` because a node only
+    ever carries one shape — the absent one reads as None and is skipped.
+    pids.current is only meaningful at a level that has pids.max (v2
+    accounts the whole subtree there), so it is None when pids.max is.
+    """
+    cores = _parse_cpu_max(_read_text(node / "cpu.max") or "")
+    quota = _read_int_file(node / "cpu.cfs_quota_us")  # v1: -1 = unlimited
+    period = _read_int_file(node / "cpu.cfs_period_us")
+    if quota is not None and quota > 0 and period is not None and period > 0:
+        v1 = quota / period
+        cores = v1 if cores is None else min(cores, v1)
+    pids_max = _read_int_file(node / "pids.max")
+    pids_current = _read_int_file(node / "pids.current") if pids_max is not None else None
+    return cores, pids_max, pids_current
+
+
+def _resolve_self_cgroup_dir(
+    proc_self_cgroup: Optional[str] = None,
+    mount_root: Optional[str] = None,
+) -> Optional[Path]:
+    """This process's cgroup v2 dir (the "0::<rel>" line of
+    /proc/self/cgroup) under mount_root; a "/" relpath resolves to the
+    mount root itself. None when the file is absent or the host has no
+    unified hierarchy (cgroup v1) — callers fall back to per-controller
+    mounts or skip the axis entirely."""
+    if proc_self_cgroup is None:
+        proc_self_cgroup = _PROC_SELF_CGROUP
+    if mount_root is None:
+        mount_root = _CGROUP_V2_MOUNT_ROOT
+    for line in (_read_text(proc_self_cgroup) or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
+            rel = parts[2].strip("/")
+            return Path(mount_root) if not rel else Path(mount_root) / rel
+    return None
+
+
+def _cgroup_chain_limits(
+    proc_self_cgroup: Optional[str] = None,
+    mount_root: Optional[str] = None,
+) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+    """The most-binding (cpu cores, pids.max, pids.current) over this
+    process's cgroup dir and every ancestor up to the mount root.
+
+    v2 primary (unified hierarchy); on a v1 host, best-effort walk of the
+    ``cpu``/``pids`` controller mounts named in /proc/self/cgroup. An
+    axis that cannot be resolved is None — the derivation fail-opens to
+    the remaining terms. pids.current is taken from the deepest level
+    that carries pids.max."""
+    if proc_self_cgroup is None:
+        proc_self_cgroup = _PROC_SELF_CGROUP
+    if mount_root is None:
+        mount_root = _CGROUP_V2_MOUNT_ROOT
+    mount = Path(mount_root)
+    chains = []  # (deepest dir, chain root) pairs to walk upward through
+    v2_dir = _resolve_self_cgroup_dir(proc_self_cgroup, mount_root)
+    if v2_dir is not None:
+        chains.append((v2_dir, mount))
+    else:
+        for line in (_read_text(proc_self_cgroup) or "").splitlines():
+            parts = line.split(":", 2)
+            if len(parts) != 3 or not parts[1]:
+                continue
+            for controller in parts[1].split(","):
+                if controller in ("cpu", "pids"):
+                    base = mount / controller
+                    rel = parts[2].strip("/")
+                    chains.append((base if not rel else base / rel, base))
+    cpu_ceiling: Optional[float] = None
+    pids_max: Optional[int] = None
+    pids_current: Optional[int] = None
+    for deepest, chain_root in chains:
+        node = deepest
+        while True:
+            cores, node_pids_max, node_pids_current = _scan_cgroup_node(node)
+            if cores is not None:
+                cpu_ceiling = cores if cpu_ceiling is None else min(cpu_ceiling, cores)
+            if node_pids_max is not None:
+                pids_max = node_pids_max if pids_max is None else min(pids_max, node_pids_max)
+                if pids_current is None and node_pids_current is not None:
+                    pids_current = node_pids_current
+            if node == chain_root or node.parent == node:
+                break
+            node = node.parent
+    return cpu_ceiling, pids_max, pids_current
+
+
+def _derive_default_workers(
+    cpu_count: Optional[int] = None,
+    limits: Optional[Tuple[Optional[float], Optional[int], Optional[int]]] = None,
+    proc_self_cgroup: Optional[str] = None,
+    mount_root: Optional[str] = None,
+) -> int:
+    """The default worker bound: min of legacy cpu_count*2, the cgroup cpu
+    ceiling (ceil of cores), pids.max/_PIDS_STATIC_DIVISOR, and live
+    (pids_max - pids_current)/_PIDS_HEADROOM_DIVISOR — floored at 1. Terms
+    with no readable truth are skipped (fail-open)."""
+    if cpu_count is None:
+        cpu_count = os.cpu_count() or 4
+    if limits is None:
+        limits = _cgroup_chain_limits(proc_self_cgroup, mount_root)
+    cpu_ceiling, pids_max, pids_current = limits
+    candidates = [cpu_count * 2]
+    if cpu_ceiling is not None and cpu_ceiling > 0:
+        candidates.append(math.ceil(cpu_ceiling))
+    if pids_max is not None and pids_max > 0:
+        candidates.append(pids_max // _PIDS_STATIC_DIVISOR)
+        if pids_current is not None:
+            candidates.append(max(0, pids_max - pids_current) // _PIDS_HEADROOM_DIVISOR)
+    return max(1, min(candidates))
+
+
+def _env_workers_override(env: Optional[Dict[str, str]] = None) -> Optional[int]:
+    """HERMES_TEST_WORKERS as a positive int, or None (unset, malformed, or
+    non-positive — tolerant so one bad value can't crash main() at
+    argparse-default time; mirrors agent/pi_rpc_client._env_float)."""
+    source = os.environ if env is None else env
+    raw = str(source.get("HERMES_TEST_WORKERS", "")).strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        warnings.warn(
+            f"Ignoring malformed HERMES_TEST_WORKERS={raw!r}; using the derived default",
+            stacklevel=2,
+        )
+        return None
+    if value <= 0:
+        warnings.warn(
+            f"Ignoring non-positive HERMES_TEST_WORKERS={raw!r}; using the derived default",
+            stacklevel=2,
+        )
+        return None
+    return value
+
+
+def _default_jobs(
+    env: Optional[Dict[str, str]] = None,
+    cpu_count: Optional[int] = None,
+    limits: Optional[Tuple[Optional[float], Optional[int], Optional[int]]] = None,
+    proc_self_cgroup: Optional[str] = None,
+    mount_root: Optional[str] = None,
+) -> int:
+    """The ``--jobs`` argparse default: an explicit HERMES_TEST_WORKERS is a
+    hard override (never cgroup-capped); otherwise the derived bound.
+    cgroup paths are injectable for tests (or monkeypatch
+    _CGROUP_V2_MOUNT_ROOT/_PROC_SELF_CGROUP, read at call time)."""
+    override = _env_workers_override(env)
+    if override is not None:
+        return override
+    return _derive_default_workers(
+        cpu_count=cpu_count,
+        limits=limits,
+        proc_self_cgroup=proc_self_cgroup,
+        mount_root=mount_root,
+    )
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
+    # Cgroup truth is read ONCE here and threaded to both the argparse
+    # default and the startup banner, so they quote identical numbers —
+    # and so later-starting runners on a shared unit see earlier starters'
+    # committed tasks (read-once, never per file).
+    cgroup_limits = _cgroup_chain_limits()
+    derived_jobs = _derive_default_workers(limits=cgroup_limits)
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -971,8 +1222,11 @@ def main() -> int:
         "-j",
         "--jobs",
         type=int,
-        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4) * 2),
-        help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count*2)",
+        default=_default_jobs(limits=cgroup_limits),
+        help=(
+            "Parallel worker count (default: $HERMES_TEST_WORKERS or "
+            "cgroup-derived (cpu/pids), else cpu_count*2)"
+        ),
     )
     parser.add_argument(
         "--paths",
@@ -1268,6 +1522,31 @@ def main() -> int:
         # Recount after slicing.
         test_counts = {f: test_counts[f] for f in files if f in test_counts}
         approx_total_tests = sum(test_counts.values())
+
+    # Announce a cgroup-derived reduction of the legacy default right next
+    # to the -j banner — a silently smaller fan-out would otherwise read as
+    # a runner regression. Only when the bound actually governs this run
+    # (no HERMES_TEST_WORKERS override, no explicit -j that differs from it).
+    legacy_default = (os.cpu_count() or 4) * 2
+    if (
+        _env_workers_override() is None
+        and derived_jobs < legacy_default
+        and args.jobs == derived_jobs
+    ):
+        _cpu_ceiling, _pids_max, _pids_current = cgroup_limits
+        detail = []
+        if _pids_max is not None:
+            detail.append(f"pids.max={_pids_max}")
+            if _pids_current is not None:
+                detail.append(f"pids.current={_pids_current}")
+        if _cpu_ceiling is not None:
+            detail.append(f"cpu.max={math.ceil(_cpu_ceiling)} cores")
+        print(
+            f"cgroup bounds: {legacy_default} → {args.jobs} workers "
+            f"({' '.join(detail)}; override: -j or HERMES_TEST_WORKERS)",
+            file=sys.stderr,
+            flush=True,
+        )
 
     if roots:
         roots_str = [str(r.relative_to(repo_root)) if r.is_relative_to(repo_root) else str(r) for r in roots]
