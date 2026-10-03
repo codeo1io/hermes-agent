@@ -36,6 +36,23 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
 
+# Durable metadata schema version. v4 adds the operational ledger (status,
+# error, error_class, retry_after, last_turn_activity_at, turn_started_at,
+# turn_count, consecutive_failures, native_pid) so offline observers can
+# distinguish running-then-lost / errored / never-started sessions instead
+# of reading total silence (the conductor-supervisor evidence wedge).
+# Readers are field-tolerant; v1-v3 files keep loading unchanged.
+_METADATA_VERSION = 4
+
+# In-turn durable refresh cadence: while a delegated turn is running, an
+# observer thread polls the client's activity signal every _OBSERVER_POLL_S
+# and persists at most once per _ACTIVITY_REFRESH_MIN_S of observed activity
+# advance, so a long healthy turn stays visible to outside readers of the
+# durable file (the evidence-source wedge) without write churn. Module-level
+# constants (no env vars); tests inject tighter values via monkeypatch.
+_OBSERVER_POLL_S = 5.0
+_ACTIVITY_REFRESH_MIN_S = 30.0
+
 _KNOWN_BACKENDS = ("pi", "opencode")
 
 # Owners without a conversation id fall back to a process-local handle. Such
@@ -83,9 +100,30 @@ def _metadata_path(session_id: str) -> Path:
     return _session_store_root() / f"{digest}.json"
 
 
+def _client_last_activity_at(client: Any) -> Optional[float]:
+    """Wall-clock in-turn activity timestamp from the live client, if any."""
+    value = getattr(client, "last_turn_activity_at", None)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _client_native_pid(client: Any) -> Optional[int]:
+    """Live delegate-process pid for cross-process liveness checks, if any."""
+    pid = getattr(client, "native_pid", None)
+    if isinstance(pid, int) and pid > 0:
+        return pid
+    # Clients without the accessor (OpenCodeClient, older fakes) still expose
+    # the spawned process when present.
+    proc = getattr(client, "_proc", None)
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0 and getattr(proc, "poll", lambda: 0)() is None:
+        return pid
+    return None
+
+
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+    client = record.get("client")
     return {
-        "version": 3,
+        "version": _METADATA_VERSION,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -97,6 +135,18 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # v4 operational ledger: last-known state, read from the client at
+        # snapshot time (never cached on the record) so a mid-turn snapshot
+        # carries the freshest inactivity signal the backend knows.
+        "status": record.get("status") or "idle",
+        "error": record.get("error") or None,
+        "error_class": record.get("error_class") or "",
+        "retry_after": record.get("retry_after"),
+        "last_turn_activity_at": _client_last_activity_at(client),
+        "turn_started_at": record.get("turn_started_at"),
+        "turn_count": int(record.get("turn_count") or 0),
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "native_pid": _client_native_pid(client),
     }
 
 
@@ -142,8 +192,12 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        # Build the snapshot under the lock so turn-thread and watcher
+        # persists serialize on one consistent view of the record.
+        with _SESSION_LOCK:
+            snapshot = _metadata_snapshot(record)
         tmp.write_text(
-            json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2),
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         try:
@@ -152,6 +206,11 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
             pass
         tmp.replace(path)
         _prune_durable_metadata(path.parent)
+        # Advance the in-turn refresh watermark (in-memory only) so the
+        # observer's write cap stays exact across watcher and transition
+        # persists. Placed after the replace: only successful writes count.
+        with _SESSION_LOCK:
+            record["last_persisted_activity"] = snapshot.get("last_turn_activity_at")
     except OSError:
         logger.debug(
             "Could not persist delegate-session metadata for %s",
@@ -584,10 +643,81 @@ _OFFLINE_RESUME_NOTE = (
 )
 
 
+# Stable-signature failure vocabulary for the durable operational ledger.
+# Mirrors the FailoverReason class names from agent/error_classifier.py for
+# the delegate-surface subset (same strings, subset) plus the in-tree stall
+# signature from PiRPCClient.run_session_prompt; deliberately does not import
+# the API-error machinery. Order matters: first matching rule wins.
+_ERROR_CLASS_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        (
+            "rate limit",
+            "rate_limit",
+            "ratelimit",
+            "too many requests",
+            "throttled",
+            "resource exhausted",
+            "resource_exhausted",
+        ),
+        "rate_limit",
+    ),
+    (("overloaded", "503", "529"), "overloaded"),
+    # In-tree stall watchdog signature; must outrank the generic timeout rule
+    # (the exception type is a TimeoutError).
+    (("stalled after",), "delegate_stall"),
+    (("timed out", "timeout", "deadline exceeded", "aborted"), "timeout"),
+    (
+        (
+            "enospc",
+            "errno 11",
+            "errno 28",
+            "no space left on device",
+            "resource temporarily unavailable",
+            "can't start new thread",
+            "cannot start new thread",
+        ),
+        "resource_exhausted",
+    ),
+    (
+        (
+            "pi rpc process exited",
+            "pi rpc client is closed",
+            "could not start",
+        ),
+        "transport",
+    ),
+)
+
+
+def _error_class_for(exc: BaseException) -> str:
+    """Classify a failed delegate turn for the durable operational ledger.
+
+    Attr-first: an exception that already carries an ``error_class`` (the
+    sibling DelegateTurnStalled vocabulary) speaks for itself and wins
+    outright — the attr seam is the contract. Otherwise the first matching
+    stable-signature rule in ``_ERROR_CLASS_RULES`` classifies the exception
+    text; unmatched failures stay ``""`` (unclassified) rather than guessing.
+    """
+    attr = str(getattr(exc, "error_class", "") or "")
+    if attr:
+        return attr
+    text = f"{type(exc).__name__}: {exc}".lower()
+    for signatures, error_class in _ERROR_CLASS_RULES:
+        if any(signature in text for signature in signatures):
+            return error_class
+    return ""
+
+
 def _durable_summary(
     meta: dict[str, Any], *, note: Optional[str] = None
 ) -> dict[str, Any]:
-    """Offline summary rebuilt from durable metadata (no client loaded)."""
+    """Offline summary rebuilt from durable metadata (no client loaded).
+
+    v4 metadata carries the operational ledger, so an offline read can still
+    distinguish running-then-lost, errored, and never-started sessions
+    instead of collapsing them all to nulls (the evidence-source wedge).
+    Legacy v1-v3 metadata keeps exactly its historical shape.
+    """
     sid = str(meta.get("session_id") or "")
     native = str(meta.get("native_session_id") or meta.get("pi_session_id") or sid)
     out: dict[str, Any] = {
@@ -602,6 +732,31 @@ def _durable_summary(
         "pending_question": None,
         "error": None,
     }
+    last_known = meta.get("status")
+    if isinstance(last_known, str) and last_known:
+        last_activity = meta.get("last_turn_activity_at")
+        if not isinstance(last_activity, (int, float)):
+            last_activity = meta.get("updated_at")
+        last_activity = (
+            float(last_activity) if isinstance(last_activity, (int, float)) else None
+        )
+        out["last_known_status"] = last_known
+        # Same key as the live summary so consumers see one shape for the
+        # activity signal, live or offline.
+        out["last_activity_at"] = last_activity
+        out["stale"] = True
+        out["age_seconds"] = (
+            max(0.0, round(time.time() - last_activity, 3))
+            if last_activity is not None
+            else None
+        )
+        out["turn_started_at"] = meta.get("turn_started_at")
+        out["turn_count"] = meta.get("turn_count")
+        out["consecutive_failures"] = meta.get("consecutive_failures")
+        out["native_pid"] = meta.get("native_pid")
+        out["error"] = meta.get("error") or None
+        out["error_class"] = meta.get("error_class") or ""
+        out["retry_after"] = meta.get("retry_after")
     if note:
         out["note"] = note
     return out
@@ -690,13 +845,58 @@ def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
     return changed
 
 
+def _observer_loop(record: Dict[str, Any]) -> None:
+    """Rate-capped in-turn durable refresh — the evidence-wedge fix proper.
+
+    While the turn is open, persist metadata whenever the client's activity
+    signal has advanced at least ``_ACTIVITY_REFRESH_MIN_S`` past the last
+    persisted watermark, so an outside reader of the durable file sees a live
+    "running" session with a fresh activity timestamp instead of the pre-turn
+    snapshot. Never mutates session state: every state transition notifies
+    ``_SESSION_CONDITION``, and the loop re-checks status under the lock on
+    every wake, so it exits as soon as the turn leaves "running".
+    """
+    while True:
+        with _SESSION_CONDITION:
+            if record.get("status") != "running":
+                return
+            _SESSION_CONDITION.wait(timeout=_OBSERVER_POLL_S)
+            if record.get("status") != "running":
+                return
+            last_persisted = record.get("last_persisted_activity")
+        activity = _client_last_activity_at(record.get("client"))
+        if activity is None:
+            # No observable progress to advertise yet; the client's own stall
+            # watchdog owns the no-progress case.
+            continue
+        if (
+            last_persisted is None
+            or activity - float(last_persisted) >= _ACTIVITY_REFRESH_MIN_S
+        ):
+            _persist_metadata(record)
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
     with _SESSION_CONDITION:
         if record.get("status") == "closed":
             return
         record["error"] = ""
+        record["error_class"] = ""
+        record["retry_after"] = None
+        record["turn_started_at"] = time.time()
+        record["turn_count"] = int(record.get("turn_count") or 0) + 1
         _transition_status_locked(record, "running")
+    observer = threading.Thread(
+        target=_observer_loop,
+        args=(record,),
+        name=f"delegate-{record['session_id'][:8]}-obs",
+        # Daemon: the observer only refreshes a file; it must never keep the
+        # interpreter alive (the turn thread itself is deliberately not a
+        # daemon so terminal state is persisted).
+        daemon=True,
+    )
+    observer.start()
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
         state = result.get("state") if isinstance(result, dict) else {}
@@ -707,6 +907,8 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 or record.get("native_session_id")
                 or record["session_id"]
             )
+            record["consecutive_failures"] = 0
+            record["turn_started_at"] = None
             if record.get("status") != "closed":
                 _transition_status_locked(record, "idle")
             else:
@@ -716,11 +918,29 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
+            record["error_class"] = _error_class_for(exc)
+            retry_after = getattr(exc, "retry_after", None)
+            record["retry_after"] = (
+                float(retry_after) if isinstance(retry_after, (int, float)) else None
+            )
+            record["consecutive_failures"] = (
+                int(record.get("consecutive_failures") or 0) + 1
+            )
+            record["turn_started_at"] = None
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
                 record["updated_at"] = time.time()
         _persist_metadata(record)
+    finally:
+        # Both exit paths have left "running" (idle/error, or "closed" keeps
+        # its own terminal state), and the transition already notified the
+        # condition; notify once more so a watcher that missed it wakes now.
+        # Join to keep any last in-flight refresh ordered behind the terminal
+        # persist before this thread reports the turn finished.
+        with _SESSION_CONDITION:
+            _SESSION_CONDITION.notify_all()
+        observer.join(timeout=2.0)
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
@@ -1009,6 +1229,13 @@ def delegate_session(
             "updated_at": now,
             "last_result": None,
             "error": "",
+            "error_class": "",
+            "retry_after": None,
+            "turn_started_at": None,
+            # Lifetime counters survive restarts: they belong to the durable
+            # session id, not to the process that happens to hold the client.
+            "turn_count": int((saved or {}).get("turn_count") or 0),
+            "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
             "thread": None,
         }
         with _SESSION_LOCK:

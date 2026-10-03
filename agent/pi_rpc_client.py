@@ -318,6 +318,14 @@ class PiRPCClient:
             except Exception:
                 pass
 
+    @property
+    def native_pid(self) -> int | None:
+        """Live pid of the spawned pi process, for cross-process liveness checks."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            return proc.pid
+        return None
+
     # -- shim entrypoint ---------------------------------------------------
 
     def _create_chat_completion(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import sys
 import threading
 import time
 
@@ -44,6 +46,9 @@ class FakePiClient:
         self.block_turns = False
         self.last_turn_activity_at = time.time()
         self._proc = None
+        # Delegation-observability seam: mirrors PiRPCClient.native_pid so
+        # durable snapshots exercised through this fake carry a live pid.
+        self.native_pid = os.getpid()
         self.__class__.instances.append(self)
 
     def start(self, *, timeout=30.0):
@@ -621,7 +626,7 @@ def test_legacy_v2_metadata_migrates_on_same_workspace_resume(tmp_path, monkeypa
     assert resumed["session_id"] == sid
     assert FakePiClient.instances[-1].session_id == sid
     upgraded = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
-    assert upgraded["version"] == 3
+    assert upgraded["version"] == ds._METADATA_VERSION
     assert upgraded["owner_scope"] == ds._scope_for_workspace(workspace)
 
 
@@ -677,6 +682,496 @@ def test_offline_control_actions_fail_closed_until_resumed():
     assert messages["success"] is True
     assert messages["messages_json"] == "[]"
     assert "resume" in (messages.get("note") or "").lower()
+
+
+def test_durable_metadata_carries_v4_operational_ledger_after_turn():
+    """T1: the durable record must expose the operational signal the backend
+    already tracks in memory, so a restart does not erase what happened."""
+    parent = Parent()
+    started = payload(
+        ds.delegate_session(action="start", parent_agent=parent, goal="one turn")
+    )
+    sid = started["session_id"]
+    wait_for_status(parent, sid, "idle")
+    client = FakePiClient.instances[-1]
+
+    # The live idle transition fires before the success-path persist; poll
+    # the durable file for the turn to land rather than racing the write.
+    deadline = time.time() + 5.0
+    meta: dict = {}
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid)
+        if meta.get("turn_count") == 1:
+            break
+        time.sleep(0.01)
+
+    assert meta.get("turn_count") == 1
+    assert ds._METADATA_VERSION == 4
+    assert meta["version"] == ds._METADATA_VERSION
+    assert meta["status"] == "idle"
+    assert meta["consecutive_failures"] == 0
+    assert isinstance(meta["last_turn_activity_at"], float)
+    assert meta["turn_started_at"] is None
+    assert meta["error"] is None
+    assert meta["error_class"] == ""
+    assert meta["retry_after"] is None
+    assert meta["native_pid"] == client.native_pid
+    # The v3 identity fields are unchanged.
+    assert meta["backend"] == "pi"
+    assert meta["session_id"] == sid
+    assert meta["native_session_id"] == sid
+    assert meta["cwd"] == started["cwd"]
+
+
+def test_offline_status_reports_last_known_running_state_after_registry_loss():
+    """T3: the incident wedge. Registry loss mid-turn must not erase the
+    last-known operational evidence an offline reader needs."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    sent = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="blocked turn", parent_agent=parent
+        )
+    )
+    assert sent["accepted"] is True
+    wait_for_status(parent, sid, "running")
+    client.last_turn_activity_at = time.time()
+    # Establish the durable mid-turn snapshot. The in-turn refresh watcher
+    # writes this automatically; persisting once here keeps this test
+    # independent of watcher timing.
+    with ds._SESSION_LOCK:
+        ds._persist_metadata(ds._SESSIONS[sid])
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+
+    assert status["status"] == "offline"
+    assert status["last_known_status"] == "running"
+    assert status["stale"] is True
+    assert status["age_seconds"] >= 0
+    assert status["last_activity_at"] is not None
+    assert status["native_pid"] == client.native_pid
+    assert status["turn_started_at"] is not None
+
+    stale["client"].close()
+
+
+def test_offline_status_reports_errored_turn_evidence_after_registry_loss():
+    """T3: an errored-then-lost session must surface its failure class, not a
+    silent null."""
+
+    class ProviderDeath(RuntimeError):
+        # Sibling DelegateTurnStalled shape: the exception classifies itself.
+        error_class = "provider_death"
+        retry_after = 1800.0
+
+    def boom(message, *, timeout_seconds=900.0):
+        raise ProviderDeath("delegate provider hard-failed")
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.run_session_prompt = boom
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="doomed turn", parent_agent=parent
+        )
+    )
+    wait_for_status(parent, sid, "error")
+    # wait_for_status observes the live record; the offline read below sees
+    # only the durable file, so the terminal persist must land first.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if (ds._load_metadata(sid) or {}).get("status") == "error":
+            break
+        time.sleep(0.01)
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid)
+
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+
+    assert status["status"] == "offline"
+    assert status["last_known_status"] == "error"
+    assert status["error_class"] == "provider_death"
+    assert status["retry_after"] == 1800.0
+    assert status["consecutive_failures"] == 1
+    assert status["turn_started_at"] is None
+    assert "delegate provider hard-failed" in status["error"]
+
+
+def test_offline_durable_summary_keeps_legacy_metadata_shape_unchanged(
+    tmp_path, monkeypatch
+):
+    """T3 back-compat contract: v1-v3 metadata reads exactly as it did before
+    v4 landed — no new keys, no behavior change for older files."""
+    workspace = tmp_path / "legacy-v3"
+    workspace.mkdir()
+    monkeypatch.setattr(ds, "resolve_agent_cwd", lambda: workspace)
+    sid = "legacy-v3-offline"
+    _write_metadata(sid, version=3, cwd=str(workspace.resolve()))
+
+    status = payload(
+        ds.delegate_session(
+            action="status", session_id=sid, parent_agent=Parent("supervisor")
+        )
+    )
+
+    assert status["status"] == "offline"
+    assert status["error"] is None
+    for absent in (
+        "last_known_status",
+        "last_activity_at",
+        "stale",
+        "age_seconds",
+        "turn_started_at",
+        "turn_count",
+        "consecutive_failures",
+        "native_pid",
+        "error_class",
+        "retry_after",
+    ):
+        assert absent not in status, absent
+
+
+def test_offline_messages_and_list_inherit_operational_evidence():
+    """T3: messages and list flow through _durable_summary, so offline rows
+    carry the same operational evidence as status reads."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="blocked turn", parent_agent=parent
+        )
+    )
+    wait_for_status(parent, sid, "running")
+    with ds._SESSION_LOCK:
+        ds._persist_metadata(ds._SESSIONS[sid])
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+
+    messages = payload(
+        ds.delegate_session(action="messages", session_id=sid, parent_agent=parent)
+    )
+    assert messages["messages_json"] == "[]"
+    assert messages["last_known_status"] == "running"
+    assert messages["stale"] is True
+    assert messages["native_pid"] == client.native_pid
+
+    listed = payload(ds.delegate_session(action="list", parent_agent=parent))
+    row = next(r for r in listed["sessions"] if r["session_id"] == sid)
+    assert row["status"] == "offline"
+    assert row["last_known_status"] == "running"
+    assert row["consecutive_failures"] == 0
+
+    stale["client"].close()
+
+
+def _blocked_running_session(parent, message="blocked turn"):
+    """Start a session, dispatch a turn the fake holds open, return handles."""
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    sent = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message=message, parent_agent=parent
+        )
+    )
+    assert sent["accepted"] is True
+    wait_for_status(parent, sid, "running")
+    # Status flips to running before the turn thread starts; the fake's
+    # entry write of last_turn_activity_at must land before callers step it,
+    # or the step races (and loses to) that assignment.
+    assert client.started_turn.wait(timeout=5.0)
+    return sid, client
+
+
+def test_watcher_persists_mid_turn_running_evidence(monkeypatch):
+    """T2: the in-turn refresh watcher. While a turn is open, stepping the
+    client's activity signal must advance the durable file on the watcher's
+    own — an outside reader sees status running and a fresh activity
+    timestamp without the originating process persisting anything (the exact
+    silence the incident supervisor hit). Red on base: base never persists
+    mid-turn, so the durable file keeps the pre-turn idle snapshot."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        first = client.last_turn_activity_at
+        client.last_turn_activity_at = first + 1.0
+        baseline = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if meta.get("status") == "running":
+                baseline = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert baseline is not None
+        assert baseline >= first + 1.0
+
+        client.last_turn_activity_at = baseline + 1.0
+        advanced = None
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if (
+                meta.get("status") == "running"
+                and meta.get("last_turn_activity_at", 0.0) > baseline
+            ):
+                advanced = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert advanced is not None
+        assert advanced >= baseline + 1.0
+        # The turn is still open throughout: only the watcher wrote this.
+        with ds._SESSION_LOCK:
+            assert ds._SESSIONS[sid]["status"] == "running"
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+def test_watcher_write_amplitude_is_capped_mid_turn(monkeypatch):
+    """T2: five activity steps inside one refresh window must not multiply
+    durable writes — the observer persists at most once per refresh window
+    (contract, not change-detector: amplitude stays bounded as activity
+    frequency grows). Red on base: no mid-turn writes exist at all."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        client.last_turn_activity_at = client.last_turn_activity_at + 1.0
+        baseline = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if meta.get("status") == "running":
+                baseline = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert baseline is not None
+        with ds._SESSION_LOCK:
+            # The watermark contract makes the cap exact: the last successful
+            # write's snapshot activity is what the next refresh compares to.
+            assert ds._SESSIONS[sid]["last_persisted_activity"] == baseline
+
+        # Five activity steps, all inside one refresh window of the baseline.
+        for step in range(1, 6):
+            client.last_turn_activity_at = baseline + 0.001 * step
+
+        path = ds._metadata_path(sid)
+        writes = 0
+        last_mtime = path.stat().st_mtime_ns
+        observed: set[float] = set()
+        stop = time.time() + 0.4  # ~8 watcher poll windows
+        while time.time() < stop:
+            meta = ds._load_metadata(sid) or {}
+            mtime = path.stat().st_mtime_ns
+            if mtime != last_mtime:
+                writes += 1
+                last_mtime = mtime
+            if meta.get("status") == "running":
+                activity = meta.get("last_turn_activity_at")
+                if activity is not None:
+                    observed.add(activity)
+            time.sleep(0.002)
+
+        assert observed, "watcher never advertised mid-turn activity"
+        assert writes <= 2
+        assert len(observed) <= 2
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+def test_watcher_stops_writing_after_turn_ends(monkeypatch):
+    """T2: the watcher dies with the turn. After the terminal persist there
+    are no further durable writes for >= 3 poll windows and the turn thread
+    is joinable. A regression guard for the watcher mechanism itself (an
+    unbounded observer would churn the store after every turn)."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+    record = ds._SESSIONS[sid]
+    deadline = time.time() + 5.0
+    while time.time() < deadline and record["thread"].is_alive():
+        time.sleep(0.01)
+    assert not record["thread"].is_alive()
+
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid) or {}
+        if meta.get("status") == "idle" and meta.get("turn_count") == 1:
+            break
+        time.sleep(0.01)
+
+    path = ds._metadata_path(sid)
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+    time.sleep(0.3)  # >= 3 observer poll windows
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_stall_timeout_types_error_class_delegate_stall():
+    """T4: the in-tree stall signature classifies as delegate_stall, not a
+    generic timeout, so a lost stalled session stays distinguishable from a
+    provider timeout in the durable ledger."""
+
+    def stall(message, *, timeout_seconds=900.0):
+        raise TimeoutError(
+            "pi session turn stalled after 900s without observable progress"
+        )
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    FakePiClient.instances[-1].run_session_prompt = stall
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="doomed", parent_agent=parent
+        )
+    )
+    wait_for_status(parent, sid, "error")
+
+    with ds._SESSION_LOCK:
+        record = dict(ds._SESSIONS[sid])
+    assert record["error_class"] == "delegate_stall"
+    assert record["consecutive_failures"] == 1
+    assert len(record["error"]) <= 2000
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid) or {}
+        if meta.get("status") == "error":
+            break
+        time.sleep(0.01)
+    assert meta["error_class"] == "delegate_stall"
+    assert meta["consecutive_failures"] == 1
+    assert meta["turn_count"] == 1
+
+
+def test_error_class_signature_vocabulary():
+    """T4: the stable-signature text vocabulary mirrors the sibling
+    FailoverReason class names for the delegate-surface failure subset."""
+    cases = {
+        RuntimeError("HTTP 429 too many requests"): "rate_limit",
+        RuntimeError("rate limit exceeded, retry later"): "rate_limit",
+        RuntimeError("provider is overloaded (503)"): "overloaded",
+        TimeoutError("request timed out"): "timeout",
+        RuntimeError("turn aborted by supervisor"): "timeout",
+        OSError(28, "No space left on device"): "resource_exhausted",
+        RuntimeError("can't start new thread"): "resource_exhausted",
+        OSError(11, "Resource temporarily unavailable"): "resource_exhausted",
+        RuntimeError("pi rpc process exited with code 1"): "transport",
+        RuntimeError("pi rpc client is closed"): "transport",
+        RuntimeError("Could not start pi binary 'pi'"): "transport",
+        RuntimeError("something entirely novel"): "",
+    }
+    for exc, expected in cases.items():
+        assert ds._error_class_for(exc) == expected, repr(exc)
+
+
+def test_error_class_attr_wins_over_text_signature():
+    """T4: an exception that classifies itself (sibling DelegateTurnStalled
+    shape) wins outright over the text matcher — the forward-compat seam."""
+
+    class Annotated(RuntimeError):
+        error_class = "rate_limit"
+        retry_after = 1800.0
+
+    exc = Annotated("provider is overloaded (503)")  # text says overloaded
+    unannotated = RuntimeError("provider is overloaded (503)")
+    assert ds._error_class_for(exc) == "rate_limit"
+    assert ds._error_class_for(unannotated) == "overloaded"
+
+
+def test_wedge_e2e_real_pi_client_durable_running_evidence(monkeypatch, tmp_path):
+    """T5: end-to-end wedge repro on the REAL client boundary. While a live
+    pi turn streams observable progress, durable metadata alone must show a
+    running session, an advancing activity signal, and a pid any outside
+    process can liveness-check — the triple the incident supervisor lacked."""
+    from agent.pi_rpc_client import PiRPCClient as RealPiRPCClient
+
+    script = tmp_path / "fake-pi-slow-turn"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'sessionId':'native-wedge-e2e'}})\n"
+        + "    elif typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        for i in range(200):\n"
+        + "            time.sleep(0.02)\n"
+        + "            send({'type':'message_update','assistantMessageEvent':{'type':'thinking_delta','delta':'tick %d' % i}})\n"
+        + "    elif typ == 'abort':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(ds, "PiRPCClient", RealPiRPCClient)
+    monkeypatch.setenv("HERMES_PI_BIN", str(script))
+
+    parent = Parent()
+    started = payload(
+        ds.delegate_session(action="start", parent_agent=parent, goal="slow turn")
+    )
+    sid = started["session_id"]
+    wait_for_status(parent, sid, "running")
+
+    with ds._SESSION_LOCK:
+        ds._persist_metadata(ds._SESSIONS[sid])
+    meta1 = ds._load_metadata(sid)
+    assert meta1["version"] == ds._METADATA_VERSION
+    assert meta1["status"] == "running"
+    assert isinstance(meta1["last_turn_activity_at"], float)
+    pid = meta1["native_pid"]
+    assert isinstance(pid, int) and pid > 0
+    os.kill(pid, 0)  # the pid names a live process right now
+
+    # Observable progress keeps advancing the durable activity signal.
+    time.sleep(0.25)
+    with ds._SESSION_LOCK:
+        ds._persist_metadata(ds._SESSIONS[sid])
+    meta2 = ds._load_metadata(sid)
+    assert meta2["status"] == "running"
+    assert meta2["last_turn_activity_at"] > meta1["last_turn_activity_at"]
+    assert meta2["native_pid"] == pid
+
+    # Registry-loss equivalent: a fresh observer reads only durable state.
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert status["status"] == "offline"
+    assert status["last_known_status"] == "running"
+    assert status["native_pid"] == pid
+    assert os.kill(status["native_pid"], 0) is None
+    assert status["age_seconds"] >= 0
+    assert status["last_activity_at"] is not None
+
+    stale["client"].close()
 
 
 def test_summary_preserves_structured_trailer_from_long_last_result():
@@ -924,7 +1419,7 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     stale["client"].close()
 
     meta = ds._load_metadata(sid)
-    assert meta["version"] == 3
+    assert meta["version"] == ds._METADATA_VERSION
     assert meta["backend"] == "opencode"
     assert meta["native_session_id"] == native
 
@@ -963,7 +1458,7 @@ def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     # pi session id is reused as the native session on resume
     assert resumed["native_session_id"] == "pi_native_123"
     # re-persisted using the current metadata schema
-    assert ds._load_metadata(sid)["version"] == 3
+    assert ds._load_metadata(sid)["version"] == ds._METADATA_VERSION
 
 
 def test_list_includes_backend_field(monkeypatch):
