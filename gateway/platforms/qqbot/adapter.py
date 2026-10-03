@@ -218,9 +218,11 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             self._wire_plugin_handlers(None)
             return True
         except Exception as exc:
-            message = f"QQ startup failed: {exc}"
-            self._set_fatal_error("qq_connect_error", message, retryable=True)
-            logger.error("[%s] %s", self._log_tag, message, exc_info=True)
+            # Constant fatal message: the status is public (dashboard /api/status) and the raw
+            # exception can embed credentials (e.g. an auth rejection echoing the secret);
+            # the detail stays in the logged line below.
+            self._set_fatal_error("qq_connect_error", "QQ startup failed", retryable=True)
+            logger.error("[%s] QQ startup failed: %s", self._log_tag, exc, exc_info=True)
             await self._cleanup()
             self._release_platform_lock()
             return False

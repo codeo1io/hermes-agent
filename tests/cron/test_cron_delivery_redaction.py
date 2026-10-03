@@ -2,7 +2,8 @@
 
 Shell-job stdout/stderr is redacted where it is captured, but an LLM cron job's response text
 reaches ``_deliver_result`` unscanned. Every egress lane — platform send, session mirror (payload
-and spliced job name), bot-chat turn — must apply ``redact_sensitive_text(force=True)``: the
+and spliced job name), bot-chat turn, api_server session transcript (payload and spliced job name) —
+must apply ``redact_sensitive_text(force=True)``: the
 ``security.redact_secrets`` preference governs the user's own logs, not egress, and a raising
 redactor must replace the payload rather than let it through.
 """
@@ -75,13 +76,30 @@ def _deliver_bot_chat(job: dict, content: str) -> str:
     return captured["message"]
 
 
-@pytest.mark.parametrize("lane", ["platform_send", "session_mirror", "bot_chat"])
+def _deliver_api_server_transcript(job: dict, content: str) -> str:
+    """Drive ``_deliver_to_api_server_transcript`` against a live session row; return the
+    appended transcript message (the delivery the next poll replays as history)."""
+    from cron.scheduler_delivery import _deliver_to_api_server_transcript
+
+    db = MagicMock()
+    db.get_session.return_value = {"session_id": "sess-1"}
+    with patch("hermes_state.SessionDB", return_value=db):
+        err = _deliver_to_api_server_transcript(job, "sess-1", content)
+    assert err is None, err
+    assert db.append_message.called, "append did not run — assertions would be vacuous"
+    return db.append_message.call_args.kwargs["content"]
+
+
+@pytest.mark.parametrize("lane", ["platform_send", "session_mirror", "bot_chat", "api_server_transcript"])
 def test_every_outward_lane_masks_secret_in_payload_and_job_name(lane):
     """Secret in the body AND in the user-controlled job name is masked on every lane, while
     ordinary text and the lane's own framing survive (no over-redaction, no empty payload)."""
     job = _job(name=f"rotate {FAKE_SECRET} daily")
     content = f"{BODY} Token was {FAKE_SECRET} (oops)."
-    if lane == "bot_chat":
+    if lane == "api_server_transcript":
+        out = _deliver_api_server_transcript(job, content)
+        assert "[Cron delivery:" in out, "label framing missing — assembly path not exercised"
+    elif lane == "bot_chat":
         out = _deliver_bot_chat(job, content)
         assert "[Cronjob " in out
     else:

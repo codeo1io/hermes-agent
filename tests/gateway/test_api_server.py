@@ -148,6 +148,64 @@ class TestIdempotencyCache:
 
         assert first_result == second_result == ("response", {"total_tokens": 1})
 
+    @pytest.mark.asyncio
+    async def test_reused_key_with_changed_fingerprint_conflicts_without_reexecution(self):
+        """One Idempotency-Key pins one payload. Once a key has resolved, reuse with a
+        changed fingerprint must raise the typed conflict — the old fall-through re-executed
+        the request and overwrote the stored response (double execution, first answer lost).
+        The in-memory lane answers the same condition the durable /v1/runs lane does:
+        409 idempotency_key_conflict (api_server_runs.py::_replay_or_conflict)."""
+        from gateway.platforms.api_server import _IdempotencyKeyConflict
+
+        cache = _IdempotencyCache()
+        calls = []
+
+        async def compute_a():
+            calls.append("a")
+            return "resp-a"
+
+        async def compute_b():
+            calls.append("b")
+            return "resp-b"
+
+        first = await cache.get_or_set("key-1", "fp-a", compute_a)
+        with pytest.raises(_IdempotencyKeyConflict):
+            await cache.get_or_set("key-1", "fp-b", compute_b)
+        assert calls == ["a"], "changed-body retry must not execute against a resolved key"
+        assert first == "resp-a"
+        assert await cache.get_or_set("key-1", "fp-a", compute_a) == "resp-a"
+
+    @pytest.mark.asyncio
+    async def test_changed_fingerprint_while_inflight_conflicts_not_double_executes(self):
+        """Same invariant in the concurrency window: a different-body request arriving while
+        the first is still computing must share the conflict, not start a second execution
+        under the same key (which also overwrote the stored response when it landed)."""
+        from gateway.platforms.api_server import _IdempotencyKeyConflict
+
+        cache = _IdempotencyCache()
+        gate = asyncio.Event()
+        started = asyncio.Event()
+        calls = []
+
+        async def compute_a():
+            calls.append("a")
+            started.set()
+            await gate.wait()
+            return "resp-a"
+
+        async def compute_b():
+            calls.append("b")
+            return "resp-b"
+
+        first = asyncio.create_task(cache.get_or_set("key-1", "fp-a", compute_a))
+        await started.wait()
+        clash = asyncio.create_task(cache.get_or_set("key-1", "fp-b", compute_b))
+        with pytest.raises(_IdempotencyKeyConflict):
+            await clash
+        gate.set()
+        assert await first == "resp-a"
+        assert calls == ["a"], "a changed-body request must never run beside the first execution"
+
 
 class TestRunIdempotentProfileScope:
     """``_idem_cache`` is process-global; under multiplex every profile's ``/p/<profile>/v1/...`` mirror
@@ -213,6 +271,35 @@ class TestRunIdempotentProfileScope:
         assert err_1 is None and err_2 is None
         assert len(calls) == 1, "second call with the same key+profile+fingerprint must reuse the cached response"
         assert outcome_1 == outcome_2
+
+    @pytest.mark.asyncio
+    async def test_reused_key_changed_body_maps_to_409_conflict(self, adapter, monkeypatch):
+        """Route parity for the conflict: a reused Idempotency-Key whose body changed must
+        answer 409 idempotency_key_conflict (the durable /v1/runs contract), never silently
+        re-execute the request and serve the second answer under the first key."""
+        monkeypatch.setattr("gateway.platforms.api_server._idem_cache", _IdempotencyCache())
+        headers = {"Idempotency-Key": "client-supplied-key"}
+        body_a = {"model": "gpt-5.5", "messages": [{"role": "user", "content": "first ask"}]}
+        body_b = {"model": "gpt-5.5", "messages": [{"role": "user", "content": "second ask"}]}
+        calls = []
+
+        async def compute():
+            calls.append(len(calls) + 1)
+            return (f"response-{len(calls)}", {"total_tokens": len(calls)})
+
+        outcome_a, err_a = await adapter._run_idempotent(
+            MagicMock(headers=headers), body_a, compute, log_label="test",
+            fingerprint_keys=["model", "messages"], route="chat_completions")
+        outcome_b, err_b = await adapter._run_idempotent(
+            MagicMock(headers=headers), body_b, compute, log_label="test",
+            fingerprint_keys=["model", "messages"], route="chat_completions")
+
+        assert err_a is None
+        assert outcome_a == ("response-1", {"total_tokens": 1})
+        assert err_b is not None, "changed-body reuse must surface as an error response, not a second run"
+        assert err_b.status == 409
+        assert json.loads(err_b.text)["error"]["code"] == "idempotency_key_conflict"
+        assert calls == [1], "the conflicting retry must not re-execute the request"
 
 
 class TestAdapterInit:

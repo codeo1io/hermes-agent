@@ -129,6 +129,32 @@ class TestVoiceAttachmentSSRFProtection:
         assert kwargs.get("follow_redirects") is True
         assert kwargs.get("event_hooks", {}).get("response") == [_ssrf_redirect_guard]
 
+    @pytest.mark.asyncio
+    async def test_connect_failure_keeps_exception_detail_out_of_fatal_status(self):
+        """The persisted fatal status is public (dashboard /api/status, reconnect UI): a
+        connect()-time exception embedding credentials must not be projected onto it.
+        The log keeps the full detail (logger.error(..., exc_info=True))."""
+        from gateway.platforms.qqbot import QQAdapter
+
+        secret = "qq-client-secret-0123456789abcdef"
+        adapter = QQAdapter(_make_config(app_id="a", client_secret="b"))
+        adapter._acquire_platform_lock = lambda *a, **k: True
+        adapter._release_platform_lock = lambda: None
+        adapter._cleanup = mock.AsyncMock()
+        adapter._write_runtime_status_safe = lambda *a, **k: None
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError(f"auth rejected for app a, secret {secret}")
+
+        adapter._open_gateway_ws = _boom
+
+        connected = await adapter.connect()
+
+        assert connected is False
+        assert adapter._fatal_error_message is not None
+        assert secret not in adapter._fatal_error_message
+        assert "QQ startup failed" in adapter._fatal_error_message
+
 
 # ---------------------------------------------------------------------------
 # Voice attachment temp-file cleanup
