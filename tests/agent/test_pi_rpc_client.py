@@ -11,6 +11,7 @@ the real binary or network. Pins the behaviors the parent relies on:
 (3) the pi-rpc provider resolves without any ACP env vars set.
 """
 
+import os
 import stat
 import sys
 import threading
@@ -217,6 +218,33 @@ def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
         client.run_session_prompt("go", timeout_seconds=0.08)
     assert time.monotonic() - started < 0.8
     client.close()
+
+
+def test_native_pid_tracks_spawned_process_lifecycle(tmp_path):
+    """native_pid exposes a liveness-checkable pid of the spawned pi process."""
+    script = tmp_path / "fake-pi-state"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    if msg.get('type') == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'sessionId':'native'}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script), base_url="pi://pid-test", persistent_session=True
+    )
+    assert client.native_pid is None
+    client.start()
+    pid = client.native_pid
+    assert isinstance(pid, int) and pid > 0
+    # Any outside process can liveness-check this pid right now.
+    os.kill(pid, 0)
+    client.close()
+    assert client.native_pid is None
 
 
 # ------------------------------------------------- answer text mapping

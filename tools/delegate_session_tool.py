@@ -36,6 +36,14 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
 
+# Durable metadata schema version. v4 adds the operational ledger (status,
+# error, error_class, retry_after, last_turn_activity_at, turn_started_at,
+# turn_count, consecutive_failures, native_pid) so offline observers can
+# distinguish running-then-lost / errored / never-started sessions instead
+# of reading total silence (the conductor-supervisor evidence wedge).
+# Readers are field-tolerant; v1-v3 files keep loading unchanged.
+_METADATA_VERSION = 4
+
 _KNOWN_BACKENDS = ("pi", "opencode")
 
 # Owners without a conversation id fall back to a process-local handle. Such
@@ -83,9 +91,30 @@ def _metadata_path(session_id: str) -> Path:
     return _session_store_root() / f"{digest}.json"
 
 
+def _client_last_activity_at(client: Any) -> Optional[float]:
+    """Wall-clock in-turn activity timestamp from the live client, if any."""
+    value = getattr(client, "last_turn_activity_at", None)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _client_native_pid(client: Any) -> Optional[int]:
+    """Live delegate-process pid for cross-process liveness checks, if any."""
+    pid = getattr(client, "native_pid", None)
+    if isinstance(pid, int) and pid > 0:
+        return pid
+    # Clients without the accessor (OpenCodeClient, older fakes) still expose
+    # the spawned process when present.
+    proc = getattr(client, "_proc", None)
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int) and pid > 0 and getattr(proc, "poll", lambda: 0)() is None:
+        return pid
+    return None
+
+
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+    client = record.get("client")
     return {
-        "version": 3,
+        "version": _METADATA_VERSION,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -97,6 +126,18 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # v4 operational ledger: last-known state, read from the client at
+        # snapshot time (never cached on the record) so a mid-turn snapshot
+        # carries the freshest inactivity signal the backend knows.
+        "status": record.get("status") or "idle",
+        "error": record.get("error") or None,
+        "error_class": record.get("error_class") or "",
+        "retry_after": record.get("retry_after"),
+        "last_turn_activity_at": _client_last_activity_at(client),
+        "turn_started_at": record.get("turn_started_at"),
+        "turn_count": int(record.get("turn_count") or 0),
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "native_pid": _client_native_pid(client),
     }
 
 
@@ -142,8 +183,12 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        # Build the snapshot under the lock so turn-thread and watcher
+        # persists serialize on one consistent view of the record.
+        with _SESSION_LOCK:
+            snapshot = _metadata_snapshot(record)
         tmp.write_text(
-            json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2),
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         try:
@@ -584,10 +629,28 @@ _OFFLINE_RESUME_NOTE = (
 )
 
 
+def _error_class_for(exc: BaseException) -> str:
+    """Classify a failed delegate turn for the durable operational ledger.
+
+    Attr-first: an exception that already carries an ``error_class`` (the
+    sibling DelegateTurnStalled vocabulary) speaks for itself and wins
+    outright. The stable-signature text vocabulary (rate_limit / overloaded /
+    timeout / resource_exhausted / transport / delegate_stall) extends this
+    helper with the failure-typing task; the attr seam is the contract.
+    """
+    return str(getattr(exc, "error_class", "") or "")
+
+
 def _durable_summary(
     meta: dict[str, Any], *, note: Optional[str] = None
 ) -> dict[str, Any]:
-    """Offline summary rebuilt from durable metadata (no client loaded)."""
+    """Offline summary rebuilt from durable metadata (no client loaded).
+
+    v4 metadata carries the operational ledger, so an offline read can still
+    distinguish running-then-lost, errored, and never-started sessions
+    instead of collapsing them all to nulls (the evidence-source wedge).
+    Legacy v1-v3 metadata keeps exactly its historical shape.
+    """
     sid = str(meta.get("session_id") or "")
     native = str(meta.get("native_session_id") or meta.get("pi_session_id") or sid)
     out: dict[str, Any] = {
@@ -602,6 +665,31 @@ def _durable_summary(
         "pending_question": None,
         "error": None,
     }
+    last_known = meta.get("status")
+    if isinstance(last_known, str) and last_known:
+        last_activity = meta.get("last_turn_activity_at")
+        if not isinstance(last_activity, (int, float)):
+            last_activity = meta.get("updated_at")
+        last_activity = (
+            float(last_activity) if isinstance(last_activity, (int, float)) else None
+        )
+        out["last_known_status"] = last_known
+        # Same key as the live summary so consumers see one shape for the
+        # activity signal, live or offline.
+        out["last_activity_at"] = last_activity
+        out["stale"] = True
+        out["age_seconds"] = (
+            max(0.0, round(time.time() - last_activity, 3))
+            if last_activity is not None
+            else None
+        )
+        out["turn_started_at"] = meta.get("turn_started_at")
+        out["turn_count"] = meta.get("turn_count")
+        out["consecutive_failures"] = meta.get("consecutive_failures")
+        out["native_pid"] = meta.get("native_pid")
+        out["error"] = meta.get("error") or None
+        out["error_class"] = meta.get("error_class") or ""
+        out["retry_after"] = meta.get("retry_after")
     if note:
         out["note"] = note
     return out
@@ -696,6 +784,10 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         if record.get("status") == "closed":
             return
         record["error"] = ""
+        record["error_class"] = ""
+        record["retry_after"] = None
+        record["turn_started_at"] = time.time()
+        record["turn_count"] = int(record.get("turn_count") or 0) + 1
         _transition_status_locked(record, "running")
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
@@ -707,6 +799,8 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 or record.get("native_session_id")
                 or record["session_id"]
             )
+            record["consecutive_failures"] = 0
+            record["turn_started_at"] = None
             if record.get("status") != "closed":
                 _transition_status_locked(record, "idle")
             else:
@@ -716,6 +810,15 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
+            record["error_class"] = _error_class_for(exc)
+            retry_after = getattr(exc, "retry_after", None)
+            record["retry_after"] = (
+                float(retry_after) if isinstance(retry_after, (int, float)) else None
+            )
+            record["consecutive_failures"] = (
+                int(record.get("consecutive_failures") or 0) + 1
+            )
+            record["turn_started_at"] = None
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
@@ -1009,6 +1112,13 @@ def delegate_session(
             "updated_at": now,
             "last_result": None,
             "error": "",
+            "error_class": "",
+            "retry_after": None,
+            "turn_started_at": None,
+            # Lifetime counters survive restarts: they belong to the durable
+            # session id, not to the process that happens to hold the client.
+            "turn_count": int((saved or {}).get("turn_count") or 0),
+            "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
             "thread": None,
         }
         with _SESSION_LOCK:
