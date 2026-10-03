@@ -3,6 +3,7 @@ watch_match, watch_disabled, watch_overflow_*, async_delegation) into the
 ``[IMPORTANT: ...]`` / ``[ASYNC DELEGATION ...]`` text the CLI drain loop, gateway and
 TUI inject into the agent conversation."""
 
+import re
 import time
 from dataclasses import dataclass
 from contextlib import suppress
@@ -91,24 +92,61 @@ def _delegation_config() -> dict:
         return {}
 
 
+_TRANSPORT_STATUS_TOKEN = re.compile(r"^https?\s*\d{3}\s*[:]?$")
+_BARE_REJECTION_TAIL = frozenset({"id", "model id", "model", "name"})
+
+
+def _summary_is_bare_rejection(text: str, model: str, patterns) -> bool:
+    """A completed result only evidences a config-level rejection when its summary is
+    nothing but the rejection: an optional transport status ("HTTP 400:"), the configured
+    model name, the matched phrase, and at most a generic tail ("id"). Child-authored prose
+    around the phrase ("Root cause: HTTP 400 said ...") means the task did real work and
+    stays excluded (#129450); the legacy no-work relay — summary == the transport error —
+    still counts (#97654)."""
+    t = " ".join(str(text or "").split()).strip(" .,;:!").lower()
+    m = str(model or "").strip().lower()
+    if not m:
+        return False
+    for p in patterns:
+        i = t.find(p)
+        if i < 0:
+            continue
+        head = t[:i].strip(" .,;:!")
+        if m not in head:
+            continue  # the model must precede the phrase, not trail in prose
+        head_wo_model = " ".join(head.replace(m, " ").split())
+        if head_wo_model and not _TRANSPORT_STATUS_TOKEN.match(head_wo_model):
+            continue  # authored prose before the phrase
+        tail = t[i + len(p):].strip(" .,;:!")
+        if tail and tail not in _BARE_REJECTION_TAIL:
+            continue  # authored content after the phrase
+        return True
+    return False
+
+
 def _delegation_model_not_found(results, config) -> bool:
     """True when a result reflects a config-level model_not_found rejection: needs a
     model-not-found phrase AND the currently-configured model name in the same text,
     so a stale task failing on a removed model is not mis-attributed to the config.
 
-    Only results that did NOT complete are evidence: a config-level rejection fails
-    every task before any work, so a completed task whose summary quotes a model
-    rejection (a child that investigated a bad model name) must not misreport the
-    whole batch as rejected (#129450)."""
+    Only results that did NOT complete are evidence, plus completed results whose
+    summary is nothing but the rejection itself: a config-level rejection fails every
+    task before any work, so a completed task that investigated a bad model name must
+    not misreport the whole batch as rejected (#129450) while the legacy no-work relay
+    shape keeps the notice (#97654)."""
     model = str((config or {}).get("model") or "").lower()
     if not model:
         return False
     patterns = _model_not_found_patterns()
-    texts = (
-        " ".join(str(x) for x in (r.get("error"), r.get("summary")) if x).lower()
-        for r in results or []
-        if r.get("status") not in _DONE
-    )
+    texts = []
+    for r in results or []:
+        if r.get("status") in _DONE:
+            summary = str(r.get("summary") or "")
+            if not _summary_is_bare_rejection(summary, model, patterns):
+                continue
+            texts.append(summary.lower())
+        else:
+            texts.append(" ".join(str(x) for x in (r.get("error"), r.get("summary")) if x).lower())
     return any(model in text and any(p in text for p in patterns) for text in texts)
 
 

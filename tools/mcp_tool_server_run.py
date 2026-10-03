@@ -153,6 +153,11 @@ class MCPServerRunMixin:
         # See #48069, #81995.
         self._fail_inflight_calls("reconnect")
         self._reconnect_event.clear()
+        # A reconnect return must not carry stale readiness into the teardown: the session is
+        # gone (keepalive failure, explicit reconnect, dead stdio child) and handler recovery
+        # would mistake the old _ready for a fresh one — the same guard the transport-error
+        # ladder applies ("_ready clears every reconnect cycle").
+        self._ready.clear()
         return "reconnect"
 
     async def _wait_for_reconnect_or_shutdown(self, timeout: Optional[float] = None) -> str:
