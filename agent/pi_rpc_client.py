@@ -42,6 +42,7 @@ from agent.copilot_acp_client import (
     _extract_tool_calls_from_text,
     _format_messages_as_prompt,
 )
+from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
 from tools.environments.local import hermes_subprocess_env
 
 PI_RPC_MARKER_BASE_URL = "pi://rpc"
@@ -252,6 +253,10 @@ class PiRPCClient:
         self.chat = _PiChatNamespace(self)
         self.is_closed = False
         self._proc: subprocess.Popen[str] | None = None
+        # Reader threads of the CURRENT `_proc`, replaced on every `_spawn`.
+        # Tracked so `_terminate_after_stall` can wait for their EOF cleanup
+        # before a respawn supersedes the state they write.
+        self._reader_threads: list[threading.Thread] = []
         self._stdin_lock = threading.Lock()
         self._prompt_lock = threading.Lock()
         self._pending: dict[int, list] = {}
@@ -269,6 +274,10 @@ class PiRPCClient:
         # unsolicited Pi event during an active turn refreshes this timestamp.
         self._turn_activity_lock = threading.Lock()
         self._turn_active = False
+        # Unsolicited events since the last prompt ack: zero at a stall means
+        # the delegate agent never produced anything — the structural signal
+        # that the upstream provider (not the agent) is the thing that died.
+        self._turn_event_count = 0
         self._last_turn_activity = time.monotonic()
         self._last_turn_activity_at = time.time()
         self.text_streamed = False
@@ -457,8 +466,12 @@ class PiRPCClient:
             raise RuntimeError("pi rpc process did not expose stdin/stdout pipes.")
         self._proc = proc
         self._process_exited_error = None
-        threading.Thread(target=self._reader, daemon=True).start()
-        threading.Thread(target=self._stderr_reader, daemon=True).start()
+        self._reader_threads = [
+            threading.Thread(target=self._reader, daemon=True),
+            threading.Thread(target=self._stderr_reader, daemon=True),
+        ]
+        for thread in self._reader_threads:
+            thread.start()
         return proc
 
     def _reader(self) -> None:
@@ -528,6 +541,7 @@ class PiRPCClient:
     def _mark_turn_activity(self) -> None:
         with self._turn_activity_lock:
             if self._turn_active:
+                self._turn_event_count += 1
                 self._last_turn_activity = time.monotonic()
                 self._last_turn_activity_at = time.time()
 
@@ -554,6 +568,12 @@ class PiRPCClient:
             if entry is not None:
                 entry[1][0] = msg
                 entry[0].set()
+            return
+
+        # `ready` is a session-level handshake and can land just after a turn
+        # begins; it says nothing about the delegated work and must not count
+        # as turn progress (it would mask a zero-activity stall).
+        if msg_type == "ready":
             return
 
         # Responses to our own control/poll RPCs are deliberately excluded:
@@ -766,6 +786,38 @@ class PiRPCClient:
         self._spawn()
         return self._request_pi({"type": "abort"}, timeout=timeout)
 
+    def _terminate_after_stall(self) -> None:
+        """Kill a pi child that ignored the abort handshake (zombie rider).
+
+        The caller already declared this turn dead; a child that survives
+        holds delegate capacity while producing nothing until a supervisor
+        notices. A dead `_proc` makes the next `_spawn` respawn the same
+        `--session-id`, so the session binding survives transparently. Reader
+        threads EOF-exit on their own; we join them (bounded) so their cleanup
+        writes (`_settled.set()`, `_process_exited_error`, pending waiters)
+        land BEFORE a follow-up turn replaces that state, instead of racing
+        it. Fail-open by design: every failure mode still lets the caller
+        raise the typed stall.
+        """
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        pass
+            except Exception:
+                pass
+        for thread in self._reader_threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+        self._reader_threads = []
+
     def run_session_prompt(
         self,
         message: str,
@@ -792,6 +844,12 @@ class PiRPCClient:
             stall_timeout = max(0.05, float(timeout_seconds or _DEFAULT_TIMEOUT_SECONDS))
             with self._turn_activity_lock:
                 self._turn_active = True
+                # Zero at turn START, before the prompt is sent: a reset after
+                # the ack would race reader-thread events that arrive between
+                # the ack and the reset. The ack itself is a response to our
+                # own RPC and never marks activity, so `zero_activity` here
+                # means "no unsolicited turn event since the prompt went out".
+                self._turn_event_count = 0
                 self._last_turn_activity = time.monotonic()
                 self._last_turn_activity_at = time.time()
             try:
@@ -811,15 +869,46 @@ class PiRPCClient:
                     inactive_for = self._turn_inactive_for()
                     if inactive_for < stall_timeout:
                         continue
+                    # Snapshot the stall evidence BEFORE aborting: the abort
+                    # handshake and its settle events are recovery noise, not
+                    # turn progress, and must not flip zero_activity or drown
+                    # the tail of the streamed deltas.
+                    with self._turn_activity_lock:
+                        zero_activity = self._turn_event_count == 0
+                    evidence = (
+                        "".join(self._text_parts[-16:])
+                        + "".join(self._reasoning_parts[-16:])
+                        + "\n".join(self._stderr_tail)
+                    )[-4096:]
                     try:
                         self._send_pi({"type": "abort"})
                     except Exception:
                         pass
-                    self._settled.wait(min(10.0, max(0.1, stall_timeout)))
-                    raise TimeoutError(
-                        "pi session turn stalled after "
-                        f"{stall_timeout:.0f}s without observable progress"
+                    if not self._settled.wait(min(10.0, max(0.1, stall_timeout))):
+                        # Zombie-capacity rider: the child ignored the abort
+                        # for the whole settle grace, so it is wedged mid-turn
+                        # holding delegate capacity while producing nothing
+                        # (the leaked-worker half of the A4 incident). Kill it;
+                        # the next `_spawn` respawns the SAME `--session-id`,
+                        # so recovery is a transparent respawn of the same
+                        # native session, not a lost one.
+                        self._terminate_after_stall()
+                    error_class, provider_signal, retry_after = (
+                        classify_delegate_failure(evidence, zero_activity=zero_activity)
                     )
+                    detail = (
+                        "pi session turn timed out: "
+                        f"stalled after {stall_timeout:.0f}s without observable progress"
+                    )
+                    if provider_signal:
+                        detail += f" (provider signal: {provider_signal})"
+                    raise DelegateTurnStalled(
+                        detail,
+                        error_class=error_class,
+                        provider_signal=provider_signal,
+                        retry_after=retry_after,
+                        zero_activity=zero_activity,
+                    ) from None
 
                 if self._process_exited_error:
                     raise RuntimeError(self._process_exited_error)
