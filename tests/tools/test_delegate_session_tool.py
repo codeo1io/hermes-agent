@@ -785,6 +785,13 @@ def test_offline_status_reports_errored_turn_evidence_after_registry_loss():
         )
     )
     wait_for_status(parent, sid, "error")
+    # wait_for_status observes the live record; the offline read below sees
+    # only the durable file, so the terminal persist must land first.
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if (ds._load_metadata(sid) or {}).get("status") == "error":
+            break
+        time.sleep(0.01)
     with ds._SESSION_LOCK:
         ds._SESSIONS.pop(sid)
 
@@ -869,6 +876,230 @@ def test_offline_messages_and_list_inherit_operational_evidence():
     assert row["consecutive_failures"] == 0
 
     stale["client"].close()
+
+
+def _blocked_running_session(parent, message="blocked turn"):
+    """Start a session, dispatch a turn the fake holds open, return handles."""
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    sent = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message=message, parent_agent=parent
+        )
+    )
+    assert sent["accepted"] is True
+    wait_for_status(parent, sid, "running")
+    # Status flips to running before the turn thread starts; the fake's
+    # entry write of last_turn_activity_at must land before callers step it,
+    # or the step races (and loses to) that assignment.
+    assert client.started_turn.wait(timeout=5.0)
+    return sid, client
+
+
+def test_watcher_persists_mid_turn_running_evidence(monkeypatch):
+    """T2: the in-turn refresh watcher. While a turn is open, stepping the
+    client's activity signal must advance the durable file on the watcher's
+    own — an outside reader sees status running and a fresh activity
+    timestamp without the originating process persisting anything (the exact
+    silence the incident supervisor hit). Red on base: base never persists
+    mid-turn, so the durable file keeps the pre-turn idle snapshot."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        first = client.last_turn_activity_at
+        client.last_turn_activity_at = first + 1.0
+        baseline = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if meta.get("status") == "running":
+                baseline = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert baseline is not None
+        assert baseline >= first + 1.0
+
+        client.last_turn_activity_at = baseline + 1.0
+        advanced = None
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if (
+                meta.get("status") == "running"
+                and meta.get("last_turn_activity_at", 0.0) > baseline
+            ):
+                advanced = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert advanced is not None
+        assert advanced >= baseline + 1.0
+        # The turn is still open throughout: only the watcher wrote this.
+        with ds._SESSION_LOCK:
+            assert ds._SESSIONS[sid]["status"] == "running"
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+def test_watcher_write_amplitude_is_capped_mid_turn(monkeypatch):
+    """T2: five activity steps inside one refresh window must not multiply
+    durable writes — the observer persists at most once per refresh window
+    (contract, not change-detector: amplitude stays bounded as activity
+    frequency grows). Red on base: no mid-turn writes exist at all."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        client.last_turn_activity_at = client.last_turn_activity_at + 1.0
+        baseline = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if meta.get("status") == "running":
+                baseline = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert baseline is not None
+        with ds._SESSION_LOCK:
+            # The watermark contract makes the cap exact: the last successful
+            # write's snapshot activity is what the next refresh compares to.
+            assert ds._SESSIONS[sid]["last_persisted_activity"] == baseline
+
+        # Five activity steps, all inside one refresh window of the baseline.
+        for step in range(1, 6):
+            client.last_turn_activity_at = baseline + 0.001 * step
+
+        path = ds._metadata_path(sid)
+        writes = 0
+        last_mtime = path.stat().st_mtime_ns
+        observed: set[float] = set()
+        stop = time.time() + 0.4  # ~8 watcher poll windows
+        while time.time() < stop:
+            meta = ds._load_metadata(sid) or {}
+            mtime = path.stat().st_mtime_ns
+            if mtime != last_mtime:
+                writes += 1
+                last_mtime = mtime
+            if meta.get("status") == "running":
+                activity = meta.get("last_turn_activity_at")
+                if activity is not None:
+                    observed.add(activity)
+            time.sleep(0.002)
+
+        assert observed, "watcher never advertised mid-turn activity"
+        assert writes <= 2
+        assert len(observed) <= 2
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+def test_watcher_stops_writing_after_turn_ends(monkeypatch):
+    """T2: the watcher dies with the turn. After the terminal persist there
+    are no further durable writes for >= 3 poll windows and the turn thread
+    is joinable. A regression guard for the watcher mechanism itself (an
+    unbounded observer would churn the store after every turn)."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+    record = ds._SESSIONS[sid]
+    deadline = time.time() + 5.0
+    while time.time() < deadline and record["thread"].is_alive():
+        time.sleep(0.01)
+    assert not record["thread"].is_alive()
+
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid) or {}
+        if meta.get("status") == "idle" and meta.get("turn_count") == 1:
+            break
+        time.sleep(0.01)
+
+    path = ds._metadata_path(sid)
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+    time.sleep(0.3)  # >= 3 observer poll windows
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_stall_timeout_types_error_class_delegate_stall():
+    """T4: the in-tree stall signature classifies as delegate_stall, not a
+    generic timeout, so a lost stalled session stays distinguishable from a
+    provider timeout in the durable ledger."""
+
+    def stall(message, *, timeout_seconds=900.0):
+        raise TimeoutError(
+            "pi session turn stalled after 900s without observable progress"
+        )
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    FakePiClient.instances[-1].run_session_prompt = stall
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="doomed", parent_agent=parent
+        )
+    )
+    wait_for_status(parent, sid, "error")
+
+    with ds._SESSION_LOCK:
+        record = dict(ds._SESSIONS[sid])
+    assert record["error_class"] == "delegate_stall"
+    assert record["consecutive_failures"] == 1
+    assert len(record["error"]) <= 2000
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid) or {}
+        if meta.get("status") == "error":
+            break
+        time.sleep(0.01)
+    assert meta["error_class"] == "delegate_stall"
+    assert meta["consecutive_failures"] == 1
+    assert meta["turn_count"] == 1
+
+
+def test_error_class_signature_vocabulary():
+    """T4: the stable-signature text vocabulary mirrors the sibling
+    FailoverReason class names for the delegate-surface failure subset."""
+    cases = {
+        RuntimeError("HTTP 429 too many requests"): "rate_limit",
+        RuntimeError("rate limit exceeded, retry later"): "rate_limit",
+        RuntimeError("provider is overloaded (503)"): "overloaded",
+        TimeoutError("request timed out"): "timeout",
+        RuntimeError("turn aborted by supervisor"): "timeout",
+        OSError(28, "No space left on device"): "resource_exhausted",
+        RuntimeError("can't start new thread"): "resource_exhausted",
+        OSError(11, "Resource temporarily unavailable"): "resource_exhausted",
+        RuntimeError("pi rpc process exited with code 1"): "transport",
+        RuntimeError("pi rpc client is closed"): "transport",
+        RuntimeError("Could not start pi binary 'pi'"): "transport",
+        RuntimeError("something entirely novel"): "",
+    }
+    for exc, expected in cases.items():
+        assert ds._error_class_for(exc) == expected, repr(exc)
+
+
+def test_error_class_attr_wins_over_text_signature():
+    """T4: an exception that classifies itself (sibling DelegateTurnStalled
+    shape) wins outright over the text matcher — the forward-compat seam."""
+
+    class Annotated(RuntimeError):
+        error_class = "rate_limit"
+        retry_after = 1800.0
+
+    exc = Annotated("provider is overloaded (503)")  # text says overloaded
+    unannotated = RuntimeError("provider is overloaded (503)")
+    assert ds._error_class_for(exc) == "rate_limit"
+    assert ds._error_class_for(unannotated) == "overloaded"
 
 
 def test_wedge_e2e_real_pi_client_durable_running_evidence(monkeypatch, tmp_path):
