@@ -328,7 +328,8 @@ changing `pyproject.toml`. Reference: #2810 (bounds), #9801 (SHA pinning + audit
 
 **ALWAYS use `scripts/run_tests.sh`**, never bare `pytest`. It enforces CI parity: credential
 vars unset, `TZ=UTC`, `LANG=C.UTF-8`, `HERMES_HOME` → temp dir, and per-file subprocess
-isolation via `scripts/run_tests_parallel.py` (no xdist; workers scale with CPU count) so
+isolation via `scripts/run_tests_parallel.py` (no xdist; workers scale with CPU count,
+bounded by the ambient cgroup's CPU/pids limits — fail-open when absent) so
 module-level dicts/ContextVars cannot leak between files. Direct `pytest` on a big machine
 with API keys set has caused repeated "works locally, fails in CI" incidents (and the reverse).
 
