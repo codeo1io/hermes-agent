@@ -215,7 +215,88 @@ def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
     started = time.monotonic()
     with pytest.raises(TimeoutError, match="stalled after .* without observable progress"):
         client.run_session_prompt("go", timeout_seconds=0.08)
-    assert time.monotonic() - started < 0.8
+    # Bounded fast-fail: the terminal liveness probe adds up to ~1s of
+    # forensics after the stall window; the raise must still arrive in
+    # seconds, never the full turn timeout.
+    assert 0.08 <= time.monotonic() - started < 2.0
+    client.close()
+
+
+def test_stall_raise_carries_liveness_triage_for_responsive_pi(tmp_path):
+    # A stalled turn whose process still answers control RPCs: the triage
+    # bundle must say "responsive-but-unproductive", not just "stalled".
+    script = tmp_path / "fake-pi-stall-responsive"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, threading, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "def stalled_turn(mid):\n"
+        + "    send({'type':'response','id':mid,'success':True})\n"
+        + "    time.sleep(30)\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        threading.Thread(target=stalled_turn, args=(msg['id'],), daemon=True).start()\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'messageCount':3}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://stall-responsive",
+        persistent_session=True,
+    )
+    with pytest.raises(TimeoutError, match="stalled after .* without observable progress") as exc_info:
+        client.run_session_prompt("go", timeout_seconds=0.08)
+
+    triage = exc_info.value.liveness_triage
+    assert triage["process_alive"] is True
+    assert triage["rpc_responsive"] is True
+    assert triage["probe_latency_ms"] is not None
+    assert triage["probe_latency_ms"] >= 0
+    assert triage["message_count"] == 3
+    assert triage["last_event_age_s"] >= 0.08
+    assert isinstance(triage["probed_at"], float)
+    client.close()
+
+
+def test_stall_raise_carries_liveness_triage_for_dead_pi_process(tmp_path):
+    # The process dies after the stall fires but before the raise: the triage
+    # bundle must report a dead process instead of leaving supervision to
+    # guess between wedged and dead.
+    script = tmp_path / "fake-pi-stall-dead"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        time.sleep(0.35)\n"
+        + "        raise SystemExit(9)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://stall-dead",
+        persistent_session=True,
+    )
+    with pytest.raises(TimeoutError, match="stalled after .* without observable progress") as exc_info:
+        client.run_session_prompt("go", timeout_seconds=0.15)
+
+    triage = exc_info.value.liveness_triage
+    assert triage["process_alive"] is False
+    assert triage["rpc_responsive"] is False
+    assert triage["message_count"] is None
     client.close()
 
 

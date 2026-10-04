@@ -38,6 +38,20 @@ _MAX_DURABLE_SESSIONS = 500
 
 _KNOWN_BACKENDS = ("pi", "opencode")
 
+# Recovery-lineage keys reported by status/metadata when a durable delegate
+# handle ever had to mint a fresh native Pi session. Immutable once set: a
+# later healthy resume keeps the earliest chain root; only a re-mint replaces
+# the latest reason/timestamp. Additive names so a sibling metadata lineage
+# can union its own fields into the same version bump without collision.
+_RECOVERY_LINEAGE_KEYS = ("recovery_of_native_id", "recovery_reason", "recovered_at")
+
+# Typed busy shape shared by the send action and the start/resume follow-up
+# dispatch: identical text in both paths so upstream classifiers (spool
+# server) treat "a turn is live" the same way regardless of entry action.
+_RUNNING_BUSY_ERROR = (
+    "Delegate session is currently running. Use action='steer' to redirect it, or wait for idle."
+)
+
 # Owners without a conversation id fall back to a process-local handle. Such
 # handles are meaningless in a later process, so they must never authorize
 # durable metadata (an id() collision would otherwise grant access).
@@ -84,8 +98,8 @@ def _metadata_path(session_id: str) -> Path:
 
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
-    return {
-        "version": 3,
+    snapshot = {
+        "version": 4,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -98,6 +112,17 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
     }
+    # v4: recovery lineage + turn-liveness truth (turn_started_at from
+    # _dispatch_turn, terminal stall triage from _run_turn) ride along when
+    # present so the durable/offline view reports the same identity +
+    # liveness truth as the live one. Additive only — absence must stay
+    # absence, not null, and the durable set stays IDs/timestamps/workspace-only
+    # (no prompt text).
+    for key in (*_RECOVERY_LINEAGE_KEYS, "turn_started_at", "last_turn_triage"):
+        value = record.get(key)
+        if value is not None:
+            snapshot[key] = value
+    return snapshot
 
 
 def _metadata_files_newest(root: Path) -> list[Path]:
@@ -526,16 +551,40 @@ def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _turn_inactive_for_seconds(client: Any, last_activity_at: Any) -> Optional[float]:
+    """Seconds since the client last observed delegated-turn activity.
+
+    Prefers the client's own monotonic inactivity counter (immune to wall
+    clock jumps); backends without one fall back to the distance from the
+    public ``last_turn_activity_at`` epoch. Degrades to None so callers omit
+    the key entirely instead of fabricating a value.
+    """
+    counter = getattr(client, "_turn_inactive_for", None)
+    if callable(counter):
+        try:
+            return round(max(0.0, float(counter())), 3)
+        except Exception:
+            logger.debug("Delegate client inactivity counter failed", exc_info=True)
+    if isinstance(last_activity_at, (int, float)):
+        inactive_for = time.time() - float(last_activity_at)
+        if inactive_for >= 0:
+            return round(inactive_for, 3)
+    return None
+
+
 def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
     client = record.get("client")
     last_activity_at = getattr(client, "last_turn_activity_at", None)
+    status = record.get("status", "unknown")
+    turn_running = status == "running"
     out = {
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
         "native_session_id": record.get("native_session_id") or record["session_id"],
         "pi_session_id": record.get("native_session_id")
         or record["session_id"],  # kept for model-callers
-        "status": record.get("status", "unknown"),
+        "status": status,
+        "turn_running": turn_running,
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
@@ -547,6 +596,17 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "pending_question": _pending_payload(record),
         "error": record.get("error") or None,
     }
+    # Turn-liveness truth rides the same additive channel as the recovery
+    # lineage: presence means evidence, absence stays absence. inactive_for_s
+    # is client-derived, so it is only reported for a live running turn.
+    for key in (*_RECOVERY_LINEAGE_KEYS, "turn_started_at", "last_turn_triage"):
+        value = record.get(key)
+        if value is not None:
+            out[key] = value
+    if turn_running:
+        inactive_for_s = _turn_inactive_for_seconds(client, last_activity_at)
+        if inactive_for_s is not None:
+            out["inactive_for_s"] = inactive_for_s
     if include_result and record.get("last_result"):
         result = record["last_result"]
         out["last_result"] = {
@@ -602,6 +662,12 @@ def _durable_summary(
         "pending_question": None,
         "error": None,
     }
+    # Persisted turn-liveness subset only: turn_running/inactive_for_s are
+    # client-derived and must never be fabricated for an offline record.
+    for key in (*_RECOVERY_LINEAGE_KEYS, "turn_started_at", "last_turn_triage"):
+        value = meta.get(key)
+        if value is not None:
+            out[key] = value
     if note:
         out["note"] = note
     return out
@@ -696,6 +762,9 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         if record.get("status") == "closed":
             return
         record["error"] = ""
+        # A new turn supersedes the previous turn's terminal triage, exactly
+        # as it supersedes the previous error.
+        record.pop("last_turn_triage", None)
         _transition_status_locked(record, "running")
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
@@ -714,8 +783,16 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         _persist_metadata(record)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
+        # PiRPCClient attaches terminal liveness forensics to its stall
+        # TimeoutError; bank it verbatim so supervision reads structured
+        # truth (process-wedged vs responsive-but-unproductive) instead of
+        # re-deriving it from log text. Backends without the attribute bank
+        # nothing.
+        triage = getattr(exc, "liveness_triage", None)
         with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
+            if isinstance(triage, dict):
+                record["last_turn_triage"] = triage
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
@@ -736,6 +813,10 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
     )
     with _SESSION_CONDITION:
         record["thread"] = thread
+        # Dispatch time of the CURRENT (or, once idle, most recent) turn:
+        # paired with status it tells a supervisor when the live turn began,
+        # and survives durably as forensics when the process dies mid-turn.
+        record["turn_started_at"] = time.time()
         _transition_status_locked(record, "running")
     thread.start()
 
@@ -868,6 +949,14 @@ def delegate_session(
                 reopen = existing.get("status") in {"closed", "error"} or client_closed or process_dead
                 if not reopen:
                     if goal and goal.strip():
+                        # Mirror of the send action's busy guard: dispatching a
+                        # second concurrent turn onto a live RUNNING client
+                        # made the new turn's stall window count down while
+                        # pi still worked the first turn — aborting live work
+                        # and cascading into ambiguous-dispatch re-tries.
+                        # Running means steer-or-wait, exactly like send.
+                        if existing.get("status") == "running":
+                            return tool_error(_RUNNING_BUSY_ERROR)
                         # Re-start on a live session is a FOLLOW-UP, not a
                         # no-op: silently dropping the goal made every later
                         # phase of a multi-turn delegation appear to succeed
@@ -943,6 +1032,14 @@ def delegate_session(
             return created
 
         requested_native = native_hint or handle
+        # Recovery lineage is immutable once set: healthy opens carry the
+        # earliest recorded chain root forward untouched; only a fresh mint
+        # replaces the latest reason/timestamp.
+        recovery_lineage = {
+            key: (saved or {}).get(key)
+            for key in _RECOVERY_LINEAGE_KEYS
+            if (saved or {}).get(key) is not None
+        }
         client = _make_client(requested_native)
         try:
             state = client.start(timeout=min(30.0, effective_timeout))
@@ -955,45 +1052,82 @@ def delegate_session(
                     backend_name,
                     exc_info=True,
                 )
+            state = None
 
-            # A durable Pi handle may outlive a native Pi RPC session that
-            # aborted mid-turn. Reopening the same native id can then wedge
-            # forever at the initial get_state handshake. Keep the Conductor
-            # binding/backend stable, but mint a fresh *native Pi* session and
-            # continue from the durable work-order/worktree. This is Pi
-            # recovery, never backend failover.
+            # The bootstrap handshake is already 30s-bounded, so before
+            # minting anything give the SAME bound native id exactly one
+            # bounded retry with a fresh client: transient provider deaths
+            # recover here without touching session identity at all.
             if backend_name == "pi" and native_hint:
-                recovery_native = (
-                    f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
-                )
-                logger.warning(
-                    "Pi native session %s failed bootstrap; retrying durable "
-                    "delegate handle %s with fresh native session %s: %s",
-                    native_hint,
-                    handle,
-                    recovery_native,
-                    _bounded(exc, 400),
-                )
-                client = _make_client(recovery_native)
+                client = _make_client(native_hint)
                 try:
                     state = client.start(timeout=min(30.0, effective_timeout))
-                except Exception as recovery_exc:  # noqa: BLE001
+                    logger.info(
+                        "Pi native session %s bootstrap failed once; same-id "
+                        "retry succeeded: %s",
+                        native_hint,
+                        _bounded(exc, 400),
+                    )
+                except Exception:
                     try:
                         client.close()
                     except Exception:
                         logger.debug(
-                            "Could not close failed Pi recovery delegate client",
+                            "Could not close failed Pi same-id retry client",
                             exc_info=True,
                         )
-                    return tool_error(
-                        "Could not start pi delegate session after fresh-native "
-                        f"recovery: {_bounded(recovery_exc, 1000)} "
-                        f"(original: {_bounded(exc, 400)})"
+                    state = None
+
+            if state is None:
+                # A durable Pi handle may outlive a native Pi RPC session that
+                # aborted mid-turn. Reopening the same native id can then wedge
+                # forever at the initial get_state handshake. Keep the Conductor
+                # binding/backend stable, but mint a fresh *native Pi* session and
+                # continue from the durable work-order/worktree. This is Pi
+                # recovery, never backend failover.
+                if backend_name == "pi" and native_hint:
+                    recovery_native = (
+                        f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
                     )
-            else:
-                return tool_error(
-                    f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
-                )
+                    logger.warning(
+                        "Pi native session %s failed bootstrap; retrying durable "
+                        "delegate handle %s with fresh native session %s: %s",
+                        native_hint,
+                        handle,
+                        recovery_native,
+                        _bounded(exc, 400),
+                    )
+                    client = _make_client(recovery_native)
+                    try:
+                        state = client.start(timeout=min(30.0, effective_timeout))
+                    except Exception as recovery_exc:  # noqa: BLE001
+                        try:
+                            client.close()
+                        except Exception:
+                            logger.debug(
+                                "Could not close failed Pi recovery delegate client",
+                                exc_info=True,
+                            )
+                        return tool_error(
+                            "Could not start pi delegate session after fresh-native "
+                            f"recovery: {_bounded(recovery_exc, 1000)} "
+                            f"(original: {_bounded(exc, 400)})"
+                        )
+                    # The mint is recorded, never silent: identity supervision
+                    # reads lineage from status/metadata instead of inferring
+                    # a fork from an unexplained native-id change.
+                    recovery_lineage = {
+                        "recovery_of_native_id": str(
+                            recovery_lineage.get("recovery_of_native_id")
+                            or native_hint
+                        ),
+                        "recovery_reason": _bounded(exc, 1000),
+                        "recovered_at": time.time(),
+                    }
+                else:
+                    return tool_error(
+                        f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
+                    )
         native_id = str(state.get("sessionId") or handle)
         now = time.time()
         record: Dict[str, Any] = {
@@ -1010,6 +1144,7 @@ def delegate_session(
             "last_result": None,
             "error": "",
             "thread": None,
+            **recovery_lineage,
         }
         with _SESSION_LOCK:
             _SESSIONS[handle] = record
@@ -1143,9 +1278,7 @@ def delegate_session(
             return tool_error(dead_error)
         with _SESSION_LOCK:
             if record.get("status") == "running":
-                return tool_error(
-                    "Delegate session is currently running. Use action='steer' to redirect it, or wait for idle."
-                )
+                return tool_error(_RUNNING_BUSY_ERROR)
             if record.get("status") == "closed":
                 return tool_error(
                     "Delegate session is closed. Use action='resume' to reopen it."
