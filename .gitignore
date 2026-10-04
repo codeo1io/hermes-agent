@@ -309,3 +309,7 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# Conductor/agent run bookkeeping (campaign progress, assess findings,
+# compound diffs, prioritization notes) — workspace state, never code.
+.conductor/
