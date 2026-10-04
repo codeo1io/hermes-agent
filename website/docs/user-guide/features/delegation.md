@@ -40,6 +40,14 @@ delegate_session(action="resume", session_id="...")
 
 `resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata contains IDs/timestamps/workspace only; prompt text remains in Pi's native session history.
 
+## Durable session progression evidence
+
+Every `delegate_session` summary — live or offline — carries forward-progression fields that answer "how far did this delegation get, and what did it last say?" without reopening the native session: `turns_completed`, `last_line` (last non-empty line of the last completed turn, bounded to 400 chars), `last_turn_duration_s`, `last_turn_outcome` (`completed` or `error`), and `last_progress_at`.
+
+Stamping is deliberately conservative — an anti-whitewash invariant. `last_progress_at` moves only when a turn reaches a terminal outcome: dispatching, status transitions, polls, and persistence re-writes never advance it, so anything comparing these timestamps is looking at real forward motion, not housekeeping. A failed turn advances the stamp with `last_turn_outcome: "error"` while leaving `turns_completed` and `last_line` untouched — the failure proves the delegate was alive and working, but is not forward content.
+
+The fields live in the durable per-session metadata file, so they survive gateway restarts and registry loss exactly like the session identity: a replacement supervisor reading an offline session sees the same evidence, and `resume` carries the counters forward instead of resetting them. A supervisor that polls progression can therefore distinguish "still working, just quiet" from "silently dead" from durable facts rather than dispatch bookkeeping.
+
 ## Completion delivery
 
 Messaging gateways acknowledge background completions only after their adapter actually

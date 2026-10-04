@@ -548,6 +548,203 @@ def test_list_includes_offline_durable_sessions_after_registry_loss():
     assert row["cwd"] == started["cwd"]
 
 
+def wait_for_progress_fields(sid: str, timeout: float = 2.0, **fields) -> dict:
+    """Poll the durable metadata file on disk until it carries ``fields``.
+
+    The terminal stamp is banked inside the turn thread and written by
+    ``_persist_metadata`` only after the in-memory status flip has released
+    ``wait_for_status`` observers, so disk assertions must poll.
+    """
+    deadline = time.time() + timeout
+    meta: dict = {}
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid) or {}
+        if all(meta.get(key) == value for key, value in fields.items()):
+            return meta
+        time.sleep(0.01)
+    raise AssertionError(f"durable metadata for {sid} never reached {fields}: {meta}")
+
+
+def test_turn_progression_evidence_survives_registry_loss():
+    """Regression: durable forward-progression evidence (Maestro A4,
+    cognitive-continuity.supervisor-progression-evidence-source-failure) must
+    survive the loss of the process-local session registry — the exact state
+    a gateway restart leaves behind."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    # No turn has run yet: the evidence surfaces exist but are empty.
+    assert started["turns_completed"] == 0
+    assert started["last_line"] is None
+    assert started["last_progress_at"] is None
+    assert started["last_turn_outcome"] is None
+
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="ship it", parent_agent=parent
+        )
+    )
+    done = wait_for_status(parent, sid, "idle")
+    assert done["turns_completed"] == 1
+    assert done["last_line"] == "done:ship it"
+    assert done["last_turn_outcome"] == "completed"
+    assert done["last_progress_at"] > 0
+    assert isinstance(done["last_turn_duration_s"], float)
+
+    meta = wait_for_progress_fields(
+        sid, turns_completed=1, last_line="done:ship it", last_turn_outcome="completed"
+    )
+    assert meta["last_progress_at"] > 0
+
+    # Simulate the incident scenario: the hosting process died, the registry
+    # is gone, only the durable metadata file remains. Offline reads must
+    # report how far the session got and what it last said.
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid)["client"].close()
+    offline = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert offline["status"] == "offline"
+    assert offline["turns_completed"] == 1
+    assert offline["last_line"] == "done:ship it"
+    assert offline["last_turn_outcome"] == "completed"
+    assert offline["last_progress_at"] == meta["last_progress_at"]
+
+    # Resume carries the evidence forward instead of zeroing it: the first
+    # persist after reopen must not erase the counters it inherited.
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+    assert resumed["created"] is True
+    assert resumed["turns_completed"] == 1
+    assert resumed["last_line"] == "done:ship it"
+    assert resumed["last_turn_outcome"] == "completed"
+
+
+def test_progress_stamp_moves_only_on_terminal_turn_content():
+    """Anti-whitewash invariant: ``last_progress_at`` advances only when a
+    turn reaches a terminal outcome — never on dispatch, status transitions,
+    polls, or persistence re-writes."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="first", parent_agent=parent
+        )
+    )
+    first = wait_for_status(parent, sid, "idle")
+    t_first = first["last_progress_at"]
+    assert t_first > 0
+    # The in-memory flip releases wait_for_status before the terminal persist
+    # lands on disk; pin the file to the first turn's state before holding
+    # the next turn open.
+    wait_for_progress_fields(sid, turns_completed=1)
+
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="second", parent_agent=parent
+        )
+    )
+    assert client.started_turn.wait(timeout=5)
+
+    running = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert running["status"] == "running"
+    # Dispatching a new turn does not move the stamp.
+    assert running["last_progress_at"] == t_first
+
+    # Polls of every read surface leave the stamp — and the durable file —
+    # untouched while the turn is still running.
+    for _ in range(3):
+        payload(
+            ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+        )
+        payload(
+            ds.delegate_session(action="messages", session_id=sid, parent_agent=parent)
+        )
+        timed_out = payload(
+            ds.delegate_session(
+                action="wait", session_id=sid, wait_seconds=0, parent_agent=parent
+            )
+        )
+        assert timed_out["timed_out"] is True
+        assert timed_out["last_progress_at"] == t_first
+    meta = ds._load_metadata(sid)
+    assert meta["last_progress_at"] == t_first
+    assert meta["turns_completed"] == 1
+
+    client.release_turn.set()
+    second = wait_for_status(parent, sid, "idle")
+    assert second["turns_completed"] == 2
+    assert second["last_line"] == "done:second"
+    assert second["last_progress_at"] > t_first
+    durable = wait_for_progress_fields(sid, turns_completed=2, last_line="done:second")
+    assert durable["last_progress_at"] > t_first
+
+
+def test_failed_turn_banks_error_outcome_and_keeps_last_line():
+    """A failed turn is durable evidence of activity: the outcome stamp
+    advances exactly once with an ``error`` outcome, while completed-turn
+    evidence (count, last line) is left untouched."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="good", parent_agent=parent
+        )
+    )
+    ok = wait_for_status(parent, sid, "idle")
+    assert ok["turns_completed"] == 1
+    assert ok["last_line"] == "done:good"
+    t_ok = ok["last_progress_at"]
+    wait_for_progress_fields(sid, turns_completed=1)
+
+    client = FakePiClient.instances[-1]
+
+    def boom(message, *, timeout_seconds=900.0):
+        raise RuntimeError("provider exploded")
+
+    client.run_session_prompt = boom
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="bad", parent_agent=parent
+        )
+    )
+    failed = wait_for_status(parent, sid, "error")
+    assert failed["last_turn_outcome"] == "error"
+    # A failure is evidence of activity, not forward content.
+    assert failed["turns_completed"] == 1
+    assert failed["last_line"] == "done:good"
+    assert failed["last_progress_at"] > t_ok
+
+    meta = wait_for_progress_fields(sid, last_turn_outcome="error")
+    assert meta["turns_completed"] == 1
+    assert meta["last_line"] == "done:good"
+    # (U1/predecessor adoption additionally persists bounded error prose and
+    # error_class here; its own tests cover that union.)
+
+    # The stamp advanced exactly once: later reads do not move it again.
+    after = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert after["last_progress_at"] == failed["last_progress_at"]
+
+    # The failure evidence is exactly what an offline supervisor reads back.
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid)["client"].close()
+    offline = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert offline["last_turn_outcome"] == "error"
+    assert offline["turns_completed"] == 1
+    assert offline["last_line"] == "done:good"
+
+
 def test_durable_metadata_cache_prunes_oldest_files(monkeypatch, tmp_path):
     root = ds._session_store_root()
     root.mkdir(parents=True, exist_ok=True)

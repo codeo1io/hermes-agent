@@ -95,6 +95,15 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "owner": record.get("owner"),
         "owner_scope": record.get("owner_scope"),
         "cwd": record.get("cwd"),
+        # Durable forward-progression evidence (additive, version-compatible):
+        # how far the session got and what it last said, so a replacement
+        # supervisor restart-continues instead of guessing. Stamped only by
+        # _bank_durable_progress on terminal turn outcomes.
+        "turns_completed": int(record.get("turns_completed") or 0),
+        "last_line": _bounded(record.get("last_line"), 400) or None,
+        "last_progress_at": record.get("last_progress_at"),
+        "last_turn_duration_s": record.get("last_turn_duration_s"),
+        "last_turn_outcome": record.get("last_turn_outcome") or None,
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
     }
@@ -283,6 +292,53 @@ def _message_text(value: Any) -> str:
                 if text:
                     return text
     return ""
+
+
+def _last_line_of(text: Any) -> Optional[str]:
+    """Last non-empty line of a turn's final text, or None."""
+    if not isinstance(text, str):
+        return None
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _bank_durable_progress(
+    record: Dict[str, Any], outcome: str, result: Optional[Dict[str, Any]] = None
+) -> None:
+    """Stamp durable forward-progression evidence for one terminal turn.
+
+    Called ONLY from ``_run_turn``'s terminal blocks (anti-whitewash
+    invariant): ``last_progress_at`` moves exactly when durable content
+    changes — never on dispatch, status transitions, persistence re-writes,
+    or reads. A failed turn is durable evidence of activity, so the stamp
+    advances with an ``error`` outcome without touching
+    ``turns_completed``/``last_line``. Caller must hold ``_SESSION_CONDITION``.
+    """
+    record["last_turn_outcome"] = outcome
+    record["last_progress_at"] = time.time()
+    if result is None:
+        return
+    record["turns_completed"] = int(record.get("turns_completed") or 0) + 1
+    duration = result.get("duration_s") if isinstance(result, dict) else None
+    record["last_turn_duration_s"] = (
+        float(duration) if isinstance(duration, (int, float)) else None
+    )
+    record["last_line"] = _bounded(_last_line_of(result.get("text")), 400) or None
+
+
+def _restore_durable_progress(record: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    """Carry persisted progression evidence into a reopened session record.
+
+    Without this, resume would rewrite the durable file with zeroed counters
+    and erase exactly the restart-survival evidence this module guarantees.
+    """
+    record["turns_completed"] = int(meta.get("turns_completed") or 0)
+    for key in ("last_line", "last_progress_at", "last_turn_duration_s"):
+        record[key] = meta.get(key)
+    record["last_turn_outcome"] = meta.get("last_turn_outcome") or None
 
 
 def _parent_context_excerpt(parent_agent: Any, maximum: int = 24_000) -> str:
@@ -539,6 +595,13 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # Durable forward-progression evidence (see _bank_durable_progress for
+        # the stamping discipline).
+        "turns_completed": int(record.get("turns_completed") or 0),
+        "last_line": record.get("last_line"),
+        "last_progress_at": record.get("last_progress_at"),
+        "last_turn_duration_s": record.get("last_turn_duration_s"),
+        "last_turn_outcome": record.get("last_turn_outcome") or None,
         "last_activity_at": (
             float(last_activity_at)
             if isinstance(last_activity_at, (int, float))
@@ -597,6 +660,13 @@ def _durable_summary(
         "pi_session_id": native,  # kept for model-callers
         "status": "offline",
         "cwd": meta.get("cwd"),
+        # Durable forward-progression evidence rides the metadata file, so it
+        # is safe to report offline (no live client needed).
+        "turns_completed": int(meta.get("turns_completed") or 0),
+        "last_line": meta.get("last_line"),
+        "last_progress_at": meta.get("last_progress_at"),
+        "last_turn_duration_s": meta.get("last_turn_duration_s"),
+        "last_turn_outcome": meta.get("last_turn_outcome") or None,
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
         "pending_question": None,
@@ -702,6 +772,7 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         state = result.get("state") if isinstance(result, dict) else {}
         with _SESSION_CONDITION:
             record["last_result"] = result
+            _bank_durable_progress(record, "completed", result)
             record["native_session_id"] = (
                 (state.get("sessionId") if isinstance(state, dict) else None)
                 or record.get("native_session_id")
@@ -715,6 +786,7 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         with _SESSION_CONDITION:
+            _bank_durable_progress(record, "error")
             record["error"] = _bounded(exc, 2000)
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
@@ -1011,6 +1083,7 @@ def delegate_session(
             "error": "",
             "thread": None,
         }
+        _restore_durable_progress(record, saved or {})
         with _SESSION_LOCK:
             _SESSIONS[handle] = record
         _persist_metadata(record)
