@@ -1100,6 +1100,12 @@ class BuzzAdapter(BasePlatformAdapter):
         backoff = 1.0
         reconnecting = False
         while True:
+            if asyncio.current_task().cancelling():
+                # A cancellation delivered while the async-with unwinds can be
+                # swallowed by the close/gather shutdown path, leaving this loop
+                # reconnecting forever under a never-completing "cancelling"
+                # task. Re-raise at the loop top so a cancelled loop always ends.
+                raise asyncio.CancelledError
             try:
                 async with websockets.connect(
                     self._websocket_url(), open_timeout=_WS_AUTH_TIMEOUT, close_timeout=5,
