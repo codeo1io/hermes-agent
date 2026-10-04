@@ -105,6 +105,13 @@ def clean_sessions(monkeypatch, tmp_path):
         ds, "_session_store_root", lambda: tmp_path / "delegate-session-store"
     )
     monkeypatch.setattr(ds, "pending_question_for_owner", lambda _client: None)
+    # The provider-health tests below assert the DEFAULT lane's ledger key
+    # ("pi/"). An ambient HERMES_PI_MODEL — exported by pi-hosted shells so
+    # nested pi sessions inherit the model — re-keys the ledger to
+    # "pi/<model>" (delegate_session_tool reads it at dispatch), failing
+    # them under any runner that inherits the environment instead of the
+    # canonical allowlist. Pin the default lane this file exercises.
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
     yield
     with ds._SESSION_LOCK:
         for record in ds._SESSIONS.values():
