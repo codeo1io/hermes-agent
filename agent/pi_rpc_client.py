@@ -818,6 +818,38 @@ class PiRPCClient:
                 thread.join(timeout=2.0)
         self._reader_threads = []
 
+    def _liveness_triage(self, *, probe_timeout: float = 2.0) -> dict[str, Any]:
+        """Probe the child at stall time: wedge vs responsive-but-unproductive.
+
+        Must run BEFORE ``_terminate_after_stall`` — after the rider, a live
+        process is dead by construction and the signal is destroyed. The RPC
+        probe is a single bounded ``get_state``; every failure degrades to
+        ``None`` so triage can never raise or hang the stall path.
+        """
+        proc = self._proc
+        process_alive = proc is not None and proc.poll() is None
+        with self._turn_activity_lock:
+            message_count = int(self._turn_event_count)
+        triage: dict[str, Any] = {
+            "process_alive": bool(process_alive),
+            "rpc_responsive": None,
+            "probe_latency_ms": None,
+            "message_count": message_count,
+            "last_event_age_s": round(self._turn_inactive_for(), 3),
+            "probed_at": time.time(),
+        }
+        if process_alive:
+            try:
+                probe_started = time.monotonic()
+                self._request_pi({"type": "get_state"}, timeout=probe_timeout)
+                triage["rpc_responsive"] = True
+                triage["probe_latency_ms"] = round(
+                    (time.monotonic() - probe_started) * 1000.0, 1
+                )
+            except Exception:
+                pass
+        return triage
+
     def run_session_prompt(
         self,
         message: str,
@@ -884,7 +916,21 @@ class PiRPCClient:
                         self._send_pi({"type": "abort"})
                     except Exception:
                         pass
-                    if not self._settled.wait(min(10.0, max(0.1, stall_timeout))):
+                    # Liveness triage AFTER the settle grace, BEFORE any
+                    # rider terminate: a supervisor reading the typed stall
+                    # must be able to tell a process wedge (alive, RPC dead)
+                    # from a responsive-but-unproductive turn (alive, RPC
+                    # answers, or settled after abort) from a child that died
+                    # — by fields, not prose. Probing before the settle
+                    # grace would report a child dead that merely hadn't
+                    # processed the abort yet. Bounded and never raises.
+                    settled_after_abort = self._settled.wait(
+                        min(10.0, max(0.1, stall_timeout))
+                    )
+                    liveness_triage = self._liveness_triage(
+                        probe_timeout=min(2.0, max(0.1, stall_timeout))
+                    )
+                    if not settled_after_abort:
                         # Zombie-capacity rider: the child ignored the abort
                         # for the whole settle grace, so it is wedged mid-turn
                         # holding delegate capacity while producing nothing
@@ -908,6 +954,7 @@ class PiRPCClient:
                         provider_signal=provider_signal,
                         retry_after=retry_after,
                         zero_activity=zero_activity,
+                        liveness_triage=liveness_triage,
                     ) from None
 
                 if self._process_exited_error:
