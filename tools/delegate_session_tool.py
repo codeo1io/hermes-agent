@@ -23,6 +23,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent.delegate_errors import PROVIDER_FAILURE_CLASSES, classify_delegate_failure
+from agent.delegate_health import get_delegate_health_ledger
 from agent.opencode_client import OpenCodeClient
 from agent.pi_rpc_client import PiRPCClient, pending_question_for_owner
 from agent.runtime_cwd import resolve_agent_cwd
@@ -37,6 +39,12 @@ _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
 
 _KNOWN_BACKENDS = ("pi", "opencode")
+
+# Durable metadata schema version. v4 (2026-10, finding
+# cognitive-continuity.autonomy-recovery-workers-fail-closed-loop) added
+# outcome evidence fields; loading stays tolerant — older files load
+# unchanged and unknown fields from newer files pass through.
+_METADATA_VERSION = 4
 
 # Owners without a conversation id fall back to a process-local handle. Such
 # handles are meaningless in a later process, so they must never authorize
@@ -84,8 +92,10 @@ def _metadata_path(session_id: str) -> Path:
 
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+    client = record.get("client")
+    activity = getattr(client, "last_turn_activity_at", None)
     return {
-        "version": 3,
+        "version": _METADATA_VERSION,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -97,6 +107,21 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # v4: outcome evidence — a stalled/circuit-broken session must survive
+        # restart with its failure class, not just prose, so the supervisor
+        # that resumes it (or the operator reading the file) can tell a dead
+        # provider from a wedged agent without replaying logs. The field set
+        # is the union of the two v4 schemas that grew in parallel campaigns
+        # under one version number: failure prose (``error``, bounded) and
+        # the provider key (``pi_model``) the streak was counted on, so
+        # either campaign's files reconcile without a version bump.
+        "status": record.get("status") or "idle",
+        "error": _bounded(record.get("error"), 2000) or None,
+        "error_class": record.get("error_class") or "",
+        "retry_after": record.get("retry_after"),
+        "last_turn_activity_at": float(activity) if activity else 0.0,
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "pi_model": str(record.get("model") or ""),
     }
 
 
@@ -546,6 +571,15 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         ),
         "pending_question": _pending_payload(record),
         "error": record.get("error") or None,
+        # T4 (D4): structured outcome so callers can branch without parsing
+        # prose; retry_after drives conductor's retry delay directly.
+        "error_class": record.get("error_class") or None,
+        "retry_after": (
+            float(record["retry_after"])
+            if isinstance(record.get("retry_after"), (int, float))
+            else None
+        ),
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
     }
     if include_result and record.get("last_result"):
         result = record["last_result"]
@@ -600,7 +634,14 @@ def _durable_summary(
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
         "pending_question": None,
-        "error": None,
+        "error": meta.get("error") or None,
+        # v4: failure class + provider retry hint survive restarts so an
+        # offline row still tells the supervisor WHY the session died.
+        "error_class": meta.get("error_class") or "",
+        "retry_after": meta.get("retry_after"),
+        # Symmetric with the durable snapshot: name the provider the
+        # failure streak was recorded under.
+        "pi_model": str(meta.get("pi_model") or ""),
     }
     if note:
         out["note"] = note
@@ -690,8 +731,70 @@ def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
     return changed
 
 
+def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
+    """(error_class, retry_after) for a failed delegate turn.
+
+    Typed attributes win: ``DelegateTurnStalled`` already derived its class
+    from streamed evidence at the client. Anything else falls back to
+    classifying the exception text, so plain failures still land in the
+    shared vocabulary.
+    """
+    typed = str(getattr(exc, "error_class", "") or "").strip()
+    if typed:
+        return typed, getattr(exc, "retry_after", None)
+    error_class, _signal, retry_after = classify_delegate_failure(
+        f"{type(exc).__name__}: {exc}",
+        zero_activity=bool(getattr(exc, "zero_activity", False)),
+    )
+    return error_class, retry_after
+
+
+def _circuit_open_error(backend: str, model: str) -> Optional[str]:
+    """Dispatch-time fail-fast guard (A2 breaker): ``None`` lets the turn
+    through; a message refuses it while the (backend, model) provider circuit
+    is open. Retrying a confirmed-dead provider multiplies wall-clock damage
+    (the A4 storm re-entered the same outage for 30-76 minutes per attempt).
+    Fail-open: any internal error lets the dispatch through — the breaker
+    must never become a new way to fail closed.
+    """
+    try:
+        circuit = get_delegate_health_ledger().check((backend, model))
+    except Exception:
+        logger.debug("delegate provider gate failed open", exc_info=True)
+        return None
+    if circuit is None:
+        return None
+    return (
+        "delegate provider unavailable (error_class=provider_unavailable): "
+        f"{backend}/{model or 'default'} circuit open after "
+        f"{circuit.consecutive} provider-class failures "
+        f"(last: {circuit.last_error_class}); "
+        f"retry after {circuit.retry_after_s:.0f}s"
+    )
+
+
+def _ledger_record_success(key: tuple[str, str]) -> None:
+    try:
+        get_delegate_health_ledger().record_success(key)
+    except Exception:
+        logger.debug("delegate health record_success failed (fail-open)", exc_info=True)
+
+
+def _ledger_record_failure(key: tuple[str, str], error_class: str) -> None:
+    if error_class not in PROVIDER_FAILURE_CLASSES:
+        return
+    try:
+        get_delegate_health_ledger().record_failure(key, error_class)
+    except Exception:
+        logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
+    ledger_key = (
+        str(record.get("backend") or "pi"),
+        str(record.get("model") or ""),
+    )
     with _SESSION_CONDITION:
         if record.get("status") == "closed":
             return
@@ -707,20 +810,39 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 or record.get("native_session_id")
                 or record["session_id"]
             )
+            # A completed turn clears the failure streak.
+            record["error_class"] = ""
+            record["retry_after"] = None
+            record["consecutive_failures"] = 0
             if record.get("status") != "closed":
                 _transition_status_locked(record, "idle")
             else:
                 record["updated_at"] = time.time()
         _persist_metadata(record)
+        # A healthy turn closes any open provider circuit for this
+        # (backend, model) pair — providers recover, and a stale open
+        # circuit would fail-fast future turns against a working provider.
+        _ledger_record_success(ledger_key)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
+        error_class, retry_after = _classify_turn_exception(exc)
         with _SESSION_CONDITION:
             record["error"] = _bounded(exc, 2000)
+            record["error_class"] = error_class
+            record["retry_after"] = retry_after
+            record["consecutive_failures"] = (
+                int(record.get("consecutive_failures") or 0) + 1
+            )
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
                 record["updated_at"] = time.time()
         _persist_metadata(record)
+        # Provider-class failures feed the A2 breaker for this exact
+        # (backend, model) pair; everything else (agent_stall, transport
+        # noise, tool bugs) does NOT — a wedged delegate must not shadow a
+        # healthy provider on the same key.
+        _ledger_record_failure(ledger_key, error_class)
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
@@ -872,6 +994,12 @@ def delegate_session(
                         # no-op: silently dropping the goal made every later
                         # phase of a multi-turn delegation appear to succeed
                         # while no work ran (conductor v5/v6 cycles).
+                        gate_error = _circuit_open_error(
+                            str(existing.get("backend") or "pi"),
+                            str(existing.get("model") or ""),
+                        )
+                        if gate_error is not None:
+                            return tool_error(gate_error)
                         _dispatch_turn(
                             existing, _initial_prompt(goal, context), effective_timeout
                         )
@@ -920,6 +1048,7 @@ def delegate_session(
                 )
 
         client_kwargs: dict[str, Any] = {}
+        model_arg = ""
         if backend_name == "pi":
             # Without an explicit model pi falls back to its built-in
             # Anthropic model and dies with 401 on keyless installs.
@@ -929,6 +1058,12 @@ def delegate_session(
             model_arg = explicit_model or _pi_model_for_parent(parent_agent)
             if model_arg:
                 client_kwargs["args"] = ["--model", model_arg]
+        # A2 gate, site 1 — before spawning the child: an open provider
+        # circuit refuses the turn up front instead of letting it wedge for
+        # the full stall window inside the doomed process.
+        gate_error = _circuit_open_error(backend_name, model_arg)
+        if gate_error is not None:
+            return tool_error(gate_error)
         def _make_client(native_session_id: str):
             created = client_class(
                 persistent_session=True,
@@ -999,6 +1134,7 @@ def delegate_session(
         record: Dict[str, Any] = {
             "session_id": handle,
             "backend": backend_name,
+            "model": model_arg,
             "native_session_id": native_id,
             "owner": owner,
             "owner_scope": _scope_for_workspace(cwd),
@@ -1009,6 +1145,12 @@ def delegate_session(
             "updated_at": now,
             "last_result": None,
             "error": "",
+            # Failure evidence survives supervisor replacement / gateway
+            # restart: a resumed session keeps its streak until a turn
+            # completes successfully.
+            "error_class": str((saved or {}).get("error_class") or ""),
+            "retry_after": (saved or {}).get("retry_after"),
+            "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
             "thread": None,
         }
         with _SESSION_LOCK:
@@ -1150,6 +1292,13 @@ def delegate_session(
                 return tool_error(
                     "Delegate session is closed. Use action='resume' to reopen it."
                 )
+        # A2 gate, site 3: send dispatches a fresh turn, so an open provider
+        # circuit refuses it instead of wedging a new stall window.
+        gate_error = _circuit_open_error(
+            session_backend, str(record.get("model") or "")
+        )
+        if gate_error is not None:
+            return tool_error(gate_error)
         _dispatch_turn(record, text, effective_timeout)
         return json.dumps(
             {
@@ -1177,6 +1326,13 @@ def delegate_session(
                 # Auto-degrade: the turn already ended (or the backend has no
                 # live steer), so route the message through the send path so
                 # the course-correction is not lost to a race window.
+                # A2 gate, site 4: the degraded path dispatches a fresh turn,
+                # so it gets the same fail-fast as send.
+                gate_error = _circuit_open_error(
+                    session_backend, str(record.get("model") or "")
+                )
+                if gate_error is not None:
+                    return tool_error(gate_error)
                 _dispatch_turn(record, text, effective_timeout)
                 return json.dumps(
                     {
