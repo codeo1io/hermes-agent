@@ -255,6 +255,9 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         super().__init__()
         self.session_manager = session_manager or SessionManager()
         self._conn: Optional[acp.Client] = None
+        # Strong references for fire-and-forget notification tasks (asyncio keeps
+        # only a weak reference; an unreferenced task can be collected mid-run).
+        self._retained_tasks: set[asyncio.Task] = set()
 
     # ---- Connection lifecycle -----------------------------------------------
 
@@ -277,7 +280,13 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if not self._conn:
             return
         loop = asyncio.get_running_loop()
-        loop.call_soon(asyncio.create_task, make_coro())
+        loop.call_soon(self._spawn_retained_task, make_coro)
+
+    def _spawn_retained_task(self, make_coro: Callable[[], Any]) -> None:
+        """Spawn the deferred coroutine with a strong reference until completion."""
+        task = asyncio.get_running_loop().create_task(make_coro())
+        self._retained_tasks.add(task)
+        task.add_done_callback(self._retained_tasks.discard)
 
     def _session_modes(self, state: SessionState) -> SessionModeState:
         """Edit-approval policy as ACP modes. Zed renders ``config_options`` in the model
