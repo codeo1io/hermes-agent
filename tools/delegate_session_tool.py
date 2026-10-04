@@ -44,6 +44,15 @@ _MAX_DURABLE_SESSIONS = 500
 # Readers are field-tolerant; v1-v3 files keep loading unchanged.
 _METADATA_VERSION = 4
 
+# In-turn durable refresh cadence: while a delegated turn is running, an
+# observer thread polls the client's activity signal every _OBSERVER_POLL_S
+# and persists at most once per _ACTIVITY_REFRESH_MIN_S of observed activity
+# advance, so a long healthy turn stays visible to outside readers of the
+# durable file (the evidence-source wedge) without write churn. Module-level
+# constants (no env vars); tests inject tighter values via monkeypatch.
+_OBSERVER_POLL_S = 5.0
+_ACTIVITY_REFRESH_MIN_S = 30.0
+
 _KNOWN_BACKENDS = ("pi", "opencode")
 
 # Owners without a conversation id fall back to a process-local handle. Such
@@ -197,6 +206,11 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
             pass
         tmp.replace(path)
         _prune_durable_metadata(path.parent)
+        # Advance the in-turn refresh watermark (in-memory only) so the
+        # observer's write cap stays exact across watcher and transition
+        # persists. Placed after the replace: only successful writes count.
+        with _SESSION_LOCK:
+            record["last_persisted_activity"] = snapshot.get("last_turn_activity_at")
     except OSError:
         logger.debug(
             "Could not persist delegate-session metadata for %s",
@@ -629,16 +643,69 @@ _OFFLINE_RESUME_NOTE = (
 )
 
 
+# Stable-signature failure vocabulary for the durable operational ledger.
+# Mirrors the FailoverReason class names from agent/error_classifier.py for
+# the delegate-surface subset (same strings, subset) plus the in-tree stall
+# signature from PiRPCClient.run_session_prompt; deliberately does not import
+# the API-error machinery. Order matters: first matching rule wins.
+_ERROR_CLASS_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (
+        (
+            "rate limit",
+            "rate_limit",
+            "ratelimit",
+            "too many requests",
+            "throttled",
+            "resource exhausted",
+            "resource_exhausted",
+        ),
+        "rate_limit",
+    ),
+    (("overloaded", "503", "529"), "overloaded"),
+    # In-tree stall watchdog signature; must outrank the generic timeout rule
+    # (the exception type is a TimeoutError).
+    (("stalled after",), "delegate_stall"),
+    (("timed out", "timeout", "deadline exceeded", "aborted"), "timeout"),
+    (
+        (
+            "enospc",
+            "errno 11",
+            "errno 28",
+            "no space left on device",
+            "resource temporarily unavailable",
+            "can't start new thread",
+            "cannot start new thread",
+        ),
+        "resource_exhausted",
+    ),
+    (
+        (
+            "pi rpc process exited",
+            "pi rpc client is closed",
+            "could not start",
+        ),
+        "transport",
+    ),
+)
+
+
 def _error_class_for(exc: BaseException) -> str:
     """Classify a failed delegate turn for the durable operational ledger.
 
     Attr-first: an exception that already carries an ``error_class`` (the
     sibling DelegateTurnStalled vocabulary) speaks for itself and wins
-    outright. The stable-signature text vocabulary (rate_limit / overloaded /
-    timeout / resource_exhausted / transport / delegate_stall) extends this
-    helper with the failure-typing task; the attr seam is the contract.
+    outright — the attr seam is the contract. Otherwise the first matching
+    stable-signature rule in ``_ERROR_CLASS_RULES`` classifies the exception
+    text; unmatched failures stay ``""`` (unclassified) rather than guessing.
     """
-    return str(getattr(exc, "error_class", "") or "")
+    attr = str(getattr(exc, "error_class", "") or "")
+    if attr:
+        return attr
+    text = f"{type(exc).__name__}: {exc}".lower()
+    for signatures, error_class in _ERROR_CLASS_RULES:
+        if any(signature in text for signature in signatures):
+            return error_class
+    return ""
 
 
 def _durable_summary(
@@ -778,6 +845,37 @@ def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
     return changed
 
 
+def _observer_loop(record: Dict[str, Any]) -> None:
+    """Rate-capped in-turn durable refresh — the evidence-wedge fix proper.
+
+    While the turn is open, persist metadata whenever the client's activity
+    signal has advanced at least ``_ACTIVITY_REFRESH_MIN_S`` past the last
+    persisted watermark, so an outside reader of the durable file sees a live
+    "running" session with a fresh activity timestamp instead of the pre-turn
+    snapshot. Never mutates session state: every state transition notifies
+    ``_SESSION_CONDITION``, and the loop re-checks status under the lock on
+    every wake, so it exits as soon as the turn leaves "running".
+    """
+    while True:
+        with _SESSION_CONDITION:
+            if record.get("status") != "running":
+                return
+            _SESSION_CONDITION.wait(timeout=_OBSERVER_POLL_S)
+            if record.get("status") != "running":
+                return
+            last_persisted = record.get("last_persisted_activity")
+        activity = _client_last_activity_at(record.get("client"))
+        if activity is None:
+            # No observable progress to advertise yet; the client's own stall
+            # watchdog owns the no-progress case.
+            continue
+        if (
+            last_persisted is None
+            or activity - float(last_persisted) >= _ACTIVITY_REFRESH_MIN_S
+        ):
+            _persist_metadata(record)
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
     with _SESSION_CONDITION:
@@ -789,6 +887,16 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         record["turn_started_at"] = time.time()
         record["turn_count"] = int(record.get("turn_count") or 0) + 1
         _transition_status_locked(record, "running")
+    observer = threading.Thread(
+        target=_observer_loop,
+        args=(record,),
+        name=f"delegate-{record['session_id'][:8]}-obs",
+        # Daemon: the observer only refreshes a file; it must never keep the
+        # interpreter alive (the turn thread itself is deliberately not a
+        # daemon so terminal state is persisted).
+        daemon=True,
+    )
+    observer.start()
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
         state = result.get("state") if isinstance(result, dict) else {}
@@ -824,6 +932,15 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
             else:
                 record["updated_at"] = time.time()
         _persist_metadata(record)
+    finally:
+        # Both exit paths have left "running" (idle/error, or "closed" keeps
+        # its own terminal state), and the transition already notified the
+        # condition; notify once more so a watcher that missed it wakes now.
+        # Join to keep any last in-flight refresh ordered behind the terminal
+        # persist before this thread reports the turn finished.
+        with _SESSION_CONDITION:
+            _SESSION_CONDITION.notify_all()
+        observer.join(timeout=2.0)
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
