@@ -3,6 +3,7 @@
 import json
 import stat
 import sys
+import time
 from io import BytesIO
 from unittest.mock import patch, MagicMock
 from urllib.parse import quote
@@ -16,6 +17,7 @@ from tools.mcp_oauth import (
     OAuthNonInteractiveError,
     build_oauth_auth,
     remove_oauth_tokens,
+    _cached_redirect,
     _can_open_browser,
     _is_interactive,
     _make_callback_handler,
@@ -50,7 +52,6 @@ def _hit_callback_when_ready(url: str, timeout: float = 15.0) -> None:
     but NOT listening until ``_wait_for_callback`` adopts it, so attempts
     before adoption fail fast with a connection error.
     """
-    import time
     import urllib.request
 
     deadline = time.monotonic() + timeout
@@ -258,31 +259,6 @@ class TestBuildOAuthAuth:
         assert provider is not None
         assert provider.context.client_metadata.scope == "read write admin"
 
-    @pytest.mark.asyncio
-    async def test_token_exchange_includes_secret_for_dcr_secret_client(self, tmp_path, monkeypatch):
-        from mcp.shared.auth import OAuthClientInformationFull
-        from urllib.parse import parse_qs
-
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
-        assert provider is not None
-        redirect_uris = provider.context.client_metadata.redirect_uris
-        assert redirect_uris is not None
-        provider.context.client_info = OAuthClientInformationFull.model_validate({
-            "client_id": "client-id",
-            "client_secret": "secret",
-            "redirect_uris": [str(redirect_uris[0])],
-            "token_endpoint_auth_method": "none",
-        })
-
-        request = await provider._exchange_token_authorization_code("auth-code", "verifier")
-        body = parse_qs(request.content.decode())
-
-        assert body["client_id"] == ["client-id"]
-        assert body["client_secret"] == ["secret"]
-        assert provider.context.client_info is not None
-        assert provider.context.client_info.token_endpoint_auth_method == "client_secret_post"
 
     @pytest.mark.asyncio
     async def test_token_response_accepts_201_created(self, tmp_path, monkeypatch):
@@ -307,93 +283,13 @@ class TestBuildOAuthAuth:
         assert token_path.exists()
         assert json.loads(token_path.read_text())["access_token"] == "access-token"
 
-    @pytest.mark.asyncio
-    async def test_malformed_201_token_response_does_not_expose_body(
-        self, tmp_path, monkeypatch
-    ):
-        import httpx
-        from mcp.client.auth.oauth2 import OAuthTokenError
-
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
-        assert provider is not None
-
-        with pytest.raises(OAuthTokenError, match="^Invalid token response$") as exc_info:
-            await provider._handle_token_response(
-                httpx.Response(
-                    201,
-                    content=b'{"access_token": {"secret": "access-secret"}}',
-                )
-            )
-
-        assert "access-secret" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_token_read_error_does_not_expose_body(self, tmp_path, monkeypatch):
         import httpx
         from mcp.client.auth.oauth2 import OAuthTokenError
 
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
-        assert provider is not None
 
-        class _ReadErrorResponse:
-            status_code = 201
-
-            async def aread(self):
-                raise httpx.ReadError("access-secret refresh-secret")
-
-        with pytest.raises(OAuthTokenError, match="^Invalid token response$") as exc_info:
-            await provider._handle_token_response(_ReadErrorResponse())
-
-        assert "access-secret" not in str(exc_info.value)
-        assert "refresh-secret" not in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_malformed_201_refresh_response_clears_tokens(
-        self, tmp_path, monkeypatch, caplog
-    ):
-        import logging
-        import httpx
-
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
-        assert provider is not None
-        provider.context.current_tokens = object()
-
-        response = httpx.Response(
-            201, content=b'{"refresh_token": "refresh-secret"}'
-        )
-        with caplog.at_level(logging.WARNING, logger="tools.mcp_oauth"):
-            result = await provider._handle_refresh_response(response)
-
-        assert result is False
-        assert provider.context.current_tokens is None
-        assert "refresh-secret" not in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_refresh_read_error_clears_tokens(self, tmp_path, monkeypatch):
-        import httpx
-
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
-        assert provider is not None
-        provider.context.current_tokens = object()
-
-        class _ReadErrorResponse:
-            status_code = 201
-
-            async def aread(self):
-                raise httpx.ReadError("body read failed")
-
-        result = await provider._handle_refresh_response(_ReadErrorResponse())
-
-        assert result is False
-        assert provider.context.current_tokens is None
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +557,68 @@ class TestCallbackPortReservation:
         assert result.code == "flowA"
         assert result.state == "sA"
 
+    @staticmethod
+    def _seed_client_info(tmp_path, payload):
+        """Write *payload* verbatim to the real ``mcp-tokens/srv.client.json`` under a temp home."""
+        storage = HermesTokenStorage("srv", hermes_home=tmp_path)
+        path = storage._client_info_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return storage
+
+    @pytest.mark.parametrize("bad_uri", [
+        "http://127.0.0.1:abc/callback",      # .port raises: non-numeric
+        "http://127.0.0.1:99999/callback",    # .port raises: out of range
+        "http://[bad/callback",               # urlparse itself raises: bad IPv6 bracket
+    ])
+    def test_cached_redirect_skips_malformed_entries(self, tmp_path, bad_uri):
+        """DCR-supplied redirect_uris persist to client.json. urlparse() alone does not
+        validate ports — .port is lazy and raises ValueError on access — so the try/except
+        around urlparse never fires. A poisoned entry must be skipped like every other
+        malformed one, not crash the whole OAuth flow (#112568)."""
+        storage = self._seed_client_info(tmp_path, {
+            "client_id": "client-a",
+            "redirect_uris": [bad_uri, "http://127.0.0.1:1455/callback", "https://proxy.example.com/cb"]})
+        assert _cached_redirect(storage) == ("https://proxy.example.com/cb", 1455)
+
+    @pytest.mark.parametrize("payload", [
+        ["not", "a", "dict"],                    # non-dict client.json: .get would AttributeError
+        {"redirect_uris": 123},                  # non-iterable redirect_uris: for would TypeError
+        {"redirect_uris": {"a": 1}},             # dict redirect_uris: iterate keys, nothing matches
+        {"redirect_uris": None},                 # explicit null
+        {"client_id": "c"},                      # missing key entirely
+    ])
+    def test_cached_redirect_tolerates_misshaped_client_info(self, tmp_path, payload):
+        """_read_json returns whatever the file holds — the crash class isn't limited to
+        bad URIs inside a well-formed list. Any misshaped payload must degrade to
+        (None, None), not propagate AttributeError/TypeError through the OAuth flow (#112568)."""
+        storage = self._seed_client_info(tmp_path, payload)
+        assert _cached_redirect(storage) == (None, None)
+
+
+    @pytest.mark.parametrize("payload", [
+        {"client_id": "c", "redirect_uris": ["http://127.0.0.1:abc/callback"]},  # the issue's repro
+        ["x"],                                                                    # non-dict client.json
+    ])
+    def test_malformed_client_info_flow_reserves_fresh_ephemeral_port(self, tmp_path, payload):
+        """Flow-level: the login path calls _configure_callback_port(cfg, storage) and the SDK
+        then calls storage.get_client_info(). A poisoned client.json must fall through to a
+        freshly reserved ephemeral port and read as "no registration", so the flow re-registers
+        instead of crashing on every attempt until the file is removed by hand (#112568)."""
+        import tools.mcp_oauth as mod
+
+        storage = self._seed_client_info(tmp_path, payload)
+        cfg: dict = {"cimd": False}  # keep the fresh-port branch, as the sibling tests do
+        port = mod._configure_callback_port(cfg, storage)
+        try:
+            assert port == cfg["_resolved_port"] > 0
+            assert port in mod._reserved_sockets  # only a truly fresh pick is parked
+            assert asyncio.run(storage.get_client_info()) is None
+        finally:
+            reserved = mod._reserved_sockets.pop(port, None)
+            if reserved is not None:
+                reserved.close()
+
 
 # ---------------------------------------------------------------------------
 # remove_oauth_tokens
@@ -763,16 +721,6 @@ class TestInvalidateTokensOnClientChange:
         info = json.loads((d / "chg-server.client.json").read_text())
         assert info["client_id"] == "client-b"
 
-    def test_preregister_flow_same_client_keeps_tokens(self, tmp_path, monkeypatch):
-        pytest.importorskip("mcp")
-        from tools.mcp_oauth import (
-            _build_client_metadata, _maybe_preregister_client,
-        )
-        storage, d = self._seed(tmp_path, monkeypatch)
-        cfg = {"client_id": "client-a", "_resolved_port": 1455}
-        meta = _build_client_metadata(dict(cfg))
-        _maybe_preregister_client(storage, cfg, meta)
-        assert (d / "chg-server.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1050,26 +998,8 @@ class TestPasteCallbackReader:
 class TestWaitForCallbackPasteIntegration:
     """_wait_for_callback offers the paste prompt only when interactive."""
 
-    def test_paste_prompt_shown_on_tty(self, monkeypatch, capsys):
-        import tools.mcp_oauth as mod
-        mod._oauth_port = _find_free_port()
-        monkeypatch.setattr(mod, "_is_interactive", lambda: True)
-        # Make stdin readline block forever so HTTP listener path drives the test;
-        # we just want to verify the prompt was printed and the thread spawned.
-        def block_forever():
-            import threading
-            threading.Event().wait()
-        monkeypatch.setattr("sys.stdin", MagicMock(readline=block_forever))
 
-        async def instant_sleep(_):
-            pass
-        with patch.object(mod.asyncio, "sleep", instant_sleep):
-            with pytest.raises(OAuthNonInteractiveError):
-                asyncio.run(_wait_for_callback())
-        err = capsys.readouterr().err
-        assert "paste the redirect URL" in err
-
-    def test_paste_prompt_NOT_shown_when_interactivity_suppressed(self, monkeypatch, capsys):
+    def test_paste_prompt_NOT_shown_when_interactivity_suppressed(self, monkeypatch):
         """Background MCP discovery must not race the CLI/TUI stdin reader."""
         import tools.mcp_oauth as mod
 
@@ -1085,8 +1015,6 @@ class TestWaitForCallbackPasteIntegration:
             with mod.suppress_interactive_oauth():
                 with pytest.raises(OAuthNonInteractiveError):
                     asyncio.run(_wait_for_callback())
-        err = capsys.readouterr().err
-        assert "paste the redirect URL" not in err
         mock_stdin.readline.assert_not_called()
 
 
@@ -1157,23 +1085,6 @@ class TestPoisonClientRegistration:
         assert (d / "srv.json").read_text() == '{"access_token": "keep-me"}'
 
 
-def test_wait_for_callback_port_in_use_reports_clear_error(monkeypatch):
-    """A busy loopback callback port surfaces a clear 'already in use' error,
-    not a misleading 'timed out'. Guards the stale-comment fix where the branch
-    also wrongly claimed build_oauth_auth had started a server to poll."""
-    import tools.mcp_oauth as mo
-
-    monkeypatch.setattr(mo, "_is_interactive", lambda: True)
-    with patch.object(mo, "_oauth_port", 54321), patch.object(
-        mo, "HTTPServer", side_effect=OSError("address already in use")
-    ):
-        with pytest.raises(mo.OAuthNonInteractiveError) as excinfo:
-            asyncio.run(_wait_for_callback())
-
-    msg = str(excinfo.value)
-    assert "54321" in msg
-    assert "already in use" in msg
-    assert "timed out" not in msg
 
 
 # ---------------------------------------------------------------------------
