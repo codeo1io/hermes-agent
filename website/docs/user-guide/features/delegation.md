@@ -38,7 +38,26 @@ delegate_session(action="stop", session_id="...")
 delegate_session(action="resume", session_id="...")
 ```
 
-`resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata contains IDs/timestamps/workspace only; prompt text remains in Pi's native session history.
+`resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata contains IDs/timestamps/workspace plus the recovery and liveness fields documented below — never prompt text, which stays in Pi's native session history.
+
+If opening the bound native Pi session fails, Hermes first retries the *same* native id once (both attempts are 30s-bounded); a transient provider failure recovers there without touching session identity. Only if that also fails does Hermes mint a fresh native Pi session under the same durable handle — and the mint is always **reported, never silent**. From that point every `status` result (live or offline/durable) carries recovery lineage keys:
+
+- `recovery_of_native_id` — the native id the handle was originally bound to (the chain root; a later re-mint keeps this earliest id),
+- `recovery_reason` — the bounded error that triggered the (re)mint, and
+- `recovered_at` — when the latest mint happened.
+
+These keys appear only after a mint, persist across restarts in the session's durable metadata, and are immutable across healthy resumes — a supervisor can detect a forked native id by diffing `recovery_of_native_id` against the id it handed out, instead of inferring it from logs.
+
+### Turn-stall liveness truth
+
+When a Pi delegate turn stalls (no observable progress for the turn's timeout window), the child process is aborted and the session enters `error` with a `pi session turn stalled …` message. Attached to that failure — in `status` under `last_turn_triage`, and in the durable metadata — is a terminal liveness probe the supervisor can act on without guessing:
+
+- `process_alive` — the pi child process was still alive at raise time,
+- `rpc_responsive` + `probe_latency_ms` — one final bounded `get_state` control RPC answered (and how slowly),
+- `message_count` — messages the session reported at probe time,
+- `last_event_age_s` — seconds since the last observable turn activity.
+
+`process_alive: true` + `rpc_responsive: false` means the process is wedged (restart it); `process_alive: true` + `rpc_responsive: true` means the provider/model is producing nothing (an upstream degradation, not a dead child); `process_alive: false` is a dead child. The triage is terminal evidence only — probes never extend the turn or restart anything — and a later healthy turn clears it, exactly like the `error` field.
 
 ## Completion delivery
 

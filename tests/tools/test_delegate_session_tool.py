@@ -357,10 +357,271 @@ def test_pi_bootstrap_failure_recovers_with_fresh_native_session(monkeypatch):
     assert resumed["session_id"] == sid
     assert resumed["native_session_id"] != sid
     assert resumed["native_session_id"].startswith(f"{sid}-recovery-")
-    assert len(BootstrapFailingPi.instances) == 2
+    # Bound id, one bounded same-id retry, then the recovery mint.
+    assert len(BootstrapFailingPi.instances) == 3
     assert BootstrapFailingPi.instances[0].session_id == sid
-    assert BootstrapFailingPi.instances[1].session_id == resumed["native_session_id"]
-    assert ds._load_metadata(sid)["native_session_id"] == resumed["native_session_id"]
+    assert BootstrapFailingPi.instances[1].session_id == sid
+    assert BootstrapFailingPi.instances[2].session_id == resumed["native_session_id"]
+    # The mint is reported, never silent: lineage truth rides the live
+    # status and the durable metadata together.
+    assert resumed["recovery_of_native_id"] == sid
+    assert "get_state" in resumed["recovery_reason"]
+    meta = ds._load_metadata(sid)
+    assert meta["native_session_id"] == resumed["native_session_id"]
+    assert meta["recovery_of_native_id"] == sid
+    assert meta["recovered_at"] == resumed["recovered_at"]
+
+
+def test_pi_bootstrap_failure_same_id_retry_avoids_recovery_mint(monkeypatch):
+    class FlakyThenOkPi(FakePiClient):
+        start_attempts = []
+
+        def start(self, *, timeout=30.0):
+            type(self).start_attempts.append(self.session_id)
+            if len(type(self).start_attempts) == 1:
+                raise TimeoutError("pi did not answer command 'get_state'")
+            return super().start(timeout=timeout)
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    monkeypatch.setattr(ds, "PiRPCClient", FlakyThenOkPi)
+    resumed = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+
+    assert resumed["success"] is True
+    # One transient bootstrap failure recovers on the SAME bound native id:
+    # no mint, identity never forks, no lineage keys appear.
+    assert FlakyThenOkPi.start_attempts == [sid, sid]
+    assert resumed["native_session_id"] == sid
+    assert "recovery_of_native_id" not in resumed
+    assert "recovery_reason" not in resumed
+    assert "recovered_at" not in resumed
+    assert ds._load_metadata(sid)["native_session_id"] == sid
+
+
+def test_recovery_lineage_survives_offline_status(monkeypatch):
+    class BootstrapFailingPi(FakePiClient):
+        def start(self, *, timeout=30.0):
+            if self.session_id == sid:  # noqa: F821  sid is bound below
+                raise TimeoutError("pi did not answer command 'get_state'")
+            return super().start(timeout=timeout)
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    monkeypatch.setattr(ds, "PiRPCClient", BootstrapFailingPi)
+    minted_before = time.time()
+    resumed = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+
+    assert resumed["recovery_of_native_id"] == sid
+    assert minted_before - 1 <= resumed["recovered_at"] <= time.time() + 1
+
+    # A later process with no live registry still sees the lineage truth
+    # from the durable metadata alone.
+    with ds._SESSION_LOCK:
+        rec = ds._SESSIONS.pop(sid)
+    rec["client"].close()
+    offline = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert offline["status"] == "offline"
+    assert offline["recovery_of_native_id"] == sid
+    assert offline["recovered_at"] == resumed["recovered_at"]
+    assert offline["recovery_reason"] == resumed["recovery_reason"]
+
+
+def test_recovery_lineage_immutable_across_later_resumes(monkeypatch):
+    class FailingOnTargetPi(FakePiClient):
+        target = ""
+
+        def start(self, *, timeout=30.0):
+            if self.session_id == type(self).target:
+                raise TimeoutError("pi did not answer command 'get_state'")
+            return super().start(timeout=timeout)
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    FailingOnTargetPi.target = sid
+    monkeypatch.setattr(ds, "PiRPCClient", FailingOnTargetPi)
+    mint1 = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+    recovery_native = mint1["native_session_id"]
+    assert mint1["recovery_of_native_id"] == sid
+
+    # A later healthy resume keeps the earliest lineage untouched.
+    with ds._SESSION_LOCK:
+        rec = ds._SESSIONS.pop(sid)
+    rec["client"].close()
+    monkeypatch.setattr(ds, "PiRPCClient", FakePiClient)
+    resumed = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+    assert resumed["native_session_id"] == recovery_native
+    assert resumed["recovery_of_native_id"] == sid
+    assert resumed["recovered_at"] == mint1["recovered_at"]
+    assert resumed["recovery_reason"] == mint1["recovery_reason"]
+
+    # A re-mint replaces only the latest reason/timestamp; the chain root
+    # (the original bound native id) is immutable.
+    with ds._SESSION_LOCK:
+        rec = ds._SESSIONS.pop(sid)
+    rec["client"].close()
+    FailingOnTargetPi.target = recovery_native
+    monkeypatch.setattr(ds, "PiRPCClient", FailingOnTargetPi)
+    mint2 = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+    assert mint2["native_session_id"] != recovery_native
+    assert mint2["recovery_of_native_id"] == sid
+    assert mint2["recovered_at"] >= mint1["recovered_at"]
+
+
+def test_future_metadata_version_with_unknown_keys_still_resumes(monkeypatch):
+    class BootstrapFailingPi(FakePiClient):
+        def start(self, *, timeout=30.0):
+            if self.session_id == sid:  # noqa: F821  sid is bound below
+                raise TimeoutError("pi did not answer command 'get_state'")
+            return super().start(timeout=timeout)
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    monkeypatch.setattr(ds, "PiRPCClient", BootstrapFailingPi)
+    minted = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+    assert minted["recovery_of_native_id"] == sid
+    recovery_native = minted["native_session_id"]
+    with ds._SESSION_LOCK:
+        rec = ds._SESSIONS.pop(sid)
+    rec["client"].close()
+
+    # A future writer bumps the version and adds fields the current reader
+    # does not know. Reading older durable metadata must stay non-fatal and
+    # honor the fields it does understand (the bound native id + lineage),
+    # so a version bump never forces a destructive migration.
+    path = ds._metadata_path(sid)
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["version"] = 99
+    meta["future_field"] = {"anything": True}
+    path.write_text(json.dumps(meta), encoding="utf-8")
+
+    monkeypatch.setattr(ds, "PiRPCClient", FakePiClient)
+    resumed = payload(
+        ds.delegate_session(
+            action="resume",
+            session_id=sid,
+            parent_agent=parent,
+        )
+    )
+    assert resumed["success"] is True
+    assert resumed["native_session_id"] == recovery_native
+    # Lineage survives the unknown-version round-trip.
+    assert resumed["recovery_of_native_id"] == sid
+
+
+def test_stall_triage_is_banked_and_cleared_by_later_turns():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    original_run = client.run_session_prompt
+
+    def stall_with_triage(message, *, timeout_seconds=900.0):
+        exc = TimeoutError(
+            "pi session turn stalled after 900s without observable progress"
+        )
+        exc.liveness_triage = {
+            "process_alive": True,
+            "rpc_responsive": False,
+            "probe_latency_ms": None,
+            "message_count": None,
+            "last_event_age_s": 900.0,
+            "probed_at": 1700000000.0,
+        }
+        raise exc
+
+    client.run_session_prompt = stall_with_triage
+    payload(
+        ds.delegate_session(action="send", session_id=sid, message="go", parent_agent=parent)
+    )
+    status = wait_for_status(parent, sid, "error")
+    assert status["error"].startswith("pi session turn stalled")
+    assert status["last_turn_triage"]["process_alive"] is True
+    assert status["last_turn_triage"]["rpc_responsive"] is False
+    # The durable persist lands right after the status transition: poll for
+    # the durable copy instead of racing it.
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not (ds._load_metadata(sid) or {}).get(
+        "last_turn_triage"
+    ):
+        time.sleep(0.05)
+    assert (
+        ds._load_metadata(sid)["last_turn_triage"]["rpc_responsive"] is False
+    )
+
+    # A later healthy turn supersedes the triage, mirroring the error reset.
+    client.run_session_prompt = original_run
+    payload(
+        ds.delegate_session(action="send", session_id=sid, message="again", parent_agent=parent)
+    )
+    status2 = wait_for_status(parent, sid, "idle")
+    assert "last_turn_triage" not in status2
+    deadline = time.time() + 5.0
+    while time.time() < deadline and "last_turn_triage" in (
+        ds._load_metadata(sid) or {}
+    ):
+        time.sleep(0.05)
+    assert "last_turn_triage" not in ds._load_metadata(sid)
 
 
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
@@ -621,7 +882,7 @@ def test_legacy_v2_metadata_migrates_on_same_workspace_resume(tmp_path, monkeypa
     assert resumed["session_id"] == sid
     assert FakePiClient.instances[-1].session_id == sid
     upgraded = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
-    assert upgraded["version"] == 3
+    assert upgraded["version"] == 4
     assert upgraded["owner_scope"] == ds._scope_for_workspace(workspace)
 
 
@@ -924,7 +1185,7 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     stale["client"].close()
 
     meta = ds._load_metadata(sid)
-    assert meta["version"] == 3
+    assert meta["version"] == 4
     assert meta["backend"] == "opencode"
     assert meta["native_session_id"] == native
 
@@ -963,7 +1224,7 @@ def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     # pi session id is reused as the native session on resume
     assert resumed["native_session_id"] == "pi_native_123"
     # re-persisted using the current metadata schema
-    assert ds._load_metadata(sid)["version"] == 3
+    assert ds._load_metadata(sid)["version"] == 4
 
 
 def test_list_includes_backend_field(monkeypatch):
