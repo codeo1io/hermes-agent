@@ -107,6 +107,19 @@ class _FakeWebSocket:
 # ── _websocket_loop: read-idle watchdog (#98097) ──────────────────────────
 
 
+async def _assert_loop_terminates(task: "asyncio.Task", timeout: float = 5.0) -> None:
+    """Bounded teardown for a cancelled websocket-loop task.
+
+    ``wait_for`` parks forever when a task ignores its cancellation — one
+    swallowed cancellation here hung the whole file until CI's per-file
+    timeout killed it. ``asyncio.wait`` returns at the deadline instead, so a
+    recurrence fails this test in seconds instead of hanging the runner.
+    """
+    done, pending = await asyncio.wait({task}, timeout=timeout)
+    if pending:
+        raise AssertionError(f"{task.get_coro()!r} ignored cancellation for {timeout}s")
+
+
 class _ScriptedWebSocket(_FakeWebSocket):
     """A connect() target whose event frames come from a scripted behavior.
 
@@ -176,21 +189,85 @@ async def test_websocket_loop_reconnects_when_read_goes_silent(monkeypatch, capl
 
     task = asyncio.create_task(adapter._websocket_loop())
     try:
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + 10.0
         while len(sockets) < 2 and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
     finally:
         release_parked_receive.set()
         task.cancel()
-        try:
-            await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        await _assert_loop_terminates(task)
 
     assert len(sockets) >= 2, "idle read watchdog did not force a reconnect"
     assert sockets[0].exited, "the silent connection was not closed before reconnecting"
     assert any("went silent" in record.message for record in caplog.records)
     assert states[:2] == ["retrying", "connected"], f"health must flip to retrying and back, got {states}"
+
+
+@pytest.mark.asyncio
+async def test_websocket_loop_terminates_when_cancellation_is_consumed_by_teardown_gather(monkeypatch):
+    """The connection-teardown gather must not be able to eat the loop's cancellation.
+
+    Reproduction contract for the file-hang CI kill: ``gather(..., return_exceptions=True)``
+    can resolve normally while an outer ``task.cancel()`` is in flight (CPython gather
+    cancellation race), leaving ``task.cancelling() > 0`` with the coroutine still
+    running — the loop then reconnects forever and nothing awaiting it can ever see
+    completion. Here the gather wrapper absorbs the cancellation deterministically to
+    produce that exact state; the loop must still terminate once cancelled.
+    """
+    adapter = _make_adapter()
+    monkeypatch.setattr(_buzz_mod, "_WS_READ_IDLE_TIMEOUT", 0.05)
+
+    sockets = []
+    release = asyncio.Event()
+
+    async def parked_anext():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+
+    def fake_connect(*args, **kwargs):
+        ws = _ScriptedWebSocket(parked_anext)
+        sockets.append(ws)
+        return ws
+
+    import websockets as _ws_mod
+
+    monkeypatch.setattr(_ws_mod, "connect", fake_connect)
+
+    real_gather = asyncio.gather
+    absorbed = {"n": 0}
+    teardown_open = asyncio.Event()
+    hold_open = asyncio.Event()
+
+    async def gather_absorbing_outer_cancel(*aws, **kwargs):
+        if kwargs.get("return_exceptions") and absorbed["n"] == 0:
+            absorbed["n"] = 1
+            teardown_open.set()
+            try:
+                children = await real_gather(*aws, **kwargs)
+                await hold_open.wait()
+                return children
+            except asyncio.CancelledError:
+                # The outer cancellation evaporates: cancelling() stays > 0 while
+                # the loop coroutine keeps running — the observed hang state.
+                return []
+        return await real_gather(*aws, **kwargs)
+
+    monkeypatch.setattr(asyncio, "gather", gather_absorbing_outer_cancel)
+
+    task = asyncio.create_task(adapter._websocket_loop())
+    try:
+        deadline = time.monotonic() + 10.0
+        while len(sockets) < 1 and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        await teardown_open.wait()
+        task.cancel()  # delivered while the loop sits in its teardown gather
+        hold_open.set()
+    finally:
+        await _assert_loop_terminates(task)
+        release.set()
 
 
 @pytest.mark.asyncio
@@ -240,15 +317,12 @@ async def test_websocket_loop_reconnects_when_discovery_send_sees_closed_socket(
 
     task = asyncio.create_task(adapter._websocket_loop())
     try:
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + 10.0
         while len(sockets) < 2 and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
     finally:
         task.cancel()
-        try:
-            await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        await _assert_loop_terminates(task)
 
     assert len(sockets) >= 2, "a closed socket seen by the discovery sweep did not force a reconnect"
     assert sockets[0].exited, "the dead connection was not closed before reconnecting"
@@ -281,13 +355,16 @@ async def test_websocket_loop_backs_off_and_publishes_retrying_on_clean_relay_cl
 
     task = asyncio.create_task(adapter._websocket_loop())
     try:
+        # Event-based sync: wait until the first connection failed and the loop
+        # entered backoff — a fixed sleep races that transition on loaded runners.
+        deadline = time.monotonic() + 10.0
+        while not states and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        # Backoff (1.0s) must hold the reconnect off through this window.
         await asyncio.sleep(0.3)
     finally:
         task.cancel()
-        try:
-            await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        await _assert_loop_terminates(task)
 
     assert len(sockets) == 1, f"clean close must back off before reconnecting, got {len(sockets)} connects in 0.3s"
     assert sockets[0].exited, "the closed connection was not exited before backing off"
