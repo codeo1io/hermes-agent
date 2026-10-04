@@ -21,8 +21,14 @@ jobs:
     # 96 cores clear the floor that the slowest single test file sets (about
     # 82s). A second slice divides work that is already at the floor, and
     # adds a second setup.
+    #
+    # Fork CI policy: hosted ubuntu-24.04 gives 4 cores, not 96. The suite
+    # reached 89.8% (36810/~40995 files) at the 60-min wall on 4 cores
+    # (run 37226448600) — the wall, not the suite, is what must move. 150
+    # minutes holds the observed ~10%/15min pace with headroom for the
+    # slowest tail files.
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
