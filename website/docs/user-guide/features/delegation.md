@@ -59,6 +59,18 @@ When a Pi delegate turn stalls (no observable progress for the turn's timeout wi
 
 `process_alive: true` + `rpc_responsive: false` means the process is wedged (restart it); `process_alive: true` + `rpc_responsive: true` means the provider/model is producing nothing (an upstream degradation, not a dead child); `process_alive: false` is a dead child. The triage is terminal evidence only — probes never extend the turn or restart anything — and a later healthy turn clears it, exactly like the `error` field.
 
+### Live turn liveness in `status`
+
+While a turn runs, `status` also reports additive turn-liveness keys, so a supervisor can distinguish "productively working" from "running but quiet" without parsing logs:
+
+- `turn_running` — `true` exactly when the session's status is `running`,
+- `turn_started_at` — when the current (or, once idle, most recent) turn was dispatched; it persists in the durable metadata as forensics for sessions found after a crash,
+- `inactive_for_s` — seconds since the client last observed turn activity, reported only while a turn is live (absent otherwise, and never fabricated for offline sessions).
+
+Offline/durable summaries carry the persisted subset (`turn_started_at`, `last_turn_triage`) only. `last_activity_at` keeps its existing meaning.
+
+Concurrent turns on one session are refused: `start`/`resume` with a goal on a session that is already running returns the same typed busy error as `send` ("currently running … steer or wait") instead of dispatching a second turn whose stall window would count down against the first turn's live work. Use `steer` to redirect a running turn, or wait for idle.
+
 ## Completion delivery
 
 Messaging gateways acknowledge background completions only after their adapter actually

@@ -45,6 +45,13 @@ _KNOWN_BACKENDS = ("pi", "opencode")
 # can union its own fields into the same version bump without collision.
 _RECOVERY_LINEAGE_KEYS = ("recovery_of_native_id", "recovery_reason", "recovered_at")
 
+# Typed busy shape shared by the send action and the start/resume follow-up
+# dispatch: identical text in both paths so upstream classifiers (spool
+# server) treat "a turn is live" the same way regardless of entry action.
+_RUNNING_BUSY_ERROR = (
+    "Delegate session is currently running. Use action='steer' to redirect it, or wait for idle."
+)
+
 # Owners without a conversation id fall back to a process-local handle. Such
 # handles are meaningless in a later process, so they must never authorize
 # durable metadata (an id() collision would otherwise grant access).
@@ -105,11 +112,13 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
     }
-    # v4: recovery lineage + terminal stall triage ride along when present so
-    # the durable/offline view reports the same identity + liveness truth as
-    # the live one. Additive only — absence must stay absence, not null, and
-    # the durable set stays IDs/timestamps/workspace-only (no prompt text).
-    for key in (*_RECOVERY_LINEAGE_KEYS, "last_turn_triage"):
+    # v4: recovery lineage + turn-liveness truth (turn_started_at from
+    # _dispatch_turn, terminal stall triage from _run_turn) ride along when
+    # present so the durable/offline view reports the same identity +
+    # liveness truth as the live one. Additive only — absence must stay
+    # absence, not null, and the durable set stays IDs/timestamps/workspace-only
+    # (no prompt text).
+    for key in (*_RECOVERY_LINEAGE_KEYS, "turn_started_at", "last_turn_triage"):
         value = record.get(key)
         if value is not None:
             snapshot[key] = value
@@ -542,16 +551,40 @@ def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _turn_inactive_for_seconds(client: Any, last_activity_at: Any) -> Optional[float]:
+    """Seconds since the client last observed delegated-turn activity.
+
+    Prefers the client's own monotonic inactivity counter (immune to wall
+    clock jumps); backends without one fall back to the distance from the
+    public ``last_turn_activity_at`` epoch. Degrades to None so callers omit
+    the key entirely instead of fabricating a value.
+    """
+    counter = getattr(client, "_turn_inactive_for", None)
+    if callable(counter):
+        try:
+            return round(max(0.0, float(counter())), 3)
+        except Exception:
+            logger.debug("Delegate client inactivity counter failed", exc_info=True)
+    if isinstance(last_activity_at, (int, float)):
+        inactive_for = time.time() - float(last_activity_at)
+        if inactive_for >= 0:
+            return round(inactive_for, 3)
+    return None
+
+
 def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
     client = record.get("client")
     last_activity_at = getattr(client, "last_turn_activity_at", None)
+    status = record.get("status", "unknown")
+    turn_running = status == "running"
     out = {
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
         "native_session_id": record.get("native_session_id") or record["session_id"],
         "pi_session_id": record.get("native_session_id")
         or record["session_id"],  # kept for model-callers
-        "status": record.get("status", "unknown"),
+        "status": status,
+        "turn_running": turn_running,
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
@@ -563,10 +596,17 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "pending_question": _pending_payload(record),
         "error": record.get("error") or None,
     }
-    for key in (*_RECOVERY_LINEAGE_KEYS, "last_turn_triage"):
+    # Turn-liveness truth rides the same additive channel as the recovery
+    # lineage: presence means evidence, absence stays absence. inactive_for_s
+    # is client-derived, so it is only reported for a live running turn.
+    for key in (*_RECOVERY_LINEAGE_KEYS, "turn_started_at", "last_turn_triage"):
         value = record.get(key)
         if value is not None:
             out[key] = value
+    if turn_running:
+        inactive_for_s = _turn_inactive_for_seconds(client, last_activity_at)
+        if inactive_for_s is not None:
+            out["inactive_for_s"] = inactive_for_s
     if include_result and record.get("last_result"):
         result = record["last_result"]
         out["last_result"] = {
@@ -622,7 +662,9 @@ def _durable_summary(
         "pending_question": None,
         "error": None,
     }
-    for key in (*_RECOVERY_LINEAGE_KEYS, "last_turn_triage"):
+    # Persisted turn-liveness subset only: turn_running/inactive_for_s are
+    # client-derived and must never be fabricated for an offline record.
+    for key in (*_RECOVERY_LINEAGE_KEYS, "turn_started_at", "last_turn_triage"):
         value = meta.get(key)
         if value is not None:
             out[key] = value
@@ -771,6 +813,10 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
     )
     with _SESSION_CONDITION:
         record["thread"] = thread
+        # Dispatch time of the CURRENT (or, once idle, most recent) turn:
+        # paired with status it tells a supervisor when the live turn began,
+        # and survives durably as forensics when the process dies mid-turn.
+        record["turn_started_at"] = time.time()
         _transition_status_locked(record, "running")
     thread.start()
 
@@ -903,6 +949,14 @@ def delegate_session(
                 reopen = existing.get("status") in {"closed", "error"} or client_closed or process_dead
                 if not reopen:
                     if goal and goal.strip():
+                        # Mirror of the send action's busy guard: dispatching a
+                        # second concurrent turn onto a live RUNNING client
+                        # made the new turn's stall window count down while
+                        # pi still worked the first turn — aborting live work
+                        # and cascading into ambiguous-dispatch re-tries.
+                        # Running means steer-or-wait, exactly like send.
+                        if existing.get("status") == "running":
+                            return tool_error(_RUNNING_BUSY_ERROR)
                         # Re-start on a live session is a FOLLOW-UP, not a
                         # no-op: silently dropping the goal made every later
                         # phase of a multi-turn delegation appear to succeed
@@ -1224,9 +1278,7 @@ def delegate_session(
             return tool_error(dead_error)
         with _SESSION_LOCK:
             if record.get("status") == "running":
-                return tool_error(
-                    "Delegate session is currently running. Use action='steer' to redirect it, or wait for idle."
-                )
+                return tool_error(_RUNNING_BUSY_ERROR)
             if record.get("status") == "closed":
                 return tool_error(
                     "Delegate session is closed. Use action='resume' to reopen it."
