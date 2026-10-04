@@ -21,6 +21,19 @@ from tui_gateway.transport import serialize_frame
 
 _log = logging.getLogger(__name__)
 
+# asyncio keeps only a weak reference to a running task; an unreferenced
+# fire-and-forget wire send can be garbage-collected mid-send and drop frames
+# silently. Retained tasks are discarded on completion, so the set is bounded
+# by in-flight sends, not a leak.
+_RETAINED_TASKS: set["asyncio.Task"] = set()
+
+
+def _retain_task(task: "asyncio.Task") -> "asyncio.Task":
+    """Keep a strong reference to a fire-and-forget task until it completes."""
+    _RETAINED_TASKS.add(task)
+    task.add_done_callback(_RETAINED_TASKS.discard)
+    return task
+
 # Scale-to-zero: tell the (separate) gateway process a dashboard/desktop/TUI client is attached via
 # the mtime of a marker file it reads in its idle predicate (gateway/scale_to_zero.py). Clients ping
 # every 15s; one write per 5s per process is plenty.
@@ -133,7 +146,7 @@ class WSTransport:
             self._pending_tokens.append(line)
             batch, self._pending_tokens = self._pending_tokens, []
             if on_loop:
-                self._loop.create_task(self._safe_send_many(batch))
+                _retain_task(self._loop.create_task(self._safe_send_many(batch)))
                 return True
             fut = safe_schedule_threadsafe(self._safe_send_many(batch), self._loop)
             if fut is None:
@@ -165,7 +178,7 @@ class WSTransport:
             self._token_flush_armed = False
             batch, self._pending_tokens = self._pending_tokens, []
             if batch and not self._closed:
-                self._loop.create_task(self._safe_send_many(batch))
+                _retain_task(self._loop.create_task(self._safe_send_many(batch)))
 
     @property
     def closed(self) -> bool:
@@ -201,7 +214,7 @@ class WSTransport:
                     self._closed = True
                     _log.warning("ws send deadline exceeded (socket stalled, loop responsive) peer=%s deadline=%ss — closing",
                                  self._peer, _WS_SEND_DEADLINE_S)
-                    self._loop.create_task(self._close_stalled_socket())
+                    _retain_task(self._loop.create_task(self._close_stalled_socket()))
                     return
                 except UnicodeEncodeError as exc:
                     # A single illegal UTF-8 frame (lone surrogate) must not tear down the socket.

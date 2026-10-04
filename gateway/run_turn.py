@@ -1641,6 +1641,26 @@ class GatewayTurnMixin:
             logger.debug("runtime_footer build failed: %s", _footer_err)
             return ""
 
+    def _queue_process_watchers(self) -> None:
+        """Spawn pending process watchers as retained fire-and-forget tasks.
+
+        Sync on purpose: the fan-out runs from async hooks (and tests) without an
+        await round-trip. The batch is detached atomically (reassign, not clear())
+        so concurrent appends are never dropped, and each task is retained via
+        ``run_shutdown._retain_background_task`` — a bare ``create_task`` keeps
+        only a weak reference and can be collected mid-watch.
+        """
+        try:
+            from gateway.run_shutdown import _retain_background_task
+            from tools.process_registry import process_registry
+
+            watchers = process_registry.pending_watchers
+            process_registry.pending_watchers = []
+            for watcher in watchers:
+                _retain_background_task(asyncio.create_task(self._run_process_watcher(watcher)))
+        except Exception as e:
+            logger.error("Process watcher setup error: %s", e)
+
     async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
         """agent:end hook, process-watcher scheduling, and watch-notification drain."""
         await self.hooks.emit("agent:end", {
@@ -1649,17 +1669,7 @@ class GatewayTurnMixin:
         })
 
         # Pending process watchers (check_interval on background processes)
-        try:
-            from tools.process_registry import process_registry
-            # Detach the batch atomically (reassign, not clear()) so concurrent appends aren't dropped.
-            watchers = process_registry.pending_watchers
-            process_registry.pending_watchers = []
-            for i, watcher in enumerate(watchers):
-                asyncio.create_task(self._run_process_watcher(watcher))
-                if i % 100 == 99:
-                    await asyncio.sleep(0)
-        except Exception as e:
-            logger.error("Process watcher setup error: %s", e)
+        self._queue_process_watchers()
 
         # Drain watch notifications that arrived during the run; the queue also carries process /
         # async-delegation completions owned elsewhere — inject only watch-type events.
