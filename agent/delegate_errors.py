@@ -44,6 +44,9 @@ class DelegateTurnStalled(TimeoutError):
     - ``zero_activity``: no unsolicited delegate event arrived since the
       prompt ack — the structural signature of a dead upstream provider
       rather than a wedged delegate agent
+    - ``liveness_triage``: what a stall-time probe found (process alive?
+      RPC answering?) — distinguishes a process wedge from a
+      responsive-but-unproductive turn. ``None`` when no triage ran.
     """
 
     def __init__(
@@ -54,12 +57,14 @@ class DelegateTurnStalled(TimeoutError):
         provider_signal: str = "",
         retry_after: float | None = None,
         zero_activity: bool = False,
+        liveness_triage: dict | None = None,
     ) -> None:
         super().__init__(message)
         self.error_class = error_class
         self.provider_signal = provider_signal
         self.retry_after = retry_after
         self.zero_activity = zero_activity
+        self.liveness_triage = liveness_triage
 
 
 # Only these classes may open the delegate provider-health breaker
