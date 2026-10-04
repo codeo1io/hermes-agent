@@ -535,6 +535,7 @@ import { installWindowsSystemCaTrust } from './windows-system-ca'
 import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
+import { wslOpenUrlArgv } from './wsl-open-url'
 import { resolvePickerDefaultPath, setActiveGatewayProfile, setWslBridgeProfileState } from './wsl-path-bridge'
 
 const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
@@ -2048,16 +2049,27 @@ function openExternalUrl(rawUrl) {
   const url = parsed.toString()
 
   if (IS_WSL) {
+    // argv is built by the allowlisting helper: rundll32 FileProtocolHandler takes
+    // the URL as a single literal argument (no cmd.exe shell, no `start` title
+    // parsing), so quotes/control characters cannot smuggle shell metacharacters.
+    const argv = wslOpenUrlArgv(url)
+
+    if (!argv) {
+      rememberLog(`[link] refused to open via WSL (unsafe URL): ${url}`)
+
+      return false
+    }
+
     rememberLog(`[link] opening via WSL→Windows: ${url}`)
 
-    const proc = spawn('cmd.exe', ['/c', 'start', '""', url], {
+    const proc = spawn(argv[0], argv.slice(1), {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     })
 
     proc.on('error', error => {
-      rememberLog(`[link] cmd.exe start failed: ${error.message}; falling back to xdg-open`)
+      rememberLog(`[link] ${argv[0]} failed: ${error.message}; falling back to xdg-open`)
       shell.openExternal(url).catch(fallback => rememberLog(`[link] xdg-open failed: ${fallback.message}`))
     })
     proc.unref()

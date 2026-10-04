@@ -11,6 +11,7 @@ recovery escape hatch); otherwise ``key_cmd`` beats a static ``api_key`` / ``key
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -51,7 +52,7 @@ def _mint(command: str, label: str) -> tuple[str, Optional[float]]:
 
     try:
         completed = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=_MINT_TIMEOUT_SECONDS,
+            command, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=_MINT_TIMEOUT_SECONDS,
             env=served_profile_child_env(inherit_credentials=True),
         )
     except subprocess.TimeoutExpired as exc:
@@ -109,6 +110,21 @@ def _mint(command: str, label: str) -> tuple[str, Optional[float]]:
             "print only the token (or JSON with an 'access_token' field)"
         )
     return token, None
+
+
+async def _run_mint_command(command: str) -> Optional[str]:
+    """Run *command*, returning its minted token or ``None`` on any failure.
+
+    Best-effort variant of :func:`_mint` for async callers: the subprocess runs
+    on a worker thread (it blocks for up to ``_MINT_TIMEOUT_SECONDS``) and every
+    failure mode surfaces as ``None`` rather than an exception, so a background
+    credential refresh degrades to a missed refresh instead of a crash.
+    """
+    try:
+        token, _ttl = await asyncio.to_thread(_mint, command, "custom")
+        return token
+    except CommandTokenError:
+        return None
 
 
 class CommandTokenSource:

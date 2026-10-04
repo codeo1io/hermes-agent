@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { CustomEndpointsResponse } from '@/types/hermes'
+
+// RTL's default 1s asyncUtilTimeout assumes an idle runner.  The suite
+// timeout is 15s, and a loaded CI runner can split the load-promise commit
+// from the frame these queries need by well over a second — wait on the
+// suite's scale, not RTL's default.
+configure({ asyncUtilTimeout: 5_000 })
 
 const getCustomEndpoints = vi.fn()
 const saveCustomEndpoint = vi.fn()
@@ -150,6 +156,10 @@ describe('CustomEndpointsSettings', () => {
 
     await waitFor(() => expect(getCustomEndpoints).toHaveBeenCalledWith('content-studio'))
     expect(screen.getByText('Applies to')).toBeTruthy()
+
+    // The scope header commits before the form body does; wait for the body
+    // before reading its inputs or a loaded runner races the hydration.
+    await screen.findByText('No custom endpoints')
 
     fireEvent.change(screen.getByPlaceholderText('Axet Proxy'), { target: { value: 'Studio gateway' } })
     fireEvent.change(screen.getByPlaceholderText('http://127.0.0.1:8081/v1'), {

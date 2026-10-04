@@ -204,6 +204,24 @@ const mountLayout = (overlay: Partial<OverlayState> = {}, ui: Partial<UiState> =
 // re-arm that follows it) lands before we assert.
 const flush = () => new Promise(resolve => setTimeout(resolve, 20))
 
+/**
+ * Wait for a store-driven re-render's observable — painted output or spy
+ * calls — to land.  One 20ms flush is not a synchronization point on a
+ * loaded CI runner: the commit-and-paint chain can need many scheduler
+ * turns, and asserting after a single turn reads a pre-update frame (''
+ * instead of the re-seeded read-out).  Bounded by attempts, not wall clock,
+ * so the mocked `Date.now` stays the only clock the component sees.
+ */
+const eventually = async (predicate: () => boolean, attempts = 100): Promise<void> => {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (predicate()) {
+      return
+    }
+    await flush()
+  }
+  expect(predicate()).toBe(true)
+}
+
 let intervalSpy: IntervalSpy
 let nowSpy: ReturnType<typeof vi.spyOn<typeof Date, 'now'>>
 
@@ -304,7 +322,7 @@ describe('status-chrome timers under an occluding overlay', () => {
     nowSpy.mockReturnValue(T0 + 300_000)
     rule.clear()
     resetOverlayState()
-    await flush()
+    await eventually(() => rule.output().includes('6m 0s'))
 
     const resumed = rule.output()
 
@@ -330,7 +348,9 @@ describe('status-chrome timers under an occluding overlay', () => {
     const clearSpy = vi.spyOn(globalThis, 'clearInterval')
 
     patchOverlayState({ pluginsHub: true })
-    await flush()
+    await eventually(() =>
+      clocks.every(handle => clearSpy.mock.calls.some(call => call[0] === handle))
+    )
 
     // Each running clock is cleared as the overlay goes up …
     for (const handle of clocks) {
@@ -426,8 +446,7 @@ describe('AppLayout status-rule visibility', () => {
       tick()
     }
 
-    await flush()
-    await flush()
+    await eventually(() => layout.output().includes('1m 30s'))
 
     expect(layout.output()).toContain('1m 30s')
   })

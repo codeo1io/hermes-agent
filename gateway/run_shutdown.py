@@ -36,6 +36,20 @@ class _RestartRequesterGone(Exception):
 logger = logging.getLogger("gateway.run")
 
 
+# asyncio keeps only a weak reference to a running task: a fire-and-forget task
+# that nothing else references can be garbage-collected mid-flight (the same
+# invariant the ``self._restart_task`` hold below documents). Retained tasks are
+# discarded on completion, so the set is bounded by in-flight work, not a leak.
+_RETAINED_BACKGROUND_TASKS: set["asyncio.Task"] = set()
+
+
+def _retain_background_task(task: "asyncio.Task") -> "asyncio.Task":
+    """Keep a strong reference to a fire-and-forget task until it completes."""
+    _RETAINED_BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_RETAINED_BACKGROUND_TASKS.discard)
+    return task
+
+
 def _exit_with_failure_verdict(runner) -> bool:
     """True (after logging the reason) when the runner asked for a failure exit."""
     if not runner.should_exit_with_failure:
