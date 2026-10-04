@@ -1291,6 +1291,14 @@ class TestReadProcessCmdlinePsFallback:
 
     def test_ps_fallback_when_proc_unavailable(self, monkeypatch):
         monkeypatch.setattr(status.Path, "read_bytes", lambda self: (_ for _ in ()).throw(FileNotFoundError))
+        # psutil sits between /proc and ps in the fallback chain and must not
+        # answer here: hosted runners can have a live process at the probe pid
+        # whose real cmdline would bypass the ps path under test.
+        import psutil
+        monkeypatch.setattr(
+            psutil, "Process",
+            lambda pid: (_ for _ in ()).throw(psutil.NoSuchProcess(pid)),
+        )
         monkeypatch.setattr(
             status.subprocess, "run",
             lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="/usr/libexec/bluetoothuserd\n"),
