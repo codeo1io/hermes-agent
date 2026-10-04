@@ -748,10 +748,14 @@ def _deliver_to_api_server_transcript(
     that names the ACTUAL failure (missing session) instead of the dead
     send() stub's message.
     """
-    text = (content or "").strip()
+    # Outward egress lane: the appended message becomes the session's visible transcript
+    # (replayed to the next poll and every later turn), so it takes the same fail-closed
+    # scrub as the platform/mirror/bot-chat lanes — a response or job name that surfaced a
+    # credential must not persist in history.
+    text = _redact_cron_payload((content or "").strip(), "api-server transcript")
     if not text:
         return None
-    job_label = job.get("name") or job.get("id") or "cron"
+    job_label = _cron_display_name(job)
     try:
         from hermes_state import SessionDB
 

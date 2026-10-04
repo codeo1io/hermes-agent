@@ -190,11 +190,26 @@ async def test_http_idempotency_does_not_replay_opposite_presentation(tmp_path, 
             for category in categories:
                 body = {"messages": [{"role": "user", "content": "event"}],
                         "hermes_notification_category": category}
+                # Each presentation carries its OWN idempotency key: under the
+                # conflict contract a key reused with a different payload is a
+                # client error, never a silent re-execution (see the 409 pin below).
+                key = f"presentation-{category}"
                 for repeat in range(2):
                     response = await client.post("/v1/chat/completions", headers={
                         "Authorization": "Bearer test-local-key", "X-Hermes-Session-Id": "session",
-                        "Idempotency-Key": "same-key"}, json=body)
+                        "Idempotency-Key": key}, json=body)
                     wire = await response.json()
                     assert response.status == 200, wire
                     assert wire["choices"][0]["message"]["content"] == ("" if category == "diagnostic" else "required result")
+                # Reusing that key for the OPPOSITE presentation is rejected with
+                # the durable-lane conflict code — the opposite presentation is
+                # never replayed under someone else's key.
+                opposite = {"messages": [{"role": "user", "content": "event"}],
+                            "hermes_notification_category": "result" if category == "diagnostic" else "diagnostic"}
+                response = await client.post("/v1/chat/completions", headers={
+                    "Authorization": "Bearer test-local-key", "X-Hermes-Session-Id": "session",
+                    "Idempotency-Key": key}, json=opposite)
+                wire = await response.json()
+                assert response.status == 409, wire
+                assert wire["error"]["code"] == "idempotency_key_conflict", wire
     assert agent.run_conversation.call_count == 2

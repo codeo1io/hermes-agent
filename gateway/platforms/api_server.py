@@ -993,6 +993,16 @@ def _reserve_pending_api_work(adapter):
             _release_pending_api_work(adapter, reservation)
 
 
+class _IdempotencyKeyConflict(Exception):
+    """An Idempotency-Key resolved (or is resolving) a DIFFERENT payload.
+
+    One key pins one request body; reuse with a changed body must surface as 409
+    ``idempotency_key_conflict`` (the durable /v1/runs lane's answer in
+    ``_replay_or_conflict``), never as a second execution that also overwrites the
+    stored response.
+    """
+
+
 class _IdempotencyCache:
     """In-memory idempotency cache with TTL and basic LRU semantics."""
     def __init__(self, max_items: int = 1000, ttl_seconds: int = 300):
@@ -1013,11 +1023,19 @@ class _IdempotencyCache:
     async def get_or_set(self, key: str, fingerprint: str, compute_coro):
         self._purge()
         item = self._store.get(key)
-        if item and item["fp"] == fingerprint:
-            return item["resp"]
+        if item is not None:
+            if item["fp"] == fingerprint:
+                return item["resp"]
+            # Reused key with a changed body: a second execution would bill the caller
+            # twice AND overwrite the stored response, losing the first answer.
+            raise _IdempotencyKeyConflict(key)
         inflight_key = (key, fingerprint)
         task = self._inflight.get(inflight_key)
         if task is None:
+            if any(pending_key == key for (pending_key, _fp) in self._inflight):
+                # A different payload is still computing under this key — same conflict;
+                # starting it beside the first would race the stored response.
+                raise _IdempotencyKeyConflict(key)
             async def _compute_and_store():
                 resp = await compute_coro()
                 self._store[key] = {"resp": resp, "fp": fingerprint, "ts": time.time()}

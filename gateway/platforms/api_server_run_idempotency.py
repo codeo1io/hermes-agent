@@ -73,10 +73,8 @@ class RunIdempotencyStore:
         try:
             self._conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         except Exception as exc:
-            # Docker may create the container object before `docker run` fails to start it (e.g. exit code
-            # 125 when the daemon isn't ready, or a timeout mid-pull). That orphan is left in "Created"
-            # state — which the exited-only orphan reaper (reap_orphan_containers, status=exited) never
-            # catches, so it leaks permanently. Remove it by its known name before re-raising. See #7439.
+            # Falls back to process memory only when the SQLite file cannot be opened
+            # (locked, unreadable, or ":memory:"); replay then survives until restart.
             logger.warning(
                 "Run idempotency storage is unavailable; falling back to "
                 "process memory, so replay will not survive a restart: %s", exc)

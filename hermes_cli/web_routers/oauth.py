@@ -750,8 +750,9 @@ async def submit_oauth_code(
 
 @router.get("/api/providers/oauth/{provider_id}/poll/{session_id}")
 async def poll_oauth_session(provider_id: str, session_id: str, profile: Optional[str] = None):
-    """Poll a session's status (no auth — read-only state). One endpoint serves
-    every device-code flow: all report progress via the worker-updated ``status``."""
+    """Poll a session's status. One endpoint serves every device-code flow: all report
+    progress via the worker-updated ``status``. Read-only, but still token-gated by
+    ``auth_middleware`` — the response names the signed-in ``account_email``."""
     requested_profile = _validate_oauth_profile(profile)
     with _oauth_sessions_lock:
         sess = _oauth_sessions.get(session_id)
