@@ -219,7 +219,8 @@ def classify_delegate_failure(
 
     # 2. HTTP-shaped errors: the existing taxonomy is authoritative whenever a
     #    status code is extractable (guarded: best effort throughout).
-    if exc is not None:
+    verdict = None
+    if isinstance(exc, Exception):
         try:
             verdict = classify_api_error(exc, provider=backend, model=model)
         except Exception:  # noqa: BLE001 - classification must never raise
@@ -240,7 +241,12 @@ def classify_delegate_failure(
 
     # 4. Text-stage taxonomy verdicts (no status) only if the markers missed.
     if exc is not None and verdict is not None:
-        mapped = _API_REASON_TO_CLASS.get(getattr(verdict, "reason", None))
+        reason = getattr(verdict, "reason", None)
+        mapped = (
+            _API_REASON_TO_CLASS.get(reason)
+            if isinstance(reason, FailoverReason)
+            else None
+        )
         if mapped:
             return mapped
     return "unknown"
@@ -440,7 +446,7 @@ class _ProviderHealthLedger:
             shown_model = entry.get("model") or "(default model)"
             return (
                 f"provider_unavailable: {entry.get('backend')}/{shown_model} "
-                f"delegate provider circuit open after {entry.get('opens')} open(s) "
+                f"delegate provider circuit open after {entry.get('opens')} opens "
                 f"(last failure class: {entry.get('error_class')}); "
                 f"fail-fast until half-open probe; retry after {retry_after}s"
             )
