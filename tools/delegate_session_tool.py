@@ -127,6 +127,12 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         # additive — older v4 files simply lack them.
         "turn_started_at": record.get("turn_started_at"),
         "last_turn_triage": record.get("last_turn_triage") or None,
+        # v4 recovery lineage: which native session this handle was
+        # ORIGINALLY bound to, when a -recovery- mint replaced it. The root
+        # is set once; reason/time name the latest mint.
+        "recovery_of_native_id": record.get("recovery_of_native_id") or None,
+        "recovery_reason": _bounded(record.get("recovery_reason"), 400) or None,
+        "recovered_at": record.get("recovered_at") or None,
     }
 
 
@@ -613,6 +619,11 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         # Surfaced when a stall-time liveness triage ran (banked on the
         # stall path); None until then.
         "last_turn_triage": record.get("last_turn_triage") or None,
+        # Recovery lineage: present only when a -recovery- mint replaced the
+        # bound native session at bootstrap.
+        "recovery_of_native_id": record.get("recovery_of_native_id") or None,
+        "recovery_reason": record.get("recovery_reason") or None,
+        "recovered_at": record.get("recovered_at") or None,
     }
     if include_result and record.get("last_result"):
         result = record["last_result"]
@@ -680,6 +691,11 @@ def _durable_summary(
         # deriving them offline would fabricate liveness.
         "turn_started_at": meta.get("turn_started_at"),
         "last_turn_triage": meta.get("last_turn_triage") or None,
+        # Recovery lineage survives restarts; the chain root is immutable
+        # across incarnations.
+        "recovery_of_native_id": meta.get("recovery_of_native_id") or None,
+        "recovery_reason": meta.get("recovery_reason") or None,
+        "recovered_at": meta.get("recovered_at") or None,
     }
     if note:
         out["note"] = note
@@ -871,6 +887,14 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
             record["consecutive_failures"] = (
                 int(record.get("consecutive_failures") or 0) + 1
             )
+            # Stall-time liveness triage rides the typed exception as a
+            # dict; bank it verbatim. A failure without one (non-stall
+            # errors) keeps any previously banked evidence — the most
+            # recent probe remains the best answer to "was the child
+            # actually wedged?".
+            triage = getattr(exc, "liveness_triage", None)
+            if triage:
+                record["last_turn_triage"] = triage
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
@@ -1135,6 +1159,14 @@ def delegate_session(
             return created
 
         requested_native = native_hint or handle
+        # Recovery lineage: carried from the prior incarnation when it
+        # exists; rewritten below only when THIS bootstrap mints a fresh
+        # -recovery- native session. The chain ROOT (the first native id
+        # this handle ever bound) is immutable across re-mints; reason and
+        # timestamp always name the LATEST mint.
+        recovery_of_native_id = (saved or {}).get("recovery_of_native_id") or None
+        recovery_reason = (saved or {}).get("recovery_reason") or None
+        recovered_at = (saved or {}).get("recovered_at") or None
         client = _make_client(requested_native)
         try:
             state = client.start(timeout=min(30.0, effective_timeout))
@@ -1149,39 +1181,76 @@ def delegate_session(
                 )
 
             # A durable Pi handle may outlive a native Pi RPC session that
-            # aborted mid-turn. Reopening the same native id can then wedge
-            # forever at the initial get_state handshake. Keep the Conductor
+            # aborted mid-turn. Reopening the same native id can then fail or
+            # wedge at the initial get_state handshake. Keep the Conductor
             # binding/backend stable, but mint a fresh *native Pi* session and
             # continue from the durable work-order/worktree. This is Pi
             # recovery, never backend failover.
             if backend_name == "pi" and native_hint:
-                recovery_native = (
-                    f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
-                )
-                logger.warning(
-                    "Pi native session %s failed bootstrap; retrying durable "
-                    "delegate handle %s with fresh native session %s: %s",
-                    native_hint,
-                    handle,
-                    recovery_native,
-                    _bounded(exc, 400),
-                )
-                client = _make_client(recovery_native)
+                # Recovery-lineage fidelity: retry the SAME bound native id
+                # once — a fresh client on that id, still bounded by the
+                # same 30s start handshake — before minting -recovery-. A
+                # single failed reopen is usually a dead child process, not
+                # a lost session; minting on first failure silently
+                # substituted the delegated identity every time, and that
+                # unreported identity churn is what the A4 continuity loop
+                # fed on. Substitution now happens only after the bound id
+                # is confirmed unopenable, and is REPORTED via lineage.
+                retry_client = _make_client(native_hint)
                 try:
-                    state = client.start(timeout=min(30.0, effective_timeout))
-                except Exception as recovery_exc:  # noqa: BLE001
+                    state = retry_client.start(
+                        timeout=min(30.0, effective_timeout)
+                    )
+                    client = retry_client
+                    logger.warning(
+                        "Pi native session %s bootstrap failed once; "
+                        "same-id retry succeeded for delegate handle %s: %s",
+                        native_hint,
+                        handle,
+                        _bounded(exc, 400),
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
                     try:
-                        client.close()
+                        retry_client.close()
                     except Exception:
                         logger.debug(
-                            "Could not close failed Pi recovery delegate client",
+                            "Could not close failed Pi same-id retry client",
                             exc_info=True,
                         )
-                    return tool_error(
-                        "Could not start pi delegate session after fresh-native "
-                        f"recovery: {_bounded(recovery_exc, 1000)} "
-                        f"(original: {_bounded(exc, 400)})"
+                    recovery_native = (
+                        f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
                     )
+                    logger.warning(
+                        "Pi native session %s failed bootstrap and same-id "
+                        "retry; retrying durable delegate handle %s with "
+                        "fresh native session %s: %s",
+                        native_hint,
+                        handle,
+                        recovery_native,
+                        _bounded(retry_exc, 400),
+                    )
+                    client = _make_client(recovery_native)
+                    try:
+                        state = client.start(timeout=min(30.0, effective_timeout))
+                    except Exception as recovery_exc:  # noqa: BLE001
+                        try:
+                            client.close()
+                        except Exception:
+                            logger.debug(
+                                "Could not close failed Pi recovery delegate client",
+                                exc_info=True,
+                            )
+                        return tool_error(
+                            "Could not start pi delegate session after fresh-native "
+                            f"recovery: {_bounded(recovery_exc, 1000)} "
+                            f"(same-id retry: {_bounded(retry_exc, 400)}; "
+                            f"original: {_bounded(exc, 400)})"
+                        )
+                    # Lineage lands only once the minted session actually
+                    # opened; it describes why substitution happened.
+                    recovery_of_native_id = recovery_of_native_id or native_hint
+                    recovery_reason = _bounded(retry_exc, 400)
+                    recovered_at = time.time()
             else:
                 return tool_error(
                     f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
@@ -1213,6 +1282,11 @@ def delegate_session(
             # evidence the resumed supervisor should see, like the streak.
             "turn_started_at": None,
             "last_turn_triage": (saved or {}).get("last_turn_triage") or None,
+            # Recovery lineage threaded from the bootstrap above (chain root
+            # from the prior incarnation, or set by this incarnation's mint).
+            "recovery_of_native_id": recovery_of_native_id,
+            "recovery_reason": recovery_reason,
+            "recovered_at": recovered_at,
             "thread": None,
         }
         with _SESSION_LOCK:
