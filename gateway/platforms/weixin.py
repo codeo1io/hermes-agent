@@ -703,6 +703,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._typing_cache = TypingTicketCache()
         self._poll_session = self._send_session = None  # type: Optional[aiohttp.ClientSession]
         self._poll_task: Optional[asyncio.Task] = None
+        self._dispatch_tasks: set = set()  # in-flight message dispatches + typing fetches, cancelled in disconnect()
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
         self._account_id = _extra_or_secret(extra, "account_id")
         self._token = str(config.token or extra.get("token") or _wx_secret("WEIXIN_TOKEN", "")).strip()
@@ -781,6 +782,9 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 task.cancel()
         self._pending_text_batches.clear()
         self._pending_text_batch_tasks.clear()
+        for task in list(self._dispatch_tasks):
+            await cancel_task(task)
+        self._dispatch_tasks.clear()
         await cancel_task(self._poll_task)
         self._poll_task = None
         for attr in ("_poll_session", "_send_session"):
@@ -825,8 +829,12 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 consecutive_failures = 0
                 # Dispatch before persisting: the off-loop write is an await, and a disconnect that
                 # cancels it must not leave the advanced cursor on disk with this batch undelivered.
+                # Tasks are tracked so disconnect() can unwind them instead of leaving pending tasks
+                # holding a closed session.
                 for message in response.get("msgs") or []:
-                    asyncio.create_task(self._process_message_safe(message))
+                    task = asyncio.create_task(self._process_message_safe(message))
+                    self._dispatch_tasks.add(task)
+                    task.add_done_callback(self._dispatch_tasks.discard)
                 # atomic_json_write fsyncs + renames: persist off the loop, and only when the cursor
                 # moved (an empty long-poll echoes the same buffer back every cycle).
                 if response.get("get_updates_buf") and str(response["get_updates_buf"]) != sync_buf:
@@ -888,7 +896,9 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if context_token:
             await self._token_store.set(self._account_id, sender_id, context_token)
         if self._poll_session and self._token and not self._typing_cache.get(sender_id):
-            asyncio.create_task(self._fetch_typing_ticket(self._poll_session, sender_id, context_token or None, "getConfig failed"))
+            task = asyncio.create_task(self._fetch_typing_ticket(self._poll_session, sender_id, context_token or None, "getConfig failed"))
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_tasks.discard)
         media_paths, media_types = [], []  # type: List[str], List[str]
         for item in item_list:
             ref_item = (item.get("ref_msg") or {}).get("message_item")
