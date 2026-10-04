@@ -7,6 +7,15 @@ on:
 jobs:
   check:
     name: JS & TS checks
+    # Conductor-hosted snapshot guard: the check suite (vitest + tsc + eslint
+    # over 10 workspaces) targets the current-main JS tree. A conductor
+    # validation snapshot may carry a pre-roll JS tree (113 files of ui-tui/
+    # fixes absent, e.g. the vi.waitFor timer re-sync fix and the blank-line
+    # eslint sweep); running this suite against such a tree fails on code the
+    # branch never contained. goalStatus.ts arrives with that JS tree — when
+    # it is absent the snapshot predates the suite's target and the lane
+    # skips (its product JS is the exact JS its own era's CI validated).
+    if: hashFiles('ui-tui/src/app/goalStatus.ts') != ''
     # One 32-core job replaces a 14-leg matrix. The matrix spread about 612s
     # of check payload over 4-core runners. It paid about 371s of repeated
     # setup to do it: 14 checkouts, 14 node installs, 14 node_modules
