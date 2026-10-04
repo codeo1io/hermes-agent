@@ -11,6 +11,9 @@ name: E2E Desktop core
 # suite was held to 10/10 consecutive green full runs on a loaded host before
 # it was wired in.
 
+# Conductor variant: identical to the e2e-desktop-core lane but on a
+# stock GitHub-hosted runner — the ubuntu-latest-32-core larger-runner
+# label is billing-blocked on this org and never leaves the queue.
 on:
   workflow_call:
 
@@ -24,7 +27,7 @@ concurrency:
 jobs:
   core:
     name: Desktop core E2E (Linux)
-    runs-on: ubuntu-latest-32-core
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
