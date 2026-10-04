@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from agent.file_safety import HOME_CREDENTIAL_DIRS
+
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 from hermes_constants import (
     LOCAL_RUNTIME_ROOT_DIRS, PROFILE_ID_RE, clear_named_profile_deleted, mark_named_profile_deleted,
@@ -1855,13 +1857,17 @@ def _default_export_ignore(root_dir: Path):
     HERMES_HOME equals the cwd) is excluded. Blacklisting was tried first and proved unable to anticipate
     every non-Hermes file the user may have lying alongside HERMES_HOME (#58394). * **Universal exclusions
     at any depth** — ``__pycache__``, sockets and other special files, temp files
-    (:func:`_non_exportable_entries`); plus npm lockfiles, which may appear at the root.
+    (:func:`_non_exportable_entries`); npm lockfiles, which may appear at the root; and the
+    credential stores (:func:`_export_credential_entries`) — the default profile's home also
+    doubles as HOME, so a ``.ssh`` inside an allowed directory (e.g. a skill dir) must not ship.
     """
 
     def _ignore(directory: str, contents: list) -> set:
-        # Universal exclusions (any depth) plus npm lockfiles that can appear at root.
+        # Universal exclusions (any depth): non-exportable entries, root npm lockfiles,
+        # credential stores wherever they sit.
         ignored = _non_exportable_entries(directory, contents)
         ignored.update({"package.json", "package-lock.json"} & set(contents))
+        ignored.update(_export_credential_entries(directory, contents))
         if Path(directory) == root_dir:
             ignored.update(entry for entry in contents if entry not in _DEFAULT_EXPORT_INCLUDE_ROOT)
         return ignored
@@ -1869,8 +1875,27 @@ def _default_export_ignore(root_dir: Path):
     return _ignore
 
 
-# Credential files dropped from named-profile exports.
-_EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env"})
+# Credential files dropped from EVERY profile export. auth.json/.env hold live tokens; the OS
+# credential stores below hold the machine's — a profile home doubles as HOME for scoped
+# tooling (see _PROFILE_DIRS' ``home``), so those stores live in profile homes too and must
+# never ship inside an exported archive. Derived from file_safety.HOME_CREDENTIAL_DIRS — the
+# same table the file tools' write denylist uses — so the denylist and the export filter
+# cannot drift (#132201 follow-on).
+_OS_CREDENTIAL_STORES = (*HOME_CREDENTIAL_DIRS, ".envrc")
+_EXPORT_CREDENTIAL_FILES = frozenset({"auth.json", ".env", *_OS_CREDENTIAL_STORES})
+_EXPORT_CREDENTIAL_PARTS = tuple(tuple(p.split("/")) for p in _EXPORT_CREDENTIAL_FILES)
+
+
+def _export_credential_entries(directory: str, contents: list) -> set:
+    """Entries of *directory* that are an _EXPORT_CREDENTIAL_FILES store: compared on trailing
+    path components, so ``.config/gh`` is dropped wherever it sits while the rest of ``.config``
+    ships (a skill dir copied from a home carries its ``.ssh``)."""
+    parts = Path(directory).parts
+    return {
+        entry for entry in contents
+        for store in _EXPORT_CREDENTIAL_PARTS
+        if entry == store[-1] and parts[len(parts) + 1 - len(store):] == store[:-1]
+    }
 
 # Text/config suffixes secret-scrubbed on export; binary DBs, images etc. are left alone.
 _EXPORT_REDACT_SUFFIXES = frozenset({
@@ -1929,7 +1954,7 @@ def export_profile(name: str, output_path: str, extra_files: Optional[Dict[str, 
     # credential exclusion for named profiles.
     def _ignore_credentials(directory: str, contents: list) -> set:
         ignored = _non_exportable_entries(directory, contents)
-        ignored.update(_EXPORT_CREDENTIAL_FILES & set(contents))
+        ignored.update(_export_credential_entries(directory, contents))
         return ignored
 
     ignore = _default_export_ignore(profile_dir) if canon == "default" else _ignore_credentials

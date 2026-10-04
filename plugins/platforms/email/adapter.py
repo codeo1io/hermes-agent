@@ -259,23 +259,46 @@ def _domains_aligned(a: str, b: str) -> bool:
     return bool(a and b) and (a == b or a.endswith("." + b) or b.endswith("." + a))
 
 
-def _verify_sender_authentication(msg: email_lib.message.Message, from_addr: str, *, authserv_id: str = "") -> Tuple[bool, str]:
+# Authentication verdicts fail CLOSED (GHSA-rxqh-5572-8m77): the ``From:`` domain's only
+# trustworthy signal is the ``Authentication-Results`` header the RECEIVING server prepends.
+# Without an explicit authserv-id pin the topmost header may be one the SENDER wrote, so no
+# header is trusted at all; with a pin, only the TOPMOST header counts and the id must match
+# EXACTLY — a lower header carrying the pinned id (injected, or echoed by a forwarder) sorts
+# below the real one and must never authorize a sender.
+_MISSING_AUTHSERV_REASON = "authserv-id is not configured; refusing to trust Authentication-Results"
+_MISSING_AUTHSERV_HINT = ("Required because platforms.email.require_authenticated_sender defaults "
+                          "to true. Set platforms.email.authserv_id (or EMAIL_AUTHSERV_ID) to the value "
+                          "your receiving server stamps, or disable the setting (EMAIL_TRUST_FROM_HEADER=true) "
+                          "to accept the risk.")
+_NO_AUTH_RESULTS_REASON = "no Authentication-Results header"
+_UNTRUSTED_AUTHSERV_REASON = "no Authentication-Results from trusted authserv-id"
+_OPT_OUT_HINT = ("If your mail server does not stamp Authentication-Results, set "
+                 "platforms.email.require_authenticated_sender: false (or EMAIL_TRUST_FROM_HEADER=true) "
+                 "to accept the risk.")
+_DROP_HINTS = {
+    _NO_AUTH_RESULTS_REASON: _OPT_OUT_HINT,
+    _UNTRUSTED_AUTHSERV_REASON: _OPT_OUT_HINT,
+}
+
+
+def _verify_sender_authentication(msg: email_lib.message.Message, from_addr: str, *, authserv_id: str) -> Tuple[bool, str]:
     """Verify the ``From:`` domain is authenticated; returns ``(authenticated, reason)``.
     ``From:`` is attacker-controlled (GHSA-rxqh-5572-8m77); the only trustworthy signal is the
-    ``Authentication-Results`` header stamped by the *receiving* server. It prepends, so the FIRST
-    instance is trusted and an injected copy sorts below it; pinned to *authserv_id* when given.
-    True on DMARC pass, aligned SPF pass, or aligned DKIM (``header.d``) pass. No header → fail-closed
-    (opt out via ``EmailAdapter._require_authenticated_sender``)."""
+    ``Authentication-Results`` header stamped by the *receiving* server, which prepends it —
+    so only the FIRST instance is authoritative and it must carry the operator's
+    *authserv_id* exactly (an aligned-but-different id is a different server). Fail closed
+    when the pin is unset. True on DMARC pass, aligned SPF pass, or aligned DKIM
+    (``header.d``) pass. Opt out via ``EmailAdapter._require_authenticated_sender``."""
     from_domain = _domain_of(from_addr)
     if not from_domain:
         return False, "missing From domain"
     if not (headers := msg.get_all("Authentication-Results")):
-        return False, "no Authentication-Results header"
-    values = (" ".join(str(raw).split()) for raw in headers)  # authserv-id precedes the first ';'
-    trusted = next((v for v in values if not authserv_id or (serv := v.split(";", 1)[0].strip().lower()) == authserv_id.lower()
-                    or _domains_aligned(serv, authserv_id)), None)
-    if trusted is None:
-        return False, "no Authentication-Results from trusted authserv-id"
+        return False, _NO_AUTH_RESULTS_REASON
+    if not authserv_id:  # topmost header may be sender-written; refuse to trust any of them
+        return False, _MISSING_AUTHSERV_REASON
+    trusted = " ".join(str(headers[0]).split())  # topmost only; lower headers are untrusted
+    if (serv := trusted.split(";", 1)[0].strip().lower()) != authserv_id:
+        return False, _UNTRUSTED_AUTHSERV_REASON
     methods = {m.lower(): r.lower() for m, r in _AUTH_METHOD_RE.findall(trusted)}
     props = {p.lower(): v.strip().strip('"') for p, v in _AUTH_PROP_RE.findall(trusted)}
     if methods.get("dmarc") == "pass":  # DMARC already enforces From alignment
@@ -333,6 +356,10 @@ class EmailAdapter(BasePlatformAdapter):
     # adapter per retry; without this connect(is_reconnect=True) would re-mark the mailbox seen and skip
     # mail that arrived during the outage. Keyed by address (multiplex runs several accounts); same-process only.
     _seen_uids_snapshot: Dict[str, set] = {}
+    # Accounts already warned about a missing authserv-id pin. Keyed by address (multiplex runs several
+    # accounts), not per first connect: an account whose first connect fails is brought up by the
+    # reconnect watcher (connect(is_reconnect=True)) and must still warn exactly once.
+    _missing_pin_warned: set = set()
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.EMAIL)
@@ -485,6 +512,11 @@ class EmailAdapter(BasePlatformAdapter):
         if not self._probe_imap(is_reconnect) or not self._probe_smtp():
             return False
         self._running = True
+        if self._require_authenticated_sender and not self._authserv_id and self._address not in EmailAdapter._missing_pin_warned:
+            # Fail-closed state (every sender-auth verdict above is now "missing pin"): surface it
+            # once per account here rather than per dropped message, so the log cannot flood.
+            EmailAdapter._missing_pin_warned.add(self._address)
+            logger.warning("[Email] %s: %s.%s", self._address, _MISSING_AUTHSERV_REASON, _MISSING_AUTHSERV_HINT)
         self._poll_task = asyncio.create_task(self._poll_loop())
         print(f"[Email] Connected as {self._address}")
         self._wire_plugin_handlers(None)  # plugin-registered native handlers
@@ -620,10 +652,9 @@ class EmailAdapter(BasePlatformAdapter):
         # From:. Only matters when an allowlist GRANTS access and allow-all is off; fail-closed.
         if (self._require_authenticated_sender and self._allowlist_in_effect()
                 and not self._allow_all_senders() and not msg_data.get("sender_authenticated", False)):
-            logger.warning("[Email] Dropping sender with unauthenticated From: %s (%s). If your mail server does not "
-                           "stamp Authentication-Results, set platforms.email.require_authenticated_sender: false "
-                           "(or EMAIL_TRUST_FROM_HEADER=true) to accept the risk.",
-                           sender_addr, msg_data.get("auth_reason", "no verdict"))
+            hint = _DROP_HINTS.get(msg_data.get("auth_reason", ""), "")
+            logger.warning("[Email] Dropping sender with unauthenticated From: %s (%s).%s",
+                           sender_addr, msg_data.get("auth_reason", "no verdict"), hint)
             return False
         return True
 

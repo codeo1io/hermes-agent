@@ -1335,6 +1335,51 @@ class TestExportImport:
         assert "default/SOUL.md" in names
         assert "default/memories/MEMORY.md" in names
 
+    def test_export_excludes_os_credential_directories(self, profile_env, tmp_path):
+        """OS credential stores are excluded at ANY depth, for named and default exports
+        alike (#132201 follow-on): the profile home doubles as HOME for scoped tooling, so
+        .docker/, .azure/, .config/gh/, .config/gcloud/ (plus .ssh/.aws/.gnupg/.kube and
+        .envrc) must never ship inside an exported archive, while sibling content under
+        .config/ still does. The exclusion derives from file_safety.HOME_CREDENTIAL_DIRS —
+        the same table the file tools' write denylist uses, so the two cannot drift."""
+        named = profile_env / ".hermes" / "profiles" / "work"
+        (named / ".docker").mkdir(parents=True)
+        (named / ".docker" / "config.json").write_text('{"creds": 1}')
+        (named / ".azure").mkdir()
+        (named / ".azure" / "accessTokens.json").write_text("token")
+        (named / ".config" / "gh").mkdir(parents=True)
+        (named / ".config" / "gh" / "hosts.yml").write_text("github.com:\n  oauth_token: x")
+        (named / ".config" / "gcloud").mkdir(parents=True)
+        (named / ".config" / "gcloud" / "credentials.db").write_text("x")
+        (named / ".config" / "alacritty").mkdir(parents=True)
+        (named / ".config" / "alacritty" / "alacritty.toml").write_text("# keep")
+        (named / "config.yaml").write_text("model: test")
+        (named / ".envrc").write_text("export SECRET=1")
+        # Nested inside an allowed root: the default-profile export allow-lists the ROOT
+        # only, so a credential dir smuggled into skills/ must be dropped by the same filter.
+        default_dir = profile_env / ".hermes"
+        (default_dir / "config.yaml").write_text("model: test")
+        (default_dir / "skills" / "mine" / ".ssh").mkdir(parents=True)
+        (default_dir / "skills" / "mine" / ".ssh" / "id_rsa").write_text("PRIVATE KEY")
+        (default_dir / "skills" / "mine" / "SKILL.md").write_text("x")
+
+        out_named = tmp_path / "work.tar.gz"
+        out_default = tmp_path / "default.tar.gz"
+        export_profile("work", str(out_named))
+        export_profile("default", str(out_default))
+
+        stores = ("/.docker/", "/.azure/", "/.config/gh/", "/.config/gcloud/", "/.ssh/", "/.envrc")
+        with tarfile.open(str(out_named), "r:gz") as tf:
+            named_names = tf.getnames()
+        with tarfile.open(str(out_default), "r:gz") as tf:
+            default_names = tf.getnames()
+
+        for name in named_names + default_names:
+            assert not any(store in f"/{name}" for store in stores), name
+        assert "work/config.yaml" in named_names                       # the profile itself survives
+        assert "work/.config/alacritty/alacritty.toml" in named_names  # non-credential .config ships
+        assert "default/skills/mine/SKILL.md" in default_names         # the parent skill survives
+
 
     def test_export_default_handles_broken_symlinks(self, profile_env, tmp_path):
         """Broken symlinks inside allowed artifacts are preserved, not crashed (#58394).

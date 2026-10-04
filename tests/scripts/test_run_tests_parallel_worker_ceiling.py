@@ -244,6 +244,62 @@ def test_v1_fallback_quota(tmp_path: Path) -> None:
     )
 
 
+def test_hybrid_cgroup_walks_v1_controllers(tmp_path: Path) -> None:
+    """systemd hybrid host: the unified hierarchy exists (0:: line
+    present) but is unlimited, while cpu/pids live on v1 controller
+    mounts. Walking only v2 derives no limits and the ceiling silently
+    no-ops to cpu_count*2 — the exact fleet incident mode. The v1 cpu
+    quota (2.0 cores) must bind through the v2 shadow."""
+    runner = _load_runner()
+    root = tmp_path / "hybrid"
+    _node(root / "unit.slice")  # v2 dir exists, carries no limit files
+    _node(root / "cpu" / "unit.slice", v1_quota="200000", v1_period="100000")
+    proc = tmp_path / "hybrid.cgroup"
+    proc.write_text("0::/unit.slice\n3:cpu,cpuacct:/unit.slice\n5:pids:/unit.slice\n")
+    assert (
+        runner._derive_default_workers(
+            cpu_count=_CPU, proc_self_cgroup=proc, mount_root=root
+        )
+        == 2
+    )
+
+
+def test_hybrid_v1_pids_max_binds(tmp_path: Path) -> None:
+    """Hybrid host, pids side: TasksMax on the v1 pids mount (768) must
+    yield the pids.max//32 term (24) even though the v2 chain is present
+    and unlimited."""
+    runner = _load_runner()
+    root = tmp_path / "hybrid-pids"
+    _node(root / "unit.slice")
+    _node(root / "pids" / "unit.slice", pids_max="768")
+    proc = tmp_path / "hybrid-pids.cgroup"
+    proc.write_text("0::/unit.slice\n3:cpu,cpuacct:/unit.slice\n5:pids:/unit.slice\n")
+    assert (
+        runner._derive_default_workers(
+            cpu_count=_CPU, proc_self_cgroup=proc, mount_root=root
+        )
+        == 24
+    )
+
+
+def test_hybrid_most_binding_across_both_hierarchies(tmp_path: Path) -> None:
+    """When BOTH hierarchies carry a cpu limit, the tighter one wins
+    (v2 2.0 cores vs v1 4.0 → 2): the hybrid fix widens the chain set,
+    never loosens the binding."""
+    runner = _load_runner()
+    root = tmp_path / "hybrid-both"
+    _node(root / "unit.slice", cpu_max="200000 100000")
+    _node(root / "cpu" / "unit.slice", v1_quota="400000", v1_period="100000")
+    proc = tmp_path / "hybrid-both.cgroup"
+    proc.write_text("0::/unit.slice\n3:cpu,cpuacct:/unit.slice\n5:pids:/unit.slice\n")
+    assert (
+        runner._derive_default_workers(
+            cpu_count=_CPU, proc_self_cgroup=proc, mount_root=root
+        )
+        == 2
+    )
+
+
 def test_env_garbage_falls_through_to_derivation(tmp_path: Path) -> None:
     """One malformed env value costs its override, not the run: base
     crashed with ValueError at argparse-default time."""
