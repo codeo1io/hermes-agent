@@ -1074,3 +1074,20 @@ def test_openrouter_loopback_callback_binds_nonce_path_and_rejects_forged_redire
     assert seen["forged_status"] == 404
     assert seen["genuine_status"] == 200
     assert code == "good-code"
+
+
+def test_auth_list_prints_oauth_heal_notices(tmp_path, monkeypatch, capsys):
+    """auth list must surface heal notices, not just auth status: the canonical shape folds
+    consume_oauth_heal_notices() into the external-login notice helper, so a mis-landed
+    duplicate def (fork regression) silently swallowed them on the list path."""
+    from hermes_cli.auth_commands import auth_list_command
+
+    _write_auth_store(tmp_path, {"version": 1, "providers": {"private-groq": {"api_key": "test-key-123", "base_url": "https://example.com"}}})
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    from agent import credential_sources
+    from hermes_cli import auth as auth_mod
+
+    monkeypatch.setattr(auth_mod, "consume_oauth_heal_notices", lambda: ["gateway: healed gateway credential private-groq"])
+    monkeypatch.setattr(credential_sources, "adopt_external_logins_enabled", lambda: True)
+    auth_list_command(type("Args", (), {"provider": None})())
+    assert "healed gateway credential private-groq" in capsys.readouterr().out

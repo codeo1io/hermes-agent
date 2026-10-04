@@ -242,6 +242,7 @@ class TestBlueBubblesAttachmentDownload:
         # Mock the HTTP client response
         class MockResponse:
             status_code = 200
+            headers = {}
             content = b"\x89PNG\r\n\x1a\n"
 
             def raise_for_status(self):
@@ -270,6 +271,80 @@ class TestBlueBubblesAttachmentDownload:
         )
         assert result == "/tmp/test_image.png"
 
+    def test_download_attachment_rejects_oversize_declared_length(self, monkeypatch):
+        """A declared Content-Length above the cap must skip the attachment instead of
+        caching an unbounded body — mirrors signal.py's 100 MB guard."""
+        from gateway.platforms import bluebubbles as bb
+
+        adapter = _make_adapter(monkeypatch)
+        monkeypatch.setattr(bb, "BLUEBUBBLES_MAX_ATTACHMENT_SIZE", 8)
+
+        class MockResponse:
+            status_code = 200
+            headers = {"Content-Length": "16"}
+            content = b"0123456789abcdef"
+
+            def raise_for_status(self):
+                pass
+
+        async def mock_get(*args, **kwargs):
+            return MockResponse()
+
+        adapter.client = type("MockClient", (), {"get": mock_get})()
+        called = []
+
+        async def mock_cache_image(data, ext):
+            called.append(ext)
+            return f"/tmp/test_image{ext}"
+
+        monkeypatch.setattr(
+            "gateway.platforms.bluebubbles.cache_image_from_bytes_async",
+            mock_cache_image,
+        )
+
+        result = asyncio.get_event_loop().run_until_complete(
+            adapter._download_attachment("att-guid-123", {"mimeType": "image/png", "transferName": "photo.png"})
+        )
+        assert result is None
+        assert called == []
+
+    def test_download_attachment_rejects_oversize_body_without_content_length(self, monkeypatch):
+        """With no Content-Length header the downloaded body itself must be capped — the
+        header is advisory, the bytes are the truth."""
+        from gateway.platforms import bluebubbles as bb
+
+        adapter = _make_adapter(monkeypatch)
+        monkeypatch.setattr(bb, "BLUEBUBBLES_MAX_ATTACHMENT_SIZE", 8)
+
+        class MockResponse:
+            status_code = 200
+            headers = {}
+            content = b"0123456789abcdef"
+
+            def raise_for_status(self):
+                pass
+
+        async def mock_get(*args, **kwargs):
+            return MockResponse()
+
+        adapter.client = type("MockClient", (), {"get": mock_get})()
+        called = []
+
+        async def mock_cache_image(data, ext):
+            called.append(ext)
+            return f"/tmp/test_image{ext}"
+
+        monkeypatch.setattr(
+            "gateway.platforms.bluebubbles.cache_image_from_bytes_async",
+            mock_cache_image,
+        )
+
+        result = asyncio.get_event_loop().run_until_complete(
+            adapter._download_attachment("att-guid-123", {"mimeType": "image/png", "transferName": "photo.png"})
+        )
+        assert result is None
+        assert called == []
+
 
 class TestBlueBubblesAttachmentSend:
     @pytest.mark.asyncio
@@ -285,6 +360,8 @@ class TestBlueBubblesAttachmentSend:
             return "iMessage;+;chat-guid"
 
         class MockResponse:
+            headers = {}
+
             def raise_for_status(self):
                 pass
 

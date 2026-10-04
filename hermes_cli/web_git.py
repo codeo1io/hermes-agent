@@ -330,7 +330,11 @@ def review_revert(cwd: str, file_path: str | None) -> dict:
 
 
 def review_rev_parse(cwd: str, ref: str | None) -> str | None:
-    return _git_line(cwd, ["rev-parse", ref or "HEAD"]) or None
+    # --verify: print exactly the resolved sha. --end-of-options (git >= 2.24): a ref like
+    # "--exec-path=..." is resolved as a rev (fatal -> None) instead of being parsed as a
+    # git option — rev-parse echoes unknown args verbatim, so the bare form returned the
+    # option string itself as a "sha".
+    return _git_line(cwd, ["rev-parse", "--verify", "--quiet", "--end-of-options", ref or "HEAD"]) or None
 
 
 def _has_staged(raw: str) -> bool:

@@ -75,7 +75,11 @@ _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
 # match). The browser can descend into subdirs, so a basename-only guard would
 # still expose ``mcp-tokens/<server>.json``; match on ANY path component so the
 # trees are blocked wherever they sit under the root, no HERMES_HOME resolution.
-_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})
+# vault/ and browser-profile/ mirror the write-side denial set (agent.file_safety
+# _WRITE_DENIED_SECRET_DIRS): vault key + ciphertext fetched together is plaintext, and the
+# browser profile carries the logged-in cookie DBs — the read side must deny what the write
+# side denies, or /api/files out-classes the write guard.
+_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing", "vault", "browser-profile"})
 
 
 def _is_sensitive_filename(name: str) -> bool:
@@ -596,7 +600,8 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
     try:
         if target.is_dir():
             if payload.recursive:
-                shutil.rmtree(target)
+                # A deep managed tree can take seconds to unlink; keep the loop responsive.
+                await asyncio.to_thread(shutil.rmtree, target)
             else:
                 target.rmdir()
         else:
