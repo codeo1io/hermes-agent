@@ -540,6 +540,49 @@ class PiRPCClient:
         with self._turn_activity_lock:
             return max(0.0, time.monotonic() - self._last_turn_activity)
 
+    def _stall_liveness_triage(self, stall_timeout: float) -> dict[str, Any]:
+        """Evidence bundle attached to a raised turn-stall TimeoutError.
+
+        Purely terminal forensics: the probes never refresh turn activity
+        (control RPCs are excluded from the activity model), never respawn
+        pi (a dead process must stay dead here), and every failure degrades
+        to a conservative value instead of raising. Liveness is polled at the
+        END of the bundle so it reflects the process state at raise time,
+        not at probe start.
+        """
+        triage: dict[str, Any] = {
+            "process_alive": None,
+            "rpc_responsive": False,
+            "probe_latency_ms": None,
+            "message_count": None,
+            "last_event_age_s": round(self._turn_inactive_for(), 3),
+            "probed_at": time.time(),
+        }
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            # One bounded control RPC: answers both "responsive" and how
+            # slowly. Only probe a live process; a dead one is unambiguous.
+            probe_timeout = min(10.0, max(1.0, stall_timeout / 4.0))
+            started = time.monotonic()
+            try:
+                response = self._request_pi({"type": "get_state"}, timeout=probe_timeout)
+            except Exception:
+                triage["rpc_responsive"] = False
+            else:
+                triage["rpc_responsive"] = response.get("success") is not False
+                triage["probe_latency_ms"] = round((time.monotonic() - started) * 1000.0, 1)
+                data = response.get("data") if isinstance(response, dict) else None
+                messages = data.get("messages") if isinstance(data, dict) else None
+                if isinstance(messages, list):
+                    triage["message_count"] = len(messages)
+                elif isinstance(data, dict):
+                    for key in ("messageCount", "message_count"):
+                        if isinstance(data.get(key), int):
+                            triage["message_count"] = data[key]
+                            break
+        triage["process_alive"] = proc is not None and proc.poll() is None
+        return triage
+
     def _dispatch(self, msg: dict) -> None:
         msg_type = msg.get("type")
 
@@ -816,10 +859,17 @@ class PiRPCClient:
                     except Exception:
                         pass
                     self._settled.wait(min(10.0, max(0.1, stall_timeout)))
-                    raise TimeoutError(
+                    # Terminal forensics: distinguish a process-wedged pi from
+                    # a responsive-but-unproductive one so supervision above
+                    # can triage instead of guessing "frozen". The message
+                    # text is a pinned cross-repo contract; evidence rides
+                    # the exception attribute, never the message.
+                    stalled = TimeoutError(
                         "pi session turn stalled after "
                         f"{stall_timeout:.0f}s without observable progress"
                     )
+                    stalled.liveness_triage = self._stall_liveness_triage(stall_timeout)
+                    raise stalled
 
                 if self._process_exited_error:
                     raise RuntimeError(self._process_exited_error)
