@@ -78,6 +78,35 @@ class TestGetDefaultHermesRoot:
 
         assert get_default_hermes_root() == local_appdata / "hermes"
 
+    def test_direct_child_of_native_home_stays_anchored_to_it(self, tmp_path, monkeypatch):
+        """An operator-created home directly inside the root (``~/.hermes/custom-home``)
+        keeps profile-level ops on the operator's root — ``get_profile_dir("default")``
+        and the dashboard's ``?profile=default`` route there
+        (tests/hermes_cli/test_session_message_page_owner.py)."""
+        native = tmp_path / ".hermes"
+        native.mkdir()
+        custom = native / "custom-home"
+        custom.mkdir()
+        monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: native)
+        monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(custom))
+
+        assert get_default_hermes_root() == native
+
+    def test_home_nested_deeper_inside_native_home_is_its_own_root(self, tmp_path, monkeypatch):
+        """Temp/sandbox subtrees under the native home (pytest basetemp, conductor delegate
+        TMPDIR, ``tmp/`` scratch) resolve as their own root, so a sandbox parked under the
+        real ``~/.hermes`` can never land on the production board (2026-09-17/18 kanban
+        leak waves; tests/hermes_cli/test_kanban_wave9_guard_absent_ci_leak.py)."""
+        native = tmp_path / ".hermes"
+        sandbox = native / "tmp" / "pytest-run-1" / "hermes_test"
+        sandbox.mkdir(parents=True)
+        monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: native)
+        monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(sandbox))
+
+        assert get_default_hermes_root() == sandbox
+
 
 
 

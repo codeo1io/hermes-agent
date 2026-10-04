@@ -215,7 +215,9 @@ _default_hermes_root_memo: "tuple[str, str, Path] | None" = None
 
 
 def get_default_hermes_root() -> Path:
-    """Root Hermes dir for profile-level ops: ``<root>`` when ``HERMES_HOME=<root>/profiles/<name>``."""
+    """Root Hermes dir for profile-level ops: ``<root>`` when ``HERMES_HOME=<root>/profiles/<name>``
+    or a direct child of the native home; a home nested deeper inside the native home (temp/sandbox
+    trees) is its own root."""
     global _default_hermes_root_memo
     native_home = _get_platform_default_hermes_home()
     env_home = os.environ.get("HERMES_HOME", "").strip()
@@ -227,9 +229,24 @@ def get_default_hermes_root() -> Path:
     result = native_home
     if env_path is not None:
         try:
-            env_path.resolve().relative_to(native_home.resolve())  # under ~/.hermes (normal or profile mode)
+            relative = env_path.resolve().relative_to(native_home.resolve())  # under ~/.hermes (normal or profile mode)
         except ValueError:  # Docker/custom root: <root>/profiles/<name> -> <root>, else HERMES_HOME itself
             result = env_path.parent.parent if env_path.parent.name == "profiles" else env_path
+        else:
+            # Under the native home, two contracts share this branch:
+            # - Homes the operator keeps in their root — ``<root>/profiles/<name>``
+            #   and DIRECT children such as ``~/.hermes/custom-home`` — stay
+            #   anchored to the operator's root, so ``get_profile_dir("default")``
+            #   and the dashboard's ``?profile=default`` keep routing to the
+            #   operator's default home (test_session_message_page_owner.py).
+            # - Anything DEEPER lives in a managed or temporary subtree
+            #   (``tmp/`` scratch, pytest ``--basetemp``, conductor delegate
+            #   TMPDIR) and resolves as its own root, so a sandbox parked under
+            #   the real ``~/.hermes`` can never land on the production board
+            #   (2026-09-17/18 kanban leak waves;
+            #   test_kanban_wave9_guard_absent_ci_leak.py).
+            if len(relative.parts) > 1 and env_path.parent.name != "profiles":
+                result = env_path
     _default_hermes_root_memo = (*memo_key, result)
     return result
 

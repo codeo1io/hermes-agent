@@ -1,8 +1,11 @@
 """pytest's basetemp must never sit inside the operator's platform-native Hermes home.
 
-Every per-test sandbox is ``<basetemp>/.../hermes_test`` and ``get_default_hermes_root()``
-prefers the platform-native home whenever ``HERMES_HOME`` sits *under* it — so a basetemp
-inside the home silently turns the sandbox back into the live install (#111101).
+Every per-test sandbox is ``<basetemp>/.../hermes_test``. ``get_default_hermes_root()``
+anchors ``HERMES_HOME`` values under the native home to the operator's root for
+operator-created entries (direct children and ``profiles/<name>`` homes) and treats
+deeper subtrees as their own root, but a basetemp inside the home still plants fixture
+trees inside the live install, where marker-file root detection and direct native-home
+reads would treat them as real state (#111101) — so conftest relocates it.
 """
 from __future__ import annotations
 
