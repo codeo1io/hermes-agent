@@ -1,0 +1,9 @@
+{"step":1,"ts":"2026-10-03T21:30:00Z","summary":"prior-attempt forensics done: 4 dead full_tests attempts left 14-file fix set in-tree; digest matches dispatch 2689e58a","touched":[]}
+{"step":2,"ts":"2026-10-03T21:32:30Z","summary":"full_command launched verbatim (detached, TMPDIR=/tmp/ft-6c0bbb40); PR 172 created, snapshot ee8c5aa3f51e on lineage c5d691c3ba","touched":[]}
+{"step":3,"ts":"2026-10-03T21:48:00Z","summary":"PR172 checks: all lanes green except Python tests/Run tests (in_progress since 21:29Z, expect ~57min)","touched":[]}
+{"step":4,"ts":"2026-10-03T22:21:00Z","summary":"run1 aborted by transient gh API 504 at 21:47 (PR closed+branches cleaned); CI job 111297319202 orphaned+still running; relaunching verbatim","touched":[]}
+{"step":5,"ts":"2026-10-03T22:47:00Z","summary":"run1 forensics: lane red = buzz_websocket 600s stall (never retried); 7 flaky files all recovered via retries, not lane-blocking; local buzz 3/3 green 19-22s; file identical to upstream main","touched":[]}
+{"step":6,"ts":"2026-10-03T22:52:00Z","summary":"run2 script SIGKILLed pre-deadline (queue congestion made 3600s budget impossible); PR183 left OPEN as free oracle draw; relaunch planned into drained queue","touched":[]}
+{"step":7,"ts":"2026-10-03T23:06:00Z","summary":"adoption plan set: PR183 oracle run (same snapshot sha e443acb94824, dates 22:21:10Z pin-reproducible, origin/main unchanged) -> if green, verbatim command adopts via _existing_pr and exits 0","touched":[]}
+{"step":8,"ts":"2026-10-03T23:11:00Z","summary":"sha-pair reproduction verified locally (base 10f5970d40fe + head e443acb94824 with pinned dates 22:21:10Z); oracle PR183 CI in_progress since ~23:04; adoption launcher staged","touched":[]}
+{"step":9,"ts":"2026-10-04T00:10:30Z","summary":"PR183 was closed by surviving run-2 python grandchild at 23:21 (my SIGKILL hit only env/bash wrapper); re-pushed same shas, PR 189 created; adoption waits for green","touched":[]}

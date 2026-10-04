@@ -21,11 +21,30 @@ from tui_gateway import server
 from tui_gateway.compute_host import ComputeHost
 
 
+def _drain_live_turns(timeout: float = 30.0) -> None:
+    """Wait out any starved turn thread left behind by a timed-out test.
+
+    ``ComputeHost.close`` does not join in-flight turns; without this drain an
+    orphaned turn keeps ``running=True`` on a shared ``_sessions`` entry and the
+    next test's admission reports "session busy" instead of its own verdict.
+    Hosted runners run these files on starved vCPUs (the 5s waits here used to
+    time out there while passing on quiet machines), so bounds stay generous:
+    healthy runs finish in milliseconds.
+    """
+    from tui_gateway import server
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(s.get("running") for s in server._sessions.values()):
+            return
+        time.sleep(0.02)
+
+
 def _frames(out: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
 
 
-def _wait(out: io.StringIO, predicate, timeout: float = 5.0) -> dict:
+def _wait(out: io.StringIO, predicate, timeout: float = 30.0) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for frame in _frames(out):
@@ -90,6 +109,7 @@ def test_turn_start_streams_deltas_then_turn_end_with_history_identity(turn_env)
     finally:
         server._sessions.pop(sid, None)
         host.close()
+        _drain_live_turns()
 
     frames = _frames(out)
     kinds = [f["type"] for f in frames]
@@ -124,6 +144,7 @@ def test_turn_start_without_sid_is_a_turn_error(turn_env):
         err = _wait(out, lambda f: f["type"] == "turn.error")
     finally:
         host.close()
+        _drain_live_turns()
     assert err["request_id"] == "nosid" and err["message"] == "sid required"
 
 
@@ -140,6 +161,7 @@ def test_second_turn_start_while_running_is_session_busy(turn_env):
     finally:
         server._sessions.pop(sid, None)
         host.close()
+        _drain_live_turns()
     assert err["request_id"] == "t2" and err["message"] == "session busy"
 
 
@@ -158,6 +180,7 @@ def test_stale_queued_prompt_generation_ends_turn_as_interrupted(turn_env):
     finally:
         server._sessions.pop(sid, None)
         host.close()
+        _drain_live_turns()
     assert end["interrupted"] is True and end["request_id"] == "q"
     assert not any(f["type"] == "turn.started" for f in _frames(out))
 
@@ -179,6 +202,7 @@ def test_interrupt_frame_acks_and_marks_turn_interrupted(turn_env):
         stop.set()
         server._sessions.pop(sid, None)
         host.close()
+        _drain_live_turns()
 
     assert ack["applied"] is True and ack["request_id"] == "stop" and "applied_ns" in ack
     assert end["interrupted"] is True
@@ -193,6 +217,7 @@ def test_unknown_frame_type_is_an_error():
         host.handle_frame({"type": "bogus", "request_id": "b"})
     finally:
         host.close()
+        _drain_live_turns()
     assert _frames(out) == [{"type": "error", "request_id": "b", "message": "unknown frame type: bogus",
                              "host_ns": _frames(out)[0]["host_ns"]}]
 
@@ -235,6 +260,7 @@ def test_compute_host_interrupt_uses_explicit_stop_compatibility(monkeypatch, ki
     finally:
         server._sessions.pop(sid, None)
         host.close()
+        _drain_live_turns()
 
     assert calls == ["hard" if kind == "hard-only" else "legacy"]
     ack = _frames(out)[-1]
