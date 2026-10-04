@@ -208,3 +208,25 @@ fb76fb05265dda87baa6519bb78e6d65ca5009f6:tests/run_agent/test_length_continuatio
 fd5cc6e1b471e05ea964a9a4c730c11219c3f73c:tests/run_agent/test_run_agent.py:generic-api-key:154
 fd5cc6e1b471e05ea964a9a4c730c11219c3f73c:tests/run_agent/test_run_agent.py:generic-api-key:174
 ff3c9848d44877da80b3c644b0066df923d7634f:tests/run_agent/test_overflow_overhead_aware_tokens.py:generic-api-key:74
+# v2026.9.24 adoption (2026-10-04): 5 upstream test-fixture findings on the
+# newly-adopted commits — same test-key-1234567890 synthetic pattern as the
+# 2026-09-24 triage; suppressed by fingerprint, new commits still fail-closed.
+3591bf3bb84378dc6013fc344b2de0f0b366021e:tests/agent/test_in_place_preflight_rewind.py:generic-api-key:***
+eb8960fead33a8d312a91f5b2f566ad7635815e7:tests/agent/test_memory_provider_init.py:generic-api-key:***
+fd9498122e5135106ce388f8106a5912a6f76a2c:tests/agent/test_mid_turn_compaction_turn_boundary.py:generic-api-key:***
+a28890a4c829e06ad65ff84ece8d0079d05a0fbe:tests/agent/test_transform_llm_output_persistence.py:generic-api-key:***
+2598247ff55ecef33c094e84cde6d1ca0b5a55b6:tests/tools/test_process_registry.py:generic-api-key:***
+# Fingerprint variants for the same 5 findings (gitleaks computes
+# commit:file:rule:line; the scan attributes upstream additions to the
+# adoption merge's first-parent diff, and lines are numeric here).
+ec20061d28dc1b50de17082ca33e73011d33c2a1:tests/agent/test_in_place_preflight_rewind.py:generic-api-key:40
+ec20061d28dc1b50de17082ca33e73011d33c2a1:tests/agent/test_memory_provider_init.py:generic-api-key:181
+ec20061d28dc1b50de17082ca33e73011d33c2a1:tests/agent/test_mid_turn_compaction_turn_boundary.py:generic-api-key:90
+ec20061d28dc1b50de17082ca33e73011d33c2a1:tests/agent/test_transform_llm_output_persistence.py:generic-api-key:48
+ec20061d28dc1b50de17082ca33e73011d33c2a1:tests/tools/test_process_registry.py:generic-api-key:2082
+3591bf3bb84378dc6013fc344b2de0f0b366021e:tests/agent/test_in_place_preflight_rewind.py:generic-api-key:40
+eb8960fead33a8d312a91f5b2f566ad7635815e7:tests/agent/test_memory_provider_init.py:generic-api-key:181
+fd9498122e5135106ce388f8106a5912a6f76a2c:tests/agent/test_mid_turn_compaction_turn_boundary.py:generic-api-key:90
+a28890a4c829e06ad65ff84ece8d0079d05a0fbe:tests/agent/test_transform_llm_output_persistence.py:generic-api-key:48
+2598247ff55ecef33c094e84cde6d1ca0b5a55b6:tests/tools/test_process_registry.py:generic-api-key:2082
+0ff5fa93a964eb26e351d4752b2d6413bc7a6291:tests/tools/test_process_registry.py:generic-api-key:2082
