@@ -255,6 +255,9 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         super().__init__()
         self.session_manager = session_manager or SessionManager()
         self._conn: Optional[acp.Client] = None
+        # Strong refs for scheduled notification tasks: the event loop's ready queue is the only
+        # reference to a bare ``create_task`` spawned via call_soon, so a GC pass drops them silently.
+        self._scheduled_tasks: set[asyncio.Task] = set()
 
     # ---- Connection lifecycle -----------------------------------------------
 
@@ -277,7 +280,29 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         if not self._conn:
             return
         loop = asyncio.get_running_loop()
-        loop.call_soon(asyncio.create_task, make_coro())
+        loop.call_soon(self._spawn_tracked, make_coro)
+
+    def _spawn_tracked(self, make_coro: Callable[[], Any]) -> None:
+        """Spawn on the loop and retain; also the call_soon_threadsafe entry point (the coroutine
+        is created here on the loop thread, never on the caller's)."""
+        self._track_scheduled_task(asyncio.create_task(make_coro()))
+
+    def _track_scheduled_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Register a fire-and-forget notification task so it cannot be GC'd mid-flight."""
+        self._scheduled_tasks.add(task)
+        task.add_done_callback(self._scheduled_tasks.discard)
+        return task
+
+    async def drain_scheduled_tasks(self, timeout: float = 5.0) -> None:
+        """Drain in-flight scheduled notifications at shutdown (stdin EOF); stragglers past the bound are cancelled."""
+        pending = [task for task in self._scheduled_tasks if not task.done()]
+        if not pending:
+            return
+        _done, stragglers = await asyncio.wait(pending, timeout=timeout)
+        for task in stragglers:
+            task.cancel()
+        if stragglers:
+            await asyncio.gather(*stragglers, return_exceptions=True)
 
     def _session_modes(self, state: SessionState) -> SessionModeState:
         """Edit-approval policy as ACP modes. Zed renders ``config_options`` in the model
@@ -796,7 +821,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             # Auto-titling fires in the turn prologue; push the title now as a session-info update.
             def _notify_title_update(_title: str, _source: str) -> None:
                 if conn:
-                    loop.call_soon_threadsafe(asyncio.create_task, self._send_session_info_update(session_id))
+                    loop.call_soon_threadsafe(self._spawn_tracked, lambda: self._send_session_info_update(session_id))
 
             agent._on_session_title = _notify_title_update
             try:

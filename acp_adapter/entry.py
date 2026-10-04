@@ -221,8 +221,14 @@ def main(argv: list[str] | None = None) -> None:
             logger.debug("MCP tool discovery failed at ACP startup", exc_info=True)
 
     agent = HermesACPAgent()
+
+    async def _serve() -> None:
+        # stdin EOF ends conn.listen(); drain in-flight scheduled notifications before the loop closes.
+        await acp.run_agent(agent, use_unstable_protocol=True)
+        await agent.drain_scheduled_tasks()
+
     try:
-        asyncio.run(acp.run_agent(agent, use_unstable_protocol=True))
+        asyncio.run(_serve())
     except KeyboardInterrupt:
         logger.info("Shutting down (KeyboardInterrupt)")
     except Exception:
