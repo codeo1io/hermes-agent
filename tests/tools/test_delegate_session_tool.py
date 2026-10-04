@@ -84,6 +84,12 @@ class FakePiClient:
         self.release_turn.set()
         return {"success": True, "command": "abort"}
 
+    def _turn_inactive_for(self):
+        # Mirrors PiRPCClient's inactivity counter: seconds since the client
+        # last observed turn activity. Driven by the public
+        # last_turn_activity_at the tests control directly.
+        return max(0.0, time.time() - self.last_turn_activity_at)
+
     def close(self):
         self.is_closed = True
         self.release_turn.set()
@@ -280,6 +286,46 @@ def test_start_on_live_session_with_goal_dispatches_followup_turn():
     assert reused.get("turn_dispatched") is True
     wait_for_status(parent, sid, "idle")
     assert any("phase two goal" in m for m in client.messages), client.messages
+
+
+def test_start_or_resume_with_goal_on_running_session_is_typed_busy():
+    """R4 (serialization): the start/resume follow-up path must mirror the
+    send action's busy guard instead of dispatching a second concurrent turn
+    onto a client already running one. The second caller's stall window then
+    counts down while pi still works the first turn, aborts live work, and
+    cascades into ambiguous-dispatch re-tries (continuity family 76a793c)."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="turn one", parent_agent=parent
+        )
+    )
+    assert client.started_turn.wait(timeout=2.0)
+    wait_for_status(parent, sid, "running")
+
+    for action in ("start", "resume"):
+        busy = payload(
+            ds.delegate_session(
+                action=action,
+                session_id=sid,
+                goal=f"{action} goal while running",
+                parent_agent=parent,
+            )
+        )
+        assert busy.get("error"), action
+        assert "currently running" in busy["error"], action
+
+    # Exactly one turn was ever dispatched: no concurrent second turn.
+    assert client.messages == ["turn one"]
+
+    client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+    assert client.messages == ["turn one"]
 
 
 def test_start_with_goal_on_dead_client_reopens_and_dispatches():
@@ -622,6 +668,105 @@ def test_stall_triage_is_banked_and_cleared_by_later_turns():
     ):
         time.sleep(0.05)
     assert "last_turn_triage" not in ds._load_metadata(sid)
+
+
+def test_status_reports_turn_liveness_while_turn_runs():
+    """R3 (observability): status tells turn-liveness truth additively —
+    turn_running, turn_started_at, and an inactive_for_s that tracks the
+    client's own inactivity counter — while the existing observer contract
+    (last_activity_at) stays byte-identical."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="slow turn", parent_agent=parent
+        )
+    )
+    assert client.started_turn.wait(timeout=2.0)
+    running = wait_for_status(parent, sid, "running")
+
+    assert running["turn_running"] is True
+    assert isinstance(running["turn_started_at"], float)
+    assert started["created_at"] <= running["turn_started_at"] <= time.time()
+
+    client.last_turn_activity_at = time.time() - 5.0
+    first = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert first["turn_running"] is True
+    assert first["inactive_for_s"] >= 5.0
+
+    client.last_turn_activity_at = time.time() - 50.0
+    second = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert second["inactive_for_s"] > first["inactive_for_s"]
+    # Observer contract unchanged: last_activity_at still reports the
+    # client's own activity timestamp verbatim, with the new keys additive.
+    assert second["last_activity_at"] == client.last_turn_activity_at
+
+    client.release_turn.set()
+    done = wait_for_status(parent, sid, "idle")
+    assert done["turn_running"] is False
+    assert "inactive_for_s" not in done
+    # turn_started_at survives the turn: it names the LAST dispatched turn,
+    # durable forensics for supervision reading the session after the fact.
+    assert done["turn_started_at"] == running["turn_started_at"]
+
+
+def test_idle_and_offline_status_do_not_fabricate_turn_liveness():
+    """Idle sessions expose turn_running=False and omit the client-dependent
+    liveness keys entirely; offline durable summaries carry only the
+    persisted subset (turn_started_at, last_turn_triage) — never a fabricated
+    turn_running/inactive_for_s."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    idle = wait_for_status(parent, sid, "idle")
+    assert idle["turn_running"] is False
+    assert "turn_started_at" not in idle
+    assert "inactive_for_s" not in idle
+    assert "last_turn_triage" not in idle
+
+    def stall_with_triage(message, *, timeout_seconds=900.0):
+        exc = TimeoutError(
+            "pi session turn stalled after 900s without observable progress"
+        )
+        exc.liveness_triage = {"process_alive": True, "rpc_responsive": False}
+        raise exc
+
+    client.run_session_prompt = stall_with_triage
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    wait_for_status(parent, sid, "error")
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not (ds._load_metadata(sid) or {}).get(
+        "last_turn_triage"
+    ):
+        time.sleep(0.05)
+    meta = ds._load_metadata(sid)
+    assert meta["turn_started_at"] is not None
+
+    # Registry loss (gateway restart): reads fall back to the durable summary.
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid, None)
+    offline = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert offline["status"] == "offline"
+    assert offline["turn_started_at"] == meta["turn_started_at"]
+    assert offline["last_turn_triage"]["process_alive"] is True
+    assert "turn_running" not in offline
+    assert "inactive_for_s" not in offline
 
 
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
