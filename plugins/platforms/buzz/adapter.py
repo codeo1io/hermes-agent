@@ -1129,6 +1129,13 @@ class BuzzAdapter(BasePlatformAdapter):
                         for task in tasks:
                             task.cancel()
                         await asyncio.gather(*tasks, return_exceptions=True)
+                        current = asyncio.current_task()
+                        if current is not None and current.cancelling():
+                            # gather(return_exceptions=True) can swallow an outer
+                            # cancellation when the children resolve as cancelled
+                            # results first (CPython gather race): the loop would
+                            # then outlive task.cancel() and reconnect forever.
+                            raise asyncio.CancelledError()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
