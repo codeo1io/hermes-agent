@@ -31,6 +31,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
+
 logger = logging.getLogger(__name__)
 
 # Answerer contract shared with the Pi backend: (method, question, options) -> str | None
@@ -511,6 +513,10 @@ class OpenCodeClient:
         deadline = time.monotonic() + timeout_seconds
         last_snapshot: Optional[tuple] = None
         stable_since: Optional[float] = None
+        # Latest fresh assistant text seen while polling: classification
+        # evidence if the turn times out (A1 sibling — provider errors the
+        # model streamed are stronger than the bare timeout prose).
+        evidence_text = ""
         # Completion signal, in order of reliability:
         #   1. SSE ``session.idle`` for this session (authoritative; watched on
         #      a background thread so question answering keeps running).
@@ -534,6 +540,13 @@ class OpenCodeClient:
                 messages = data if isinstance(data, list) else (data or {}).get("data") or []
                 messages = sorted(messages, key=self._message_sort_key)
                 fresh = [m for m in messages if m.get("info", {}).get("id") not in baseline_ids]
+                if fresh:
+                    for m in reversed(fresh):
+                        if (m.get("info") or {}).get("role") == "assistant":
+                            captured = self._assistant_text(m)
+                            if captured:
+                                evidence_text = captured[-2048:]
+                                break
                 snapshot = tuple(
                     (
                         (m.get("info") or {}).get("id"),
@@ -634,7 +647,23 @@ class OpenCodeClient:
             self.abort(timeout=10.0)
         except Exception:
             logger.debug("opencode abort after timeout failed", exc_info=True)
-        raise TimeoutError(f"OpenCode turn timed out after {timeout_seconds:.0f}s")
+        # Typed stall for the shared delegate vocabulary (A1/D2 sibling):
+        # the supervisor reads error_class instead of re-parsing prose, and
+        # the provider breaker (A2) records it. This timeout is an absolute
+        # wall budget (deliberate, unlike pi's inactivity window), so
+        # zero_activity is not a structural signal here; classify from the
+        # text the turn actually streamed, else fall back to agent_stall.
+        error_class, provider_signal, retry_after = classify_delegate_failure(
+            evidence_text, zero_activity=False
+        )
+        if not evidence_text.strip():
+            error_class = "agent_stall"
+        raise DelegateTurnStalled(
+            f"OpenCode turn timed out after {timeout_seconds:.0f}s",
+            error_class=error_class,
+            provider_signal=provider_signal,
+            retry_after=retry_after,
+        )
 
     def steer(self, message: str, timeout_seconds: float = 30.0) -> Dict[str, Any]:
         # OpenCode prompt_async has no native live-steer injection; the tool
