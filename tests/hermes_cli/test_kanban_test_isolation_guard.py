@@ -163,6 +163,11 @@ def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
 
     root = _real_platform_state_root()
     assert root is not None
+    # A fresh home (hosted CI runner, new dev machine) has no ~/.hermes yet,
+    # and sqlite3.connect refuses to create parent dirs — materialise the
+    # root before opening the raw handle. Guard semantics are unaffected:
+    # the deny-root only needs to be resolvable, never pre-existing.
+    root.mkdir(parents=True, exist_ok=True)
     raw = sqlite3.connect(root / "kanban.db")
     try:
         with pytest.raises(RuntimeError, match="test-isolation guard"):

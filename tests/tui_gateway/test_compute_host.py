@@ -19,7 +19,12 @@ def _stdout_queue(proc: subprocess.Popen) -> queue.Queue[dict]:
     return out
 
 
-def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:
+def _read_json_line(out: queue.Queue[dict], timeout: float = 15.0) -> dict:
+    # The handshake budget must cover a COLD interpreter boot: run_host()
+    # imports tui_gateway.server (~1.6s of module imports on an idle dev
+    # box) before emitting hello, and CI shard contention multiplies that.
+    # 15s keeps the test fast when healthy while leaving real headroom —
+    # the contract under test is the frame protocol, not boot speed.
     try:
         return out.get(timeout=timeout)
     except queue.Empty as exc:
@@ -56,7 +61,7 @@ def test_compute_host_line_json_hello_and_shutdown():
         proc.stdin.write(json.dumps({"type": "shutdown", "request_id": "stop"}) + "\n")
         proc.stdin.flush()
         assert _read_json_line(out)["type"] == "shutdown.ack"
-        proc.wait(timeout=2)
+        proc.wait(timeout=5)
     finally:
         if proc.poll() is None:
             proc.kill()
