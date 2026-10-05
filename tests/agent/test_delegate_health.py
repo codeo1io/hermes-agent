@@ -117,6 +117,46 @@ def test_half_open_grants_exactly_one_probe_after_cooldown():
     assert ledger.check(KEY) is None
 
 
+def test_non_provider_failure_on_probe_consumes_it_and_re_arms():
+    """A non-provider failure on the probe turn resolves the probe (it is
+    consumed and the cooldown re-arms) instead of leaving it armed forever.
+
+    Regression for the review's P1 wedge: before the fix, the early return
+    on non-provider classes never touched an armed ``probing`` flag, so a
+    mixed failure storm (provider failures open the circuit, an agent_stall
+    on the probe turn) held the key fail-closed for the process lifetime.
+    """
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S + 1)
+    assert ledger.check(KEY) is None  # probe granted
+    ledger.record_failure(KEY, "agent_stall")  # non-provider on the probe turn
+    state = ledger.check(KEY)
+    assert isinstance(state, CircuitOpen)  # probe consumed, cooldown re-armed
+    assert state.retry_after_s == INITIAL_COOLDOWN_S
+    # It heals: after the re-armed cooldown a fresh probe is granted (this
+    # assertion is what failed on the pre-fix ledger — it stayed refused).
+    clock.advance(INITIAL_COOLDOWN_S + 1)
+    assert ledger.check(KEY) is None
+
+
+def test_lost_probe_regrants_after_one_extra_cooldown():
+    """A probe that nothing ever resolves (turn thread killed by a
+    BaseException, bootstrap dying before any turn ran, crash between
+    grant and resolution) costs one cooldown, not the process lifetime:
+    one full cooldown past the grant, the probe counts as lost, the window
+    re-arms and a fresh probe is granted."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S + 1)
+    assert ledger.check(KEY) is None  # probe granted
+    assert isinstance(ledger.check(KEY), CircuitOpen)  # in flight: refused
+    clock.advance(INITIAL_COOLDOWN_S)  # now one full cooldown past the grant
+    assert ledger.check(KEY) is None  # lost probe: fresh one granted
+    # Cadence is still one probe per cooldown window.
+    assert isinstance(ledger.check(KEY), CircuitOpen)
+
+
 def test_failed_probe_doubles_cooldown_up_to_cap():
     ledger, clock = make_ledger()
     open_ledger(ledger, clock)

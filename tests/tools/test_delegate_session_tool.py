@@ -363,10 +363,17 @@ def test_pi_bootstrap_failure_recovers_with_fresh_native_session(monkeypatch):
     assert resumed["session_id"] == sid
     assert resumed["native_session_id"] != sid
     assert resumed["native_session_id"].startswith(f"{sid}-recovery-")
-    assert len(BootstrapFailingPi.instances) == 2
+    # One same-id retry before the mint (recovery-lineage fidelity): the
+    # bound id is opened twice, then a fresh -recovery- native session.
+    assert len(BootstrapFailingPi.instances) == 3
     assert BootstrapFailingPi.instances[0].session_id == sid
-    assert BootstrapFailingPi.instances[1].session_id == resumed["native_session_id"]
+    assert BootstrapFailingPi.instances[1].session_id == sid
+    assert BootstrapFailingPi.instances[2].session_id == resumed["native_session_id"]
     assert ds._load_metadata(sid)["native_session_id"] == resumed["native_session_id"]
+    # The substitution is REPORTED, not silent.
+    assert resumed["recovery_of_native_id"] == sid
+    assert resumed["recovery_reason"]
+    assert isinstance(resumed["recovered_at"], float)
 
 
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
@@ -1752,6 +1759,30 @@ def test_resume_with_goal_on_running_session_refuses_second_turn():
     wait_for_status(parent, sid, "idle")
 
 
+def test_dispatch_turn_refuses_atomically_when_status_already_running():
+    """U7 hardening: the busy refusal lives INSIDE ``_dispatch_turn``'s
+    locked section, so check-and-flip is one atomic step. A caller that
+    raced between its own status read and this call (the provider gate
+    between them takes the ledger lock and may persist to disk) must lose
+    the race HERE rather than stack a second turn onto a live session —
+    the caller-side guard alone only narrows the window, it cannot close
+    it."""
+    record = {
+        "session_id": "atomic-busy-test",
+        "handle": "atomic-busy-test",
+        "backend": "pi",
+        "model": "",
+        "status": "idle",
+        "thread": None,
+    }
+    with ds._SESSION_CONDITION:
+        ds._transition_status_locked(record, "running")
+    assert ds._dispatch_turn(record, "racing message", 30) is False
+    # Refused before spawning: no thread, no anchor rewrite.
+    assert record["thread"] is None
+    assert "turn_started_at" not in record
+
+
 # ------------------------- U9: turn-liveness truth in status
 # `status` can lie (a turn thread that dies abnormally leaves it "running"),
 # and "running" alone cannot distinguish a quiet-but-alive turn from a wedged
@@ -1943,3 +1974,217 @@ def test_banked_last_turn_triage_surfaces_and_survives_restart():
     assert resumed["success"] is True
     with ds._SESSION_LOCK:
         assert ds._SESSIONS[sid]["last_turn_triage"] == triage
+
+
+# ------------------- recovery lineage + stall triage banking (A4, U6/U8)
+
+
+class StallWithTriagePiClient(FakePiClient):
+    """Every turn raises a typed stall carrying a liveness triage dict —
+    the shape agent.pi_rpc_client produces at stall time."""
+
+    def run_session_prompt(self, message, *, timeout_seconds=900.0):
+        self.messages.append(message)
+        self.last_turn_activity_at = time.time()
+        raise DelegateTurnStalled(
+            "pi session turn timed out: stalled after 900s without observable progress",
+            error_class="provider_stall",
+            liveness_triage={
+                "process_alive": True,
+                "rpc_responsive": None,
+                "probe_latency_ms": None,
+                "message_count": 0,
+                "last_event_age_s": 912.5,
+                "probed_at": 1790000000.0,
+            },
+        )
+
+
+def test_stall_triage_from_typed_exception_banks_to_session(monkeypatch):
+    """U8 banking: a typed stall carrying `liveness_triage` lands verbatim in
+    the session record, surfaces in status, persists to the v4 snapshot, and
+    survives registry loss — a supervisor never re-derives liveness from
+    prose."""
+    monkeypatch.setattr(ds, "PiRPCClient", StallWithTriagePiClient)
+    parent = Parent()
+    started = payload(
+        ds.delegate_session(action="start", parent_agent=parent, goal="do work")
+    )
+    sid = started["session_id"]
+
+    row = wait_for_status(parent, sid, "error")
+    triage = row["last_turn_triage"]
+    assert triage["process_alive"] is True
+    assert triage["rpc_responsive"] is None
+    assert triage["probe_latency_ms"] is None
+    assert triage["message_count"] == 0
+    assert triage["last_event_age_s"] == 912.5
+    assert triage["probed_at"] == 1790000000.0
+    assert row["error_class"] == "provider_stall"
+
+    # v4 snapshot persisted the evidence. The turn thread flips status to
+    # `error` under the condition lock but persists AFTER releasing it, so
+    # poll the file instead of assuming the write raced ahead of us.
+    deadline = time.time() + 2.0
+    meta = {}
+    while time.time() < deadline:
+        meta = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
+        if meta.get("last_turn_triage") == triage:
+            break
+        time.sleep(0.01)
+    assert meta.get("last_turn_triage") == triage
+
+    # Registry loss: the evidence rides the durable metadata.
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+    assert resumed["success"] is True
+    assert resumed["last_turn_triage"] == triage
+
+
+def _flaky_start_client(fail_ids=(), always_fail_ids=()):
+    """FakePiClient whose start() wedges for scripted native ids.
+
+    `fail_ids` fail their FIRST start() (the same-id retry then succeeds);
+    `always_fail_ids` fail EVERY start() (a -recovery- mint is required).
+    """
+
+    class _FlakyStartPiClient(FakePiClient):
+        fail_once = set(fail_ids)
+        fail_always = set(always_fail_ids)
+
+        def start(self, *, timeout=30.0):
+            if self.session_id in type(self).fail_always:
+                raise RuntimeError(
+                    "pi rpc process exited before ready: simulated wedge"
+                )
+            if self.session_id in type(self).fail_once:
+                type(self).fail_once.discard(self.session_id)
+                raise RuntimeError(
+                    "pi rpc process exited before ready: simulated wedge"
+                )
+            return super().start(timeout=timeout)
+
+    return _FlakyStartPiClient
+
+
+def _drop_session(sid):
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+
+def test_failed_reopen_retries_same_native_id_before_any_recovery_mint(monkeypatch):
+    """U6: a bound native id whose first reopen wedges gets ONE same-id
+    retry (fresh client, same native session) before any -recovery- mint.
+    A dead child process is the common cause — the delegated identity must
+    not be silently substituted on a single failure."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    bound = started["native_session_id"]
+    _drop_session(sid)
+
+    monkeypatch.setattr(ds, "PiRPCClient", _flaky_start_client({bound}))
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+
+    assert resumed["success"] is True
+    assert resumed["native_session_id"] == bound  # identity preserved
+    opens = [c.session_id for c in FakePiClient.instances[1:]]
+    assert opens == [bound, bound]  # failed open + same-id retry, no third
+    assert all("-recovery-" not in str(c.session_id) for c in FakePiClient.instances)
+    # No lineage: nothing was substituted.
+    assert resumed["recovery_of_native_id"] is None
+    assert resumed["recovery_reason"] is None
+    assert resumed["recovered_at"] is None
+    meta = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
+    assert meta["recovery_of_native_id"] is None
+
+
+def test_confirmed_unopenable_native_id_mints_recovery_with_lineage(monkeypatch):
+    """U6: when the bound id fails BOTH the first open and the same-id
+    retry, a -recovery- native session is minted and REPORTED — the summary
+    and the v4 snapshot name the original binding, why it was substituted,
+    and when."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    bound = started["native_session_id"]
+    _drop_session(sid)
+
+    monkeypatch.setattr(
+        ds, "PiRPCClient", _flaky_start_client(always_fail_ids={bound})
+    )
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+
+    assert resumed["success"] is True
+    minted = resumed["native_session_id"]
+    assert minted != bound and "-recovery-" in minted
+    opens = [c.session_id for c in FakePiClient.instances[1:]]
+    assert opens == [bound, bound, minted]
+
+    assert resumed["recovery_of_native_id"] == bound
+    assert resumed["recovery_reason"]  # bounded reason, not empty
+    assert len(resumed["recovery_reason"]) <= 400
+    assert "simulated wedge" in resumed["recovery_reason"]
+    assert isinstance(resumed["recovered_at"], float)
+    assert resumed["recovered_at"] <= time.time()
+
+    # v4 snapshot + offline rows carry the same lineage.
+    meta = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
+    assert meta["recovery_of_native_id"] == bound
+    assert meta["recovery_reason"] == resumed["recovery_reason"]
+    assert meta["recovered_at"] == resumed["recovered_at"]
+
+    listing = payload(ds.delegate_session(action="list", parent_agent=parent))
+    row = next(r for r in listing["sessions"] if r["session_id"] == sid)
+    assert row["recovery_of_native_id"] == bound
+    assert row["recovered_at"] == resumed["recovered_at"]
+
+
+def test_recovery_lineage_survives_restart_and_keeps_chain_root(monkeypatch):
+    """U6 immutability: after a mint, a LATER loss of the minted session
+    re-mints again — recovery_of_native_id stays the ORIGINAL bound id
+    (chain root), while reason and timestamp describe the latest mint."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    bound = started["native_session_id"]
+    _drop_session(sid)
+
+    monkeypatch.setattr(
+        ds, "PiRPCClient", _flaky_start_client(always_fail_ids={bound})
+    )
+    first = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+    assert first["recovery_of_native_id"] == bound
+    first_minted = first["native_session_id"]
+    first_recovered_at = first["recovered_at"]
+
+    # The minted session is now the binding; lose the registry and wedge it.
+    _drop_session(sid)
+    monkeypatch.setattr(
+        ds, "PiRPCClient",
+        _flaky_start_client(always_fail_ids={first_minted}),
+    )
+    second = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+
+    assert second["success"] is True
+    assert "-recovery-" in second["native_session_id"]
+    assert second["native_session_id"] != first_minted
+    # Chain root is immutable; reason/time name the LATEST mint.
+    assert second["recovery_of_native_id"] == bound
+    assert second["recovered_at"] >= first_recovered_at
+    meta = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
+    assert meta["recovery_of_native_id"] == bound
+    assert meta["recovered_at"] == second["recovered_at"]

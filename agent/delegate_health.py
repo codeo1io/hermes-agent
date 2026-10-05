@@ -240,13 +240,26 @@ class DelegateHealthLedger:
             logger.debug("delegate health state persist failed", exc_info=True)
 
     def record_failure(self, key: LedgerKey, error_class: str) -> None:
-        """Count a failure. Non-provider classes are ignored entirely: they
-        carry no information about the upstream provider."""
-        if error_class not in PROVIDER_FAILURE_CLASSES:
-            return
+        """Count a failure. Non-provider classes are ignored for opening or
+        re-arming a circuit (they carry no information about the upstream
+        provider) — but they DO consume an armed half-open probe: the probe
+        turn ran and terminated without a provider-attributable failure, so
+        the probe is resolved as inconclusive and the cooldown re-arms for
+        a fresh one. Leaving the probe armed on those classes wedged the
+        key fail-closed for the rest of the process lifetime (review
+        finding: mixed failure storms — provider failures open the circuit,
+        an agent_stall on the probe turn — never resolved the probe and
+        every later check was refused until restart)."""
         now = self._now()
         with self._lock:
             self._ensure_loaded_locked()
+            entry = self._entries.get(key)
+            if error_class not in PROVIDER_FAILURE_CLASSES:
+                if entry is not None and entry["probing"]:
+                    entry["probing"] = False
+                    entry["opened_at"] = now
+                    self._persist_locked()
+                return
             entry = self._entries.setdefault(
                 key,
                 {
@@ -288,14 +301,20 @@ class DelegateHealthLedger:
         """`None` = dispatch may proceed; `CircuitOpen` = refuse/defer.
 
         While the cooldown has elapsed, exactly one half-open probe is
-        granted; a second check before that probe resolves is still refused.
-        """
+        granted; a second check before that probe resolves is still
+        refused. A probe that nothing ever resolves (turn thread killed by
+        a BaseException, bootstrap dying before any turn ran, crash
+        between grant and resolution) is not allowed to hold the key
+        fail-closed forever: one full cooldown past the grant, it counts
+        as lost — the window re-arms and a fresh probe is granted, so a
+        dead probe costs one cooldown, never the process lifetime."""
         with self._lock:
             self._ensure_loaded_locked()
             entry = self._entries.get(key)
             if entry is None or entry["opened_at"] is None:
                 return None
-            elapsed = self._now() - entry["opened_at"]
+            now = self._now()
+            elapsed = now - entry["opened_at"]
             if elapsed < entry["cooldown"]:
                 return CircuitOpen(
                     retry_after_s=entry["cooldown"] - elapsed,
@@ -304,6 +323,13 @@ class DelegateHealthLedger:
                 )
             if not entry["probing"]:
                 entry["probing"] = True
+                self._persist_locked()
+                return None
+            if elapsed >= 2 * entry["cooldown"]:
+                # Lost probe (see docstring): re-arm the window anchored at
+                # now and grant the next probe immediately — cadence stays
+                # one probe per cooldown, bounded, instead of one forever.
+                entry["opened_at"] = now
                 self._persist_locked()
                 return None
             # Probe already in flight: stay closed to it until it resolves.
