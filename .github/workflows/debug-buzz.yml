@@ -80,8 +80,9 @@ jobs:
                   echo "=== WD DUMP #$((DUMPS+1)) pid=$PID age=${ET}s $(date -u +%H:%M:%S) ==="
                   grep -E 'State|Threads|voluntary|nonvoluntary' /proc/$PID/status
                   echo "open fds: $(ls /proc/$PID/fd 2>/dev/null | wc -l)"
-                  .venv/bin/py-spy dump --pid $PID 2>&1
-                  .venv/bin/py-spy dump --pid $PID --native 2>&1 | head -40
+                  echo "wchan: $(sudo cat /proc/$PID/wchan 2>/dev/null)"
+                  sudo env "PATH=$PATH" .venv/bin/py-spy dump --pid $PID 2>&1
+                  sudo env "PATH=$PATH" .venv/bin/py-spy dump --pid $PID --native 2>&1 | head -60
                   DUMPS=$((DUMPS+1))
                 fi
               else
