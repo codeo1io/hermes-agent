@@ -207,7 +207,11 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(call) for _ in range(4)]
-        assert provider.entered.wait(3)
+        # 30s, not 3s: this is a scheduling gate (first of 4 gated requests
+        # reaching the provider), not a latency contract — on a contended CI
+        # shard the TestClient app spin-up alone can exceed 3s. The invariant
+        # under test (exactly one rotation) is unaffected by waiting longer.
+        assert provider.entered.wait(30)
         provider.release.set()
         statuses = sorted(f.result(timeout=10).status_code for f in futures)
     assert statuses == [200, 200, 200, 200]
