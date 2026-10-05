@@ -72,3 +72,48 @@ def test_reaching_the_model_resets_ladder_and_oneshots_never_retry(tmp_cron_home
     assert mark_job_run(once["id"], False, "ConnectError: dns", model_unreachable=True)
     remaining = get_job(once["id"])
     assert remaining is None or remaining.get(ur.STATE_KEY) is None
+
+
+def test_empty_stream_death_is_unreachable_and_climbs_the_ladder(tmp_cron_home):
+    """An HTTP-200/zero-events stream death (glmplus empty stream) is spend-neutral:
+    the scheduler wraps it in a bare RuntimeError whose text is all that survives,
+    so the classifier must match the canonical message and schedule the re-run."""
+    from types import SimpleNamespace
+
+    # Exact production shape: scheduler.py:1994 raises RuntimeError(result["error"]).
+    exc = RuntimeError(
+        "Provider returned an empty stream with no events "
+        "(possible upstream error or malformed event stream).")
+    agent = SimpleNamespace(session_api_calls=0)
+    assert ur.is_model_unreachable_failure(exc, agent) is True
+
+    # Same text reachable only through a wrapped cause chain (EmptyStreamError below
+    # a transport wrapper) must also classify: the walk covers __cause__/__context__.
+    from agent.errors import EmptyStreamError
+
+    inner = EmptyStreamError("provider returned an empty stream with no stop_reason")
+    wrapped = RuntimeError("run_conversation failed")
+    wrapped.__cause__ = inner
+    assert ur.is_model_unreachable_failure(wrapped, agent) is True
+
+    # The ladder itself admits the class end to end.
+    job = create_job("driver", "every 30m")
+    assert mark_job_run(job["id"], False, str(exc), model_unreachable=True)
+    j = get_job(job["id"])
+    assert j[ur.STATE_KEY]["attempt"] == 1
+    now = datetime.now(timezone.utc)
+    nxt = datetime.fromisoformat(j["next_run_at"])
+    assert timedelta(0) < nxt - now <= timedelta(seconds=ur.RETRY_DELAYS_SECONDS[0] + 120)
+
+
+def test_empty_stream_after_real_api_calls_never_retries(tmp_cron_home):
+    """Spend guard: a stream that folded at least one response (the model was
+    reached, tools may have run) must not enter the spend-neutral retry ladder."""
+    from types import SimpleNamespace
+
+    exc = RuntimeError("Provider returned an empty stream with no events")
+    agent = SimpleNamespace(session_api_calls=3)
+    assert ur.is_model_unreachable_failure(exc, agent) is False
+
+    # Unrelated RuntimeError text never matches, with or without API calls.
+    assert ur.is_model_unreachable_failure(RuntimeError("agent reported failure"), None) is False
