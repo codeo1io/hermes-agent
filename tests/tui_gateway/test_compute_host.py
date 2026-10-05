@@ -19,7 +19,11 @@ def _stdout_queue(proc: subprocess.Popen) -> queue.Queue[dict]:
     return out
 
 
-def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:
+def _read_json_line(out: queue.Queue[dict], timeout: float = 10.0) -> dict:
+    # 10s matches the suite's house convention for waits on a REAL subprocess
+    # (interpreter startup + module imports of the compute host routinely take
+    # 5-8s cold; the old 2.0s bound failed every cold start under CI's 12
+    # parallel workers — run 37315983749, job 111911509264).
     try:
         return out.get(timeout=timeout)
     except queue.Empty as exc:
@@ -56,7 +60,7 @@ def test_compute_host_line_json_hello_and_shutdown():
         proc.stdin.write(json.dumps({"type": "shutdown", "request_id": "stop"}) + "\n")
         proc.stdin.flush()
         assert _read_json_line(out)["type"] == "shutdown.ack"
-        proc.wait(timeout=2)
+        proc.wait(timeout=10)
     finally:
         if proc.poll() is None:
             proc.kill()
