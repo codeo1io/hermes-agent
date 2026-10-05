@@ -78,6 +78,8 @@ jobs:
                 ET=$(echo "$SNAP" | head -1 | awk '{print $2}')
                 if [ -n "$PID" ] && [ "${ET:-0}" -gt 45 ] 2>/dev/null; then
                   echo "=== WD DUMP #$((DUMPS+1)) pid=$PID age=${ET}s $(date -u +%H:%M:%S) ==="
+                  sudo kill -USR1 $PID 2>/dev/null || true
+                  sleep 2
                   grep -E 'State|Threads|voluntary|nonvoluntary' /proc/$PID/status
                   echo "open fds: $(ls /proc/$PID/fd 2>/dev/null | wc -l)"
                   echo "wchan: $(sudo cat /proc/$PID/wchan 2>/dev/null)"

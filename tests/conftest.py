@@ -2056,3 +2056,41 @@ def _moa_caches_isolated():
     yield
     moa._preset_cache.clear()
     moa._runtime_cache.clear()
+
+
+# ── DEBUG-ONLY (throwaway branch conductor/debug-buzz-8591a599) ──────────
+# SIGUSR1 → dump every asyncio task's id, cancel state, and Python stack.
+# Used by the debug workflow's watchdog to diagnose the buzz_websocket stall.
+def _dbg_buzz_task_dump(signum, frame):
+    import asyncio
+    import sys
+    lines = ["", "=== DBG TASK DUMP (SIGUSR1) ==="]
+    try:
+        loop = asyncio.get_event_loop()
+    except Exception as exc:  # noqa: BLE001
+        loop = None
+        lines.append(f"(no running loop: {exc!r})")
+    if loop is not None:
+        try:
+            tasks = sorted(asyncio.tasks.all_tasks(loop), key=id)
+        except Exception as exc:  # noqa: BLE001
+            tasks = []
+            lines.append(f"(all_tasks failed: {exc!r})")
+        if not tasks:
+            lines.append("(no live tasks)")
+        for t in tasks:
+            lines.append(
+                f"TASK id={id(t)} done={t.done()} must_cancel={getattr(t, '_must_cancel', '?')} "
+                f"cancelling={t.cancelling()} coroutine={t.get_coro()!r}"
+            )
+            for f in (t.get_stack() or []):
+                lines.append(f"    at {f.f_code.co_filename}:{f.f_lineno} in {f.f_code.co_name}")
+    print("\n".join(lines), file=sys.stderr, flush=True)
+
+
+try:
+    import signal
+
+    signal.signal(signal.SIGUSR1, _dbg_buzz_task_dump)
+except Exception:  # noqa: BLE001
+    pass
