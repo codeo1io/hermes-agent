@@ -36,6 +36,7 @@ from agent.inline_tool_executors import (
     InlineToolContext,
     apply_transform_tool_result,
     emit_terminal_post_tool_call,
+    resolve_invoke_tool_executor,
     tool_hook_ids,
 )
 from agent.tool_dispatch_helpers import (
@@ -1475,6 +1476,16 @@ def _unfinished_tool_result(agent, ref: _ToolCallRef, *, timed_out: bool, timeou
     return function_result, tool_duration, effect_disposition
 
 
+def _transform_fired_by_concurrent_dispatch(agent, function_name: str) -> bool:
+    """True when ``invoke_tool``'s dispatch for ``function_name`` already fired
+    ``transform_tool_result``. Only the registry branch (``model_tools.handle_function_call``)
+    owns the hook; inline, delegate and memory dispatches never reach it, mirroring the
+    sequential path's ``transform_applied`` policy."""
+    if resolve_invoke_tool_executor(agent, function_name) is not None:
+        return False
+    return function_name not in ("delegate_task", "delegate_session")
+
+
 def _append_batch_results(agent, messages: list, effective_task_id: str, batch: _ConcurrentBatch, budget: BudgetConfig) -> bool:
     """Append every slot's result in original call order; returns False at the first
     failed flush (the caller must stop the batch)."""
@@ -1489,6 +1500,17 @@ def _append_batch_results(agent, messages: list, effective_task_id: str, batch: 
             )
         else:
             ref, function_result, tool_duration, is_error, blocked = r.ref, r.result, r.duration, r.is_error, r.blocked
+            # Inline/delegate dispatch never reaches handle_function_call's
+            # transform_tool_result hook (registry results arrive already transformed);
+            # apply it here so the concurrent path keeps the hook's every-tool contract,
+            # mirroring _publish_sequential_result — and classify post-transform.
+            if not blocked and not _transform_fired_by_concurrent_dispatch(agent, ref.name):
+                function_result = apply_transform_tool_result(
+                    agent, function_name=ref.name, function_args=ref.args, result=function_result,
+                    effective_task_id=ref.task_id, tool_call_id=ref.call_id,
+                    duration_ms=int(tool_duration * 1000),
+                )
+                is_error, _ = _detect_tool_failure(ref.name, function_result)
             effect_disposition = "none" if blocked else None
             if pc.parse_error is not None:
                 ref.emit_invalid_arguments(agent, r.result)
