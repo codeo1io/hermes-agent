@@ -38,7 +38,7 @@ dependencies = [
   # user picks that backend. Smaller `dependencies` = smaller blast
   # radius for the next supply-chain attack.
   "openai==2.24.0",
-  "certifi==2026.5.20",
+  "certifi==2026.7.22",  # CA bundle refresh 2026-07-22
   "python-dotenv==1.2.2",
   "fire==0.7.1",
   "httpx[socks]==0.28.1",
@@ -92,10 +92,11 @@ dependencies = [
   # it out of the lazy-install path that exists only for the heavy matrix deps.
   "Markdown==3.10.2",
   # Skills Hub (GitHub App JWT auth — optional, only needed for bot identity)
-  "PyJWT[crypto]==2.13.0",  # PYSEC-2026-175/177/178/179
+  "PyJWT[crypto]==2.14.0",  # PYSEC-2026-175/177/178/179 (2.13.0 floor); 2.14.0 = 2026-09-11 patch release
   # urllib3 2.7.0 fixes GHSA-mf9v-mfxr-j63j (decompression-bomb bypass)
-  # and GHSA-qccp-gfcp-xxvc (header leak across origins).
-  "urllib3>=2.7.0,<3",
+  # and GHSA-qccp-gfcp-xxvc (header leak across origins); 2.8.0
+  # (2026-09-15) is the follow-up patch release, so the floor rides it.
+  "urllib3>=2.8.0,<3",
   # PyJWT[crypto] pulls cryptography in transitively. Pin it here as well, so
   # that the WeCom and Weixin crypto paths cannot fall below the patched
   # version. 50.0.0 is the floor: it fixes CVE-2026-69247, a Bleichenbacher
@@ -107,13 +108,13 @@ dependencies = [
   # A pin here is not sufficient on its own. alibabacloud-tea-openapi caps
   # cryptography<49, so [tool.uv] also holds an override. Read that comment
   # before you move this version.
-  "cryptography==50.0.0",  # CVE-2026-69247, GHSA-m2h6-j472-rp4c, GHSA-jwv3-5hgf-82ww, CVE-2026-39892, CVE-2026-34073, GHSA-537c-gmf6-5ccf
+  "cryptography==50.0.1",  # CVE-2026-69247, GHSA-m2h6-j472-rp4c, GHSA-jwv3-5hgf-82ww, CVE-2026-39892, CVE-2026-34073, GHSA-537c-gmf6-5ccf (50.0.0 floor); 50.0.1 = 2026-08-25 patch release
   # Windows has no IANA tzdata shipped with the OS, so Python's ``zoneinfo``
   # (PEP 615) raises ``ZoneInfoNotFoundError`` for every non-UTC timezone
   # out of the box.  ``tzdata`` ships the Olson database as a data package
   # Python resolves automatically.  No-op on Linux/macOS (which have
   # /usr/share/zoneinfo).  Credits: PR #13182 (@sprmn24).
-  "tzdata==2025.3; sys_platform == 'win32'",
+  "tzdata==2026.4; sys_platform == 'win32'",
   # Cross-platform process / PID management.  `psutil` is the canonical
   # answer for "is this PID alive" and process-tree walking across Linux,
   # macOS and Windows.  It replaces POSIX-only idioms like `os.kill(pid, 0)`

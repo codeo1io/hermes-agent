@@ -59,6 +59,38 @@ class TestBlueBubblesHelpers:
         adapter = _make_adapter(monkeypatch)
         assert adapter.format_message("## Heading\ntext") == "Heading\ntext"
 
+    @pytest.mark.linux_only
+    def test_temp_guid_epoch_is_offset_independent(self):
+        """`tempGuid` values must be true UTC epochs, not local-zone readings.
+
+        Regression: the old naive ``datetime.utcnow().timestamp()`` was
+        reinterpreted in the local zone, so the epoch skewed by the local UTC
+        offset (exactly 14h = 50400s under Pacific/Kiritimati) and two hosts
+        in different zones generated non-comparable temp-guid timestamps for
+        the same wall-clock instant.
+        """
+        import os
+        import time
+        from datetime import datetime, timezone
+
+        from gateway.platforms.bluebubbles import _temp_guid
+
+        old_tz = os.environ.get("TZ")
+        os.environ["TZ"] = "Pacific/Kiritimati"
+        time.tzset()
+        try:
+            if time.timezone != -50400:
+                pytest.skip("Pacific/Kiritimati zone unavailable on this host")
+            epoch = float(_temp_guid().removeprefix("temp-"))
+            utc_epoch = datetime.now(timezone.utc).timestamp()
+            assert abs(epoch - utc_epoch) < 60
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
 
     def test_init_normalizes_webhook_path(self, monkeypatch):
         adapter = _make_adapter(monkeypatch, webhook_path="bluebubbles-webhook")
