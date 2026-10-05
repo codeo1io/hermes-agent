@@ -38,7 +38,7 @@ delegate_session(action="stop", session_id="...")
 delegate_session(action="resume", session_id="...")
 ```
 
-`resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata persists IDs, timestamps, workspace, and last-known status with bounded failure diagnostics (`error`, `error_class`, `retry_after`, consecutive provider failures, and the model the streak was counted on). It never stores prompt text: conversation stays in Pi's native session history.
+`resume` reopens the same native Pi session, including after Hermes loses its process-local registry, and restores the session's recorded workspace. Session metadata persists IDs, timestamps, workspace, and last-known status with bounded failure diagnostics (`error`, `error_class`, `retry_after`, consecutive turn failures of any class, and the model the streak was counted on). It never stores prompt text: conversation stays in Pi's native session history.
 
 ## Provider health and stalled turns
 
