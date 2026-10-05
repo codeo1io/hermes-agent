@@ -10,6 +10,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 import yaml
@@ -92,19 +93,38 @@ def test_profile_local_mcp_tool_is_visible_in_slash_worker(tmp_path):
         assert proc.stdin is not None
         assert proc.stdout is not None
         stdout = proc.stdout
-        threading.Thread(
-            target=lambda: output.put(stdout.readline()),
-            daemon=True,
-        ).start()
-        proc.stdin.write(json.dumps({"id": 1, "command": "/tools"}) + "\n")
-        proc.stdin.flush()
-        try:
-            line = output.get(timeout=60)
-        except queue.Empty:
-            pytest.fail("slash worker produced no /tools response within 60 seconds")
-        response = json.loads(line)
-        assert response["ok"] is True
-        assert "mcp__profileprobe__hermes_61922_profile_probe" in response["output"]
+
+        def _pump() -> None:
+            for line in stdout:
+                output.put(line)
+
+        threading.Thread(target=_pump, daemon=True).start()
+        # MCP discovery runs concurrently with command serving inside the
+        # worker: an early /tools response can legitimately predate the
+        # profile-local server's tools. Poll until the probe tool surfaces
+        # instead of racing discovery with a single request.
+        probe_tool = "mcp__profileprobe__hermes_61922_profile_probe"
+        deadline = time.monotonic() + 60.0
+        request_id = 0
+        last_output = ""
+        while time.monotonic() < deadline:
+            request_id += 1
+            proc.stdin.write(json.dumps({"id": request_id, "command": "/tools"}) + "\n")
+            proc.stdin.flush()
+            try:
+                line = output.get(timeout=max(1.0, deadline - time.monotonic()))
+            except queue.Empty:
+                break
+            response = json.loads(line)
+            assert response["ok"] is True
+            last_output = response["output"]
+            if probe_tool in last_output:
+                break
+            time.sleep(0.5)
+        assert probe_tool in last_output, (
+            "profile-local MCP tool never became visible in /tools output: "
+            + last_output[-400:]
+        )
     finally:
         proc.terminate()
         try:

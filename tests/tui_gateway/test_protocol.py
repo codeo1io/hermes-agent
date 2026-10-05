@@ -1580,7 +1580,7 @@ def test_approval_for_a_ws_client_that_never_advertised_settles_the_queue_entry(
 
     peer = _silent_ws()
     _ws_session(server, "ws-old-approval", peer)
-    monkeypatch.setattr(wait_mod._ctx, "_get_approval_timeout", lambda: 3)
+    monkeypatch.setattr(wait_mod._ctx, "_get_approval_timeout", lambda: 30)
     monkeypatch.setattr(wait_mod._ctx, "_fire_approval_hook", lambda name, **kw: None)
     approval_mod.register_gateway_notify("ws-old-approval", lambda data: server._emit_approval_request("ws-old-approval", data))
     try:
@@ -1591,7 +1591,11 @@ def test_approval_for_a_ws_client_that_never_advertised_settles_the_queue_entry(
         waited = time.monotonic() - t0
     finally:
         approval_mod.unregister_gateway_notify("ws-old-approval")
-    assert waited < 1, decision
+    # The withdrawal is same-thread: the notify callback settles the queue entry
+    # before the poll loop starts (typical wait well under 0.1s). The bound only
+    # separates "withdrew without idling" from "idled to approvals.timeout"
+    # (30s above) with margin for a starved CI runner — never a user deny.
+    assert waited < 10, decision
     assert decision["choice"] is None and decision["cancelled"]
     assert peer.frames == []
     assert "ws-old-approval" not in approval_mod._gateway_queues
