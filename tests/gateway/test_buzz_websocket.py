@@ -744,8 +744,13 @@ async def test_ws_discovery_loop_subscribes_newly_discovered_conversation(monkey
     finally:
         task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
+            # Bounded teardown: the sweep assertions above have already been
+            # evaluated; a cancellation landing inside the transport's
+            # swallow window (#98097 shape) must not park this file until the
+            # runner's file-timeout. The lifecycle contract — discovery task
+            # dying with its connection — is asserted by the test below.
+            await asyncio.wait_for(task, 5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
     assert new_dm in subscriptions.values(), "sweep did not subscribe the new conversation"
