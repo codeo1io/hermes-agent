@@ -366,10 +366,27 @@ def role_cli(a: dict, out: Out) -> int:
     return 0
 
 
+def role_fd_leaker(a: dict, out: Out) -> int:
+    """Leak probe: hold an open fd on the deleted database file for ``hold`` seconds.
+
+    Pins the fd monitor's evidence semantics (tests/e2e/core/sqlite/test_fd_monitor_evidence):
+    a whole-life hold must survive reap() — only rows that FIRST appear after teardown began
+    are settle noise. Never touches the database through sqlite; the fd is the whole point.
+    """
+    fd = os.open(a["db"], os.O_RDONLY)
+    try:
+        os.unlink(a["db"])
+        out.report(event="leaking")
+        time.sleep(float(a.get("hold", 1.0)))
+    finally:
+        os.close(fd)
+    return 0
+
+
 ROLES = {
     "agent": role_agent, "cli": role_cli,
     "writer": role_writer, "reader": role_reader, "churn": role_churn, "opener": role_opener,
-    "fts": role_fts, "repair": role_repair,
+    "fts": role_fts, "repair": role_repair, "fd_leaker": role_fd_leaker,
 }
 
 

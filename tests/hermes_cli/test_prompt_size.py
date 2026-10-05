@@ -54,14 +54,60 @@ def test_runs_offline_without_credentials(isolated_home, monkeypatch):
     assert data["system_prompt"]["bytes"] > 0
 
 
+def test_breakdown_makes_no_outbound_connections(isolated_home, monkeypatch):
+    """The offline guarantee (#132998) held as a contract: nothing in the compute path
+    may open a socket, and a reintroduced probe must fail loud, not quietly connect.
+
+    Recorders stay installed outside the guarded window too, so a connection attempted
+    before/after the window is also caught.
+    """
+    import socket
+
+    seen = []
+    real_connect = socket.socket.connect
+    real_create = socket.create_connection
+
+    def _connect(self, address):
+        seen.append(address)
+        return real_connect(self, address)
+
+    def _create(address, *args, **kwargs):
+        seen.append(address)
+        return real_create(address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", _connect)
+    monkeypatch.setattr(socket, "create_connection", _create)
+    _seed_memory(isolated_home, memory_text="offline guarantee under test")
+    _seed_skill(isolated_home, "net-skill", "desc")
+
+    data = compute_prompt_breakdown("cli")
+
+    assert data["system_prompt"]["bytes"] > 0
+    assert seen == [], f"prompt-size went online during breakdown: {seen}"
 
 
+def test_a_reintroduced_model_probe_fails_loudly(isolated_home, monkeypatch):
+    """If a future change restores a sync fetch (model list, context lengths), the
+    command must abort naming the offline violation — never silently hit the network.
 
+    A planted probe inside the prompt-build seam (exactly where a model-catalog fetch
+    would be reintroduced) must trip the guard.
+    """
+    import socket
 
+    from agent import system_prompt
+    from hermes_cli import prompt_size
 
+    def _probe(*_args, **_kwargs):
+        with socket.create_connection(("openrouter.ai", 443), timeout=1):
+            pass
+        return {"stable": "", "context": "", "volatile": ""}
 
-
-
+    # compute_prompt_breakdown imports this lazily from its defining module, so the seam
+    # to plant the probe in is agent.system_prompt, not the prompt_size namespace.
+    monkeypatch.setattr(system_prompt, "build_system_prompt_parts", _probe)
+    with pytest.raises(prompt_size.OfflineViolation, match="offline"):
+        compute_prompt_breakdown("cli")
 
 
 def test_skills_breakdown_shape_sorted_and_attributed(isolated_home):
@@ -115,7 +161,3 @@ def test_skills_breakdown_attributes_demoted_category_shared_line(isolated_home)
         assert entry["index_line_total_bytes"] == shared_line_bytes
         assert entry["index_line_shared_bytes"] > 0
         assert entry["index_line_skill_count"] == 2
-
-
-
-

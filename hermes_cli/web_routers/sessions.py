@@ -67,7 +67,10 @@ _PRUNE_NUM_FILTERS = (
     "min_tool_calls", "max_tool_calls")
 
 
-_PRUNE_ROW_KEYS = ("id", "source", "title", "model", "started_at", "last_active", "message_count")
+# The row keys the REST dry-run returns; tokens/cost_usd mirror the min/max_tokens &
+# min/max_cost budget filters so the dashboard confirm shows what it selected on (#133013).
+_PRUNE_ROW_KEYS = ("id", "source", "title", "model", "started_at", "last_active",
+                   "message_count", "tokens", "cost_usd")
 
 
 def _prune_sessions(body: SessionPrune):

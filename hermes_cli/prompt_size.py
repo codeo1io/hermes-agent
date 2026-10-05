@@ -7,8 +7,10 @@ network call: dummy credentials force ``AIAgent.__init__`` down the direct-const
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import socket
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -144,11 +146,43 @@ def _compute_toolsets_breakdown(tools: List[Any]) -> List[Dict[str, Any]]:
     return sorted(groups.values(), key=lambda g: (-g["json_bytes"], g["toolset"]))
 
 
+class OfflineViolation(RuntimeError):
+    """A code path inside ``hermes prompt-size`` tried to go online (issue #132998)."""
+
+
+@contextlib.contextmanager
+def _offline_guard():
+    """Fail loud, never silently connect: prompt-size is the offline diagnostic, and a
+    reintroduced sync fetch (model list, context lengths) both skews its numbers and
+    breaks its no-credentials promise. Blocking at the socket layer covers every
+    transport (httpx, urllib, raw); if this fires, fix the caller — don't allow-list it."""
+    def _blocked(*_args, **_kwargs):
+        raise OfflineViolation(
+            "prompt-size attempted a network connection during the breakdown "
+            "(offline violation, issue #132998)")
+
+    saved_connect, saved_create = socket.socket.connect, socket.create_connection
+    blocked: Any = _blocked  # Any-typed so the swap back below stays signature-clean
+    socket.socket.connect = blocked
+    socket.create_connection = blocked
+    try:
+        yield
+    finally:
+        socket.socket.connect = saved_connect
+        socket.create_connection = saved_create
+
+
 def compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
     """Prompt-size measurements for a fresh session: ``system_prompt``, ``skills_index``,
     ``memory``, ``user_profile``, ``tools``, ``sections`` (the three prompt tiers), and the
     largest-first ``skills_breakdown`` / ``toolsets_breakdown`` ("what should I disable?").
     """
+    with _offline_guard():
+        return _compute_prompt_breakdown(platform)
+
+
+def _compute_prompt_breakdown(platform: str = "cli") -> Dict[str, Any]:
+    """Body of compute_prompt_breakdown, executed under _offline_guard()."""
     from agent.system_prompt import build_system_prompt, build_system_prompt_parts
 
     agent = _build_inspection_agent(platform)

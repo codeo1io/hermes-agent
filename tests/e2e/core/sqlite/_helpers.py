@@ -110,6 +110,10 @@ class Chamber:
         self.reader_seq = 0
         self.reader_name: str | None = None
         self.deleted_hits: list[tuple[str, int, str]] = []
+        self._first_seen: dict[tuple[str, int, str], float] = {}
+        # pid -> monotonic moment teardown began (stop request / signal). Triage key at reap
+        # time: rows first seen before it are evidence, rows first seen after it are noise.
+        self._dying_at: dict[int, float] = {}
         self.fd_samples: dict[str, list[int]] = {}
         self._lock = threading.Lock()
         self._monitor_stop = threading.Event()
@@ -175,8 +179,17 @@ class Chamber:
             tail = [e for e in self.events(name) if e.get("event") == "error"][-1:]
             raise AssertionError(f"{exc}\n{name} stderr:\n{self.stderr(name)}\n{tail}") from None
 
+    def _mark_dying(self, name: str) -> None:
+        """Record when teardown began for this worker's pid (earliest signal wins), so
+        forget_deleted_hits_for_pid can tell whole-life holds from teardown settle rows."""
+        proc = self.procs.get(name)
+        if proc is not None:
+            with self._lock:
+                self._dying_at.setdefault(proc.pid, time.monotonic())
+
     def request_stop(self, name: str) -> None:
         (self.work / f"{name}.stop").touch()
+        self._mark_dying(name)
 
     def reap(self, name: str, *, deadline: float = 60.0) -> int:
         proc = self.procs[name]
@@ -197,10 +210,12 @@ class Chamber:
         return self.reap(name, deadline=deadline)
 
     def sigterm(self, name: str) -> None:
+        self._mark_dying(name)
         self.procs[name].send_signal(signal.SIGTERM)
 
     def kill9(self, name: str) -> None:
         proc = self.procs[name]
+        self._mark_dying(name)
         kill9_and_reap(proc)
         proc._stderr_file.close()  # type: ignore[attr-defined]
 
@@ -241,8 +256,10 @@ class Chamber:
                     except OSError:
                         continue
                     if link.endswith(" (deleted)") and link[: -len(" (deleted)")] in targets:
+                        row = (name, proc.pid, link)
                         with self._lock:
-                            self.deleted_hits.append((name, proc.pid, link))
+                            self.deleted_hits.append(row)
+                            self._first_seen.setdefault(row, time.monotonic())
             self._monitor_stop.wait(0.02)
 
     def deleted_hits_snapshot(self) -> list[tuple[str, int, str]]:
@@ -250,17 +267,28 @@ class Chamber:
             return sorted(set(self.deleted_hits))
 
     def forget_deleted_hits_for_pid(self, pid: int) -> None:
-        """Drop deleted-sidecar hits recorded for *pid*.
+        """Drop the *settle-race* rows recorded for *pid*; keep the leak evidence.
 
         The fd monitor samples every 20 ms; between SIGTERM delivery and full
         process teardown a dying process still lists its (already-deleted)
         sidecar fds in /proc/<pid>/fd, so the monitor can record a hit for a
         process that exited cleanly milliseconds later (observed on loaded
-        4-vCPU CI runners). A reaped pid holds nothing: drop its rows so the
-        settle race cannot poison every later episode of a shared chamber.
+        4-vCPU CI runners). Those rows FIRST APPEAR after teardown began — they
+        are noise. But a worker that held a deleted sidecar for its whole life
+        and was then torn down has real leak evidence in rows first seen while
+        it was simply alive, and forgetting everything for the pid erased
+        exactly that. Triage by the dying mark (_mark_dying): rows first seen
+        before it survive the reap; a pid that was never torn down (clean
+        self-exit) keeps every row.
         """
         with self._lock:
-            self.deleted_hits = [row for row in self.deleted_hits if row[1] != pid]
+            death = self._dying_at.pop(pid, None)
+            if death is None:
+                return
+            self.deleted_hits = [
+                row for row in self.deleted_hits
+                if row[1] != pid or self._first_seen.get(row, 0.0) < death
+            ]
 
     # -- reports -------------------------------------------------------------------------------------
     def events(self, name: str) -> list[dict]:
