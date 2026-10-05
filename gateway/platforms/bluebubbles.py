@@ -9,7 +9,7 @@ import re
 import uuid
 from collections import OrderedDict
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote
@@ -93,7 +93,11 @@ def _closed_ext(mime: str, overrides: Dict[str, str], fallback: str) -> str:
 
 
 def _temp_guid() -> str:
-    return f"temp-{datetime.utcnow().timestamp()}"
+    # ``utcnow()`` is naive and ``.timestamp()`` interprets a naive datetime as
+    # LOCAL time, so the epoch shifted by the host's UTC offset on every
+    # non-UTC host. An aware UTC datetime keeps the temp GUID's epoch
+    # offset-independent.
+    return f"temp-{datetime.now(timezone.utc).timestamp()}"
 
 
 def _ok():
