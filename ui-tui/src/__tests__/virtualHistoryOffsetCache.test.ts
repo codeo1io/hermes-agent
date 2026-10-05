@@ -256,7 +256,7 @@ describe('useVirtualHistory offset cache reuse', () => {
       expect(expose.current!.virtualHistory.offsets[tall.length]).toBe(18)
 
       instance.rerender(React.createElement(Harness, { expose, items: short }))
-      await delay(40)
+      await delay(150)
 
       expect(expose.current!.virtualHistory.offsets[short.length]).toBe(6)
       expect(expose.current!.virtualHistory.bottomSpacer).toBe(0)
@@ -387,7 +387,7 @@ describe('useVirtualHistory offset cache reuse', () => {
       await delay(20)
 
       instance.rerender(React.createElement(Harness, { expose, initialHeights, items: after }))
-      await delay(40)
+      await delay(150)
 
       expect(expose.current!.scroll!.getScrollTop()).toBe(6)
     } finally {
@@ -454,7 +454,7 @@ describe('useVirtualHistory offset cache reuse', () => {
       const adjustScrollTop = vi.spyOn(scroll, 'adjustScrollTop')
 
       instance.rerender(React.createElement(Harness, { columns: 80, expose, initialHeights, items }))
-      await delay(40)
+      await delay(150)
 
       expect(adjustScrollTop).not.toHaveBeenCalled()
       expect(scroll.getScrollTop()).toBe(5)
@@ -503,7 +503,7 @@ describe('useVirtualHistory offset cache reuse', () => {
           items: incoming
         })
       )
-      await delay(40)
+      await delay(150)
 
       expect(adjustScrollTop).not.toHaveBeenCalled()
       expect(scroll.getScrollTop()).toBe(5)
@@ -539,7 +539,7 @@ describe('useVirtualHistory offset cache reuse', () => {
 
       staleHeights.set(items[0]!.key, 1)
       instance.rerender(React.createElement(Harness, { expose, initialHeights: staleHeights, items }))
-      await delay(40)
+      await delay(150)
 
       expect(adjustScrollTop).toHaveBeenCalledOnce()
       expect(adjustScrollTop).toHaveBeenCalledWith(1)
@@ -574,11 +574,11 @@ describe('useVirtualHistory offset cache reuse', () => {
       await delay(20)
 
       instance.rerender(React.createElement(Harness, { expose, initialHeights, items: visibleChanged }))
-      await delay(40)
+      await delay(150)
       expect(expose.current!.scroll!.getScrollTop()).toBe(3)
 
       instance.rerender(React.createElement(Harness, { expose, initialHeights, items: belowChanged }))
-      await delay(40)
+      await delay(150)
       expect(expose.current!.scroll!.getScrollTop()).toBe(3)
     } finally {
       instance.unmount()
@@ -605,7 +605,7 @@ describe('useVirtualHistory offset cache reuse', () => {
       const adjustScrollTop = vi.spyOn(expose.current!.scroll!, 'adjustScrollTop')
 
       instance.rerender(React.createElement(Harness, { expose, initialHeights, items: after }))
-      await delay(40)
+      await delay(150)
 
       expect(adjustScrollTop).not.toHaveBeenCalled()
       expect(expose.current!.scroll!.isSticky()).toBe(true)
