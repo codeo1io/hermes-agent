@@ -207,8 +207,11 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(call) for _ in range(4)]
-        assert provider.entered.wait(3)
+        # Four TestClient boots plus the 401 round trips on a loaded CI runner
+        # can exceed a tight wall bound; these bounds only guard failure
+        # detection — the single-flight contract is the asserts below.
+        assert provider.entered.wait(30)
         provider.release.set()
-        statuses = sorted(f.result(timeout=10).status_code for f in futures)
+        statuses = sorted(f.result(timeout=30).status_code for f in futures)
     assert statuses == [200, 200, 200, 200]
     assert provider.calls == 1
