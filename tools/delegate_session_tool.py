@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 _SESSION_LOCK = threading.RLock()
 _SESSION_CONDITION = threading.Condition(_SESSION_LOCK)
+# Serializes metadata snapshot→write→replace (and prune) ACROSS threads.
+# The observer's pre-transition snapshot used to race the terminal persist:
+# snapshot was built under _SESSION_LOCK but write+replace were not, so a
+# stalled IO in the observer could replace() the durable file AFTER the
+# terminal write and leave a finished session at status="running" — the
+# exact false "process died" signature the durable file exists to prevent.
+# One process-wide IO lock (metadata writes are small and rare) makes the
+# last COMPLETE persist win, and the terminal persist always follows its
+# own status transition, so the file can never regress past a terminal state.
+_PERSIST_IO_LOCK = threading.Lock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
@@ -184,20 +194,21 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        # Build the snapshot under the lock so turn-thread and observer
-        # persists serialize on one consistent view of the record.
-        with _SESSION_LOCK:
-            snapshot = _metadata_snapshot(record)
-        tmp.write_text(
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        tmp.replace(path)
-        _prune_durable_metadata(path.parent)
+        # Snapshot, write and replace must be atomic TOGETHER per record:
+        # building the snapshot under one lock and replacing under none let
+        # the observer's stale pre-transition snapshot overwrite the terminal
+        # persist. tmp names are unique per thread, so O_CREAT stamps 0600 at
+        # birth — no world-readable window between write and a later chmod.
+        with _PERSIST_IO_LOCK:
+            with _SESSION_LOCK:
+                snapshot = _metadata_snapshot(record)
+            fd = os.open(
+                tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(snapshot, ensure_ascii=False, indent=2))
+            tmp.replace(path)
+            _prune_durable_metadata(path.parent)
         # Advance the in-turn refresh watermark (in-memory only) so the
         # observer's write cap stays exact across observer and transition
         # persists. Placed after the replace: only successful writes count.
@@ -807,8 +818,10 @@ def _ledger_record_success(key: tuple[str, str]) -> None:
 
 
 def _ledger_record_failure(key: tuple[str, str], error_class: str) -> None:
-    if error_class not in PROVIDER_FAILURE_CLASSES:
-        return
+    # Forward EVERY terminal class, provider or not: the ledger itself
+    # decides provider classes escalate the breaker while non-provider
+    # classes merely resolve an in-flight half-open probe (a probe turn
+    # that dies agent_stall/transport must not wedge the key closed).
     try:
         get_delegate_health_ledger().record_failure(key, error_class)
     except Exception:
@@ -914,8 +927,9 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         # Both exit paths have left "running" (idle/error, or "closed" keeps
         # its own terminal state), and the transition already notified the
         # condition; notify once more so an observer that missed it wakes now.
-        # Join to keep any last in-flight refresh ordered behind the terminal
-        # persist before this thread reports the turn finished.
+        # The join waits for the observer thread to exit; ordering of any
+        # last in-flight refresh behind the terminal persist is provided by
+        # _PERSIST_IO_LOCK inside _persist_metadata, not by this join.
         with _SESSION_CONDITION:
             _SESSION_CONDITION.notify_all()
         observer.join(timeout=2.0)
@@ -1196,12 +1210,22 @@ def delegate_session(
                             "Could not close failed Pi recovery delegate client",
                             exc_info=True,
                         )
+                    _ledger_record_failure(
+                        (backend_name, model_arg), "client_start_failed"
+                    )
                     return tool_error(
                         "Could not start pi delegate session after fresh-native "
                         f"recovery: {_bounded(recovery_exc, 1000)} "
                         f"(original: {_bounded(exc, 400)})"
                     )
             else:
+                # The gate above may have granted this (backend, model)'s
+                # half-open probe; a client that never started consumed it
+                # without a provider signal, so resolve it inconclusive now
+                # instead of holding the key closed for a full cooldown.
+                _ledger_record_failure(
+                    (backend_name, model_arg), "client_start_failed"
+                )
                 return tool_error(
                     f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
                 )

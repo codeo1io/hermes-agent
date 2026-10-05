@@ -321,6 +321,11 @@ class OpenCodeClient:
         # Question ids already replied/rejected (SSE watcher + poll loop race).
         self._answered_questions: set = set()
         self.is_closed = False
+        # Wall-clock of the last observed in-turn progress (transcript
+        # change). The delegate observer polls this so an outside reader of
+        # the durable metadata can tell a live opencode turn from a wedged
+        # one — without it opencode delegations are liveness-blind.
+        self.last_turn_activity_at: Optional[float] = None
 
     # -- internals ---------------------------------------------------------
 
@@ -560,6 +565,7 @@ class OpenCodeClient:
                 else:
                     stable_since = None
                     last_snapshot = snapshot
+                    self.last_turn_activity_at = time.time()
                 tools_running = any(
                     (part or {}).get("type") == "tool"
                     and (part.get("state") or {}).get("status") == "running"
