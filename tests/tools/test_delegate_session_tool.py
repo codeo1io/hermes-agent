@@ -964,6 +964,16 @@ def test_watcher_write_amplitude_is_capped_mid_turn(monkeypatch):
                 break
             time.sleep(0.01)
         assert baseline is not None
+        # The producer advances the watermark AFTER the replace (only
+        # successful writes count) with no lock spanning file-read and
+        # watermark-update, so poll for it instead of asserting the instant
+        # the file's new content is observed (F3 flake class).
+        watermark_deadline = time.time() + 5.0
+        while time.time() < watermark_deadline:
+            with ds._SESSION_LOCK:
+                if ds._SESSIONS[sid]["last_persisted_activity"] == baseline:
+                    break
+            time.sleep(0.01)
         with ds._SESSION_LOCK:
             # The watermark contract makes the cap exact: the last successful
             # write's snapshot activity is what the next refresh compares to.
@@ -996,6 +1006,159 @@ def test_watcher_write_amplitude_is_capped_mid_turn(monkeypatch):
     finally:
         client.release_turn.set()
     wait_for_status(parent, sid, "idle")
+
+
+def test_inflight_persist_cannot_regress_terminal_durable_state(monkeypatch):
+    """F2: a persist that snapshotted while the session was "running" must
+    never leave the durable file at "running" once the turn's terminal
+    persist has landed. Deterministic interleave: gate the FIRST
+    tmp->metadata replace (an in-flight running write) and run the terminal
+    transition+persist while it is held. With snapshot and write under the
+    same lock the terminal persist cannot slip between them and always
+    lands last; on the pre-fix shape (write+replace outside the lock) the
+    gated running write lands last and the file says "running" forever — a
+    permanently false wedge signal for exactly the offline readers this
+    remediation serves."""
+    from pathlib import Path as _Path
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    record = ds._SESSIONS[sid]
+    with ds._SESSION_CONDITION:
+        ds._transition_status_locked(record, "running")
+
+    sess_path = ds._metadata_path(sid)
+    real_replace = _Path.replace
+    reached_replace = threading.Event()
+    gate = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    def gated_replace(self, target):
+        if not reached_replace.is_set() and target == sess_path:
+            reached_replace.set()
+            assert gate.wait(timeout=10.0), "in-flight replace gate never opened"
+        return real_replace(self, target)
+
+    monkeypatch.setattr(_Path, "replace", gated_replace)
+
+    def inflight_write():
+        try:
+            ds._persist_metadata(record)
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            thread_errors.append(exc)
+
+    inflight = threading.Thread(
+        target=inflight_write, name="late-running-persist", daemon=True
+    )
+    inflight.start()
+    terminal = None
+    try:
+        assert reached_replace.wait(timeout=5.0), "persist never reached its replace"
+
+        def terminal_write():
+            try:
+                with ds._SESSION_CONDITION:
+                    ds._transition_status_locked(record, "idle")
+                ds._persist_metadata(record)
+            except BaseException as exc:  # noqa: BLE001 - surfaced below
+                thread_errors.append(exc)
+
+        terminal = threading.Thread(
+            target=terminal_write, name="terminal-persist", daemon=True
+        )
+        terminal.start()
+        # Generous window for the terminal persist to (wrongly) interleave
+        # between the in-flight snapshot and its replace on the pre-fix
+        # shape; under the lock it can only still be waiting here.
+        terminal.join(timeout=2.0)
+    finally:
+        gate.set()
+        inflight.join(timeout=10.0)
+    terminal.join(timeout=10.0)
+    assert not inflight.is_alive() and not terminal.is_alive()
+    assert thread_errors == []
+
+    final = json.loads(sess_path.read_text(encoding="utf-8"))
+    assert final["status"] == "idle"
+
+
+def test_turn_threads_keep_profile_scope(monkeypatch, tmp_path):
+    """F1 regression (A→B→A): under a multiplex gateway the tool executes
+    with HERMES_HOME=B while the served profile's override points at home A.
+    The turn and observer threads must inherit the spawner's contextvars so
+    every durable persist of that session lands in A's store. Red on the
+    bare-thread base: the threads drop the override, write B (the launch
+    home), and A's offline readers keep the creation snapshot forever — the
+    wedge remediation silently no-ops in the multiplex topology."""
+    import hashlib
+    from pathlib import Path
+
+    import hermes_constants
+
+    home_a = tmp_path / "homeA"
+    home_b = tmp_path / "homeB"
+    home_a.mkdir()
+    home_b.mkdir()
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+
+    def _production_store_root() -> Path:
+        # The autouse fixture pins ds._session_store_root to a scratch dir,
+        # but this test's subject IS home resolution: run the production
+        # body (override ContextVar first, then HERMES_HOME) against two
+        # real homes.
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home()) / "cache" / "delegate-sessions"
+
+    monkeypatch.setattr(ds, "_session_store_root", _production_store_root)
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    token = hermes_constants.set_hermes_home_override(home_a)
+    try:
+        parent = Parent()
+        sid, client = _blocked_running_session(parent)
+        digest = hashlib.sha256(sid.encode("utf-8")).hexdigest()
+        path_a = home_a / "cache" / "delegate-sessions" / f"{digest}.json"
+        try:
+            # Step the activity signal past the refresh window: the fake only
+            # stamps it at turn entry, and the watermark already carries the
+            # create-time value, so without a step the capped observer would
+            # (correctly) never write.
+            first = client.last_turn_activity_at
+            client.last_turn_activity_at = first + 1.0
+            # Observer thread: mid-turn running evidence must land in A.
+            running_meta = None
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                if path_a.exists():
+                    meta = json.loads(path_a.read_text())
+                    if meta.get("status") == "running":
+                        running_meta = meta
+                        break
+                time.sleep(0.01)
+            assert running_meta is not None, "observer persist never reached home A"
+            assert running_meta.get("last_turn_activity_at", 0.0) >= first + 1.0
+        finally:
+            client.release_turn.set()
+        wait_for_status(parent, sid, "idle")
+        # Turn thread: the terminal persist must also land in A.
+        terminal = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            if path_a.exists():
+                meta = json.loads(path_a.read_text())
+                if meta.get("status") == "idle" and meta.get("turn_count") == 1:
+                    terminal = meta
+                    break
+            time.sleep(0.01)
+        assert terminal is not None, "terminal persist never reached home A"
+        # And the launch home B never received any file for this session.
+        store_b = home_b / "cache" / "delegate-sessions"
+        leaked = sorted(p.name for p in store_b.iterdir()) if store_b.exists() else []
+        assert leaked == [], f"persists leaked to the launch home: {leaked}"
+    finally:
+        hermes_constants.reset_hermes_home_override(token)
 
 
 def test_watcher_stops_writing_after_turn_ends(monkeypatch):
@@ -1642,13 +1805,18 @@ def test_dispatch_turn_uses_non_daemon_thread(monkeypatch):
     captured = {}
 
     class FakeThread:
-        def __init__(self, *, target, args, name, daemon):
+        def __init__(self, target=None, *, args, name, daemon, kwargs=None):
             captured.update(target=target, args=args, name=name, daemon=daemon)
 
         def start(self):
             captured["started"] = True
 
-    monkeypatch.setattr(ds.threading, "Thread", FakeThread)
+    import agent.memory_provider as memory_provider
+
+    # The turn thread is spawned via spawn_context_thread (scope-carrying;
+    # the two-home test above pins the context contract end-to-end) — patch
+    # the seam that now constructs it and keep pinning non-daemon + start.
+    monkeypatch.setattr(memory_provider, "spawn_context_thread", FakeThread)
     record = {"session_id": "session-1234", "status": "idle"}
 
     ds._dispatch_turn(record, "work", 30.0)
