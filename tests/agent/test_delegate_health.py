@@ -157,6 +157,20 @@ def test_lost_probe_regrants_after_one_extra_cooldown():
     assert isinstance(ledger.check(KEY), CircuitOpen)
 
 
+def test_dormant_circuit_still_grants_exactly_one_probe():
+    """A circuit left dormant far past twice its cooldown (nobody
+    dispatched for hours) must hand out exactly ONE probe: the probe
+    window anchors at the grant. Without the anchor, the stale
+    ``opened_at`` made the very next check count the just-granted probe
+    as already lost and hand a SECOND dispatch the same window
+    back-to-back."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S * 7)  # dormant far past every threshold
+    assert ledger.check(KEY) is None  # the single probe, granted
+    assert isinstance(ledger.check(KEY), CircuitOpen)  # no second probe
+
+
 def test_failed_probe_doubles_cooldown_up_to_cap():
     ledger, clock = make_ledger()
     open_ledger(ledger, clock)
@@ -200,6 +214,34 @@ def test_reset_delegate_health_ledger_clears_global_state():
     fresh = reset_delegate_health_ledger()
     assert fresh is get_delegate_health_ledger()
     assert fresh.check(KEY) is None
+
+
+def test_ledger_is_cached_per_hermes_home(tmp_path, monkeypatch):
+    """Multiplex profile isolation: the cached ledger is keyed by the
+    EFFECTIVE Hermes home, so a circuit opened under profile A never
+    gates profile B's dispatches and never persists into B's cache file.
+    A single process-wide singleton was the unbound-module-global
+    cross-profile state leak (review finding 4)."""
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    reset_delegate_health_ledger()
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    ledger_a = get_delegate_health_ledger()
+    for _ in range(FAILURE_THRESHOLD):
+        ledger_a.record_failure(KEY, "rate_limit")
+    assert isinstance(ledger_a.check(KEY), CircuitOpen)
+    state_a = home_a / "cache" / "delegate-provider-health.json"
+    assert state_a.exists()
+
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    ledger_b = get_delegate_health_ledger()
+    assert ledger_b is not ledger_a  # per-home cache, not one singleton
+    assert ledger_b.check(KEY) is None  # A's open circuit does not gate B
+    ledger_b.record_failure(OTHER_KEY, "rate_limit")
+    state_b = home_b / "cache" / "delegate-provider-health.json"
+    assert state_b.exists()
+    # And B's write did not land in A's file (no state bleed).
+    assert "claude-opus-4" not in state_a.read_text(encoding="utf-8")
 
 
 # --- durable state across restarts (the emergency-restart shape) ----------
