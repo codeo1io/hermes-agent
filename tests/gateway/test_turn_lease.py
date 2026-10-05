@@ -214,7 +214,13 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
-        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=1)
+        # Anti-hang guard, not the promptness oracle: the rejection path is
+        # pinned by the mocks (no transcript load, no _run_agent), and the
+        # lease-vs-agent clock split is the lease budget (0.02s) against the
+        # agent inactivity timeout (5s). The wall bound only needs to exceed
+        # that clock with margin for a starved CI runner's prelude (the
+        # ``to_thread`` lobby probe once cancelled the task mid-rejection).
+        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=30)
     finally:
         assert runner._turn_leases.release(holder) is True
 
