@@ -1,0 +1,103 @@
+name: debug buzz hang v2 (8591a599)
+# Lane-exact replication of the "Run tests (8)" shard on the exact validated
+# tree (PR #358 head 68057f7d4e31), with a py-spy watchdog that dumps the
+# stack of a stalled tests/gateway/test_buzz_websocket.py subprocess.
+# Deviations from conductor-tests.yml, all disclosed:
+#   - HERMES_TEST_FILE_RETRIES=0 (one 600s stall is enough evidence; the
+#     dump lands long before the cap)
+#   - no actions/cache restores (fresh runner, same as a cache-miss lane job)
+#   - py-spy installed into the venv for diagnostics
+# Delete this branch after use.
+on:
+  push:
+    branches: [conductor/debug-buzz-8591a599]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  shard8:
+    name: Run tests (8) replica
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Host report
+        run: |
+          nproc; uptime; free -m | head -2; df -h / | tail -1
+
+      - name: Install ripgrep (prebuilt binary)
+        run: |
+          set -euo pipefail
+          RG_VERSION=15.1.0
+          RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
+          RG_TARBALL=ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz
+          curl -sSfL --retry 3 --retry-delay 5 -o "$RG_TARBALL" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_TARBALL}"
+          echo "${RG_SHA256}  ${RG_TARBALL}" | sha256sum -c -
+          tar -xzf "$RG_TARBALL"
+          sudo mv "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
+          rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+          rg --version
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: false
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra hindsight --extra parallel-web
+
+      - name: Install py-spy (diagnostic only)
+        run: uv pip install py-spy
+
+      - name: Env report
+        run: |
+          uv --version
+          .venv/bin/python -c "import sys, sqlite3, pytest, pytest_asyncio, websockets; print(sys.version); print('sqlite', sqlite3.sqlite_version); print('pytest', pytest.__version__, 'asyncio', pytest_asyncio.__version__, 'websockets', websockets.__version__)"
+
+      - name: Run tests (8/8) with buzz watchdog
+        run: |
+          source .venv/bin/activate
+          export TZ=UTC LANG=C.UTF-8
+          (
+            DUMPS=0
+            LAST_PID=""
+            while [ $DUMPS -lt 12 ]; do
+              P=$(pgrep -f 'pytest tests/gateway/test_buzz_websocket.py' | head -1 || true)
+              if [ -n "$P" ]; then
+                E=$(ps -o etimes= -p $P | tr -d ' ')
+                if [ "$E" -gt 45 ]; then
+                  echo "=== WATCHDOG: buzz subprocess pid=$P age=${E}s (dump $((DUMPS+1))/12) $(date -u +%H:%M:%S) ==="
+                  ps -o pid,ppid,stat,etimes,wchan:32,cmd -p $P
+                  grep -E 'State|Threads|voluntary' /proc/$P/status || true
+                  echo "open fds: $(ls /proc/$P/fd 2>/dev/null | wc -l)"
+                  .venv/bin/py-spy dump --pid $P --nonblocking 2>&1 || true
+                  DUMPS=$((DUMPS+1))
+                  LAST_PID=$P
+                  sleep 75
+                else
+                  sleep 10
+                fi
+              else
+                sleep 5
+              fi
+            done
+            echo "=== WATCHDOG: finished ($DUMPS dumps) ==="
+          ) &
+          WD=$!
+          export HERMES_TEST_WORKERS=12
+          export HERMES_TEST_FILE_RETRIES=0
+          export OPENROUTER_API_KEY=""
+          export OPENAI_API_KEY=""
+          export NOUS_API_KEY=""
+          timeout 2100 scripts/run_tests.sh --slice 8/8 --file-timeout 600
+          RC=$?
+          kill $WD 2>/dev/null || true
+          echo "RUN_TESTS_RC=$RC"
