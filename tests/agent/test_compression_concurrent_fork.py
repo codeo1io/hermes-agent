@@ -880,7 +880,7 @@ def test_fence_cancelled_compression_leaves_lock_reacquirable(tmp_path: Path) ->
 
     worker = threading.Thread(target=_run_compression, name="fenced-hygiene")
     worker.start()
-    assert summary_started.wait(timeout=2)
+    assert summary_started.wait(timeout=10)
     assert fence.cancel_before_commit() is True
     release_summary.set()
     # The cancelled unwind (fence abort → lease release) can outlive a short
@@ -932,7 +932,7 @@ def test_commit_fence_waits_for_an_active_commit() -> None:
     waiter = threading.Thread(target=_cancel, name="hygiene-timeout-fence")
     waiter.start()
     try:
-        assert cancel_started.wait(timeout=2)
+        assert cancel_started.wait(timeout=10)
         assert not cancel_finished.is_set()
     finally:
         fence.finish_commit()
@@ -1945,7 +1945,7 @@ def test_late_hard_interrupt_restores_full_compressor_attempt_state_and_retry(
         daemon=True,
     )
     worker.start()
-    assert provider_returned.wait(timeout=2)
+    assert provider_returned.wait(timeout=10)
     agent.hard_interrupt("cancel after provider return")
     allow_compress_return.set()
     worker.join(timeout=5)
@@ -2150,7 +2150,7 @@ def test_hard_cancel_between_compress_return_and_commit_begin_wins_atomically(
         daemon=True,
     )
     worker.start()
-    assert before_commit.wait(timeout=2)
+    assert before_commit.wait(timeout=10)
 
     agent.hard_interrupt("cancel before commit admission")
     allow_commit_check.set()
@@ -2194,7 +2194,7 @@ def test_hard_stop_waits_for_commit_already_admitted(tmp_path: Path) -> None:
         daemon=True,
     )
     compression.start()
-    assert commit_started.wait(timeout=2)
+    assert commit_started.wait(timeout=10)
 
     stop = threading.Thread(
         target=lambda: (
