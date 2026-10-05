@@ -356,6 +356,102 @@ def test_stall_terminates_pi_child_that_ignores_abort(tmp_path):
         client.close()
 
 
+# ------------------------------ stall-time liveness triage (A4)
+# A typed stall says WHAT failed (error_class); the triage dict says what a
+# probe FOUND at stall time. A supervisor must distinguish a process wedge
+# (alive, RPC dead), a responsive-but-unproductive turn (alive, RPC answers),
+# and a dead child — by fields, never by parsing prose. Regression for the
+# A4 continuity loop where every stall was prose and every layer re-derived
+# its own story from it.
+
+
+def _triage_for(tmp_path, name, script_body):
+    """Build a fake pi from `script_body`, stall a turn, return the
+    liveness_triage dict carried by the typed stall."""
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + script_body
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://triage-test",
+        persistent_session=True,
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        return excinfo.value.liveness_triage
+    finally:
+        client.close()
+
+
+def test_stall_triage_wedge_process_alive_rpc_dead(tmp_path):
+    """Child acked the prompt, then stopped reading stdin entirely: the
+    process is alive but wedged — the probe times out, not the process."""
+    triage = _triage_for(
+        tmp_path,
+        "fake-pi-wedge",
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    if msg.get('type') == 'prompt':\n"
+        "        send({'type':'response','id':msg['id'],'success':True})\n"
+        "        time.sleep(30)\n",
+    )
+    assert triage["process_alive"] is True
+    assert triage["rpc_responsive"] is None  # probe timed out, not answered
+    assert triage["probe_latency_ms"] is None
+    assert triage["message_count"] == 0  # nothing streamed since the ack
+    assert triage["last_event_age_s"] >= 0.08  # at least the stall window
+    assert isinstance(triage["probed_at"], float)
+
+
+def test_stall_triage_responsive_but_unproductive(tmp_path):
+    """Child acks the prompt and keeps answering control RPCs while never
+    making turn progress: alive AND responsive — an unproductive turn, not a
+    wedge. The probe must land before the rider kills the child, else this
+    case is indistinguishable from the wedge by construction."""
+    triage = _triage_for(
+        tmp_path,
+        "fake-pi-unproductive",
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    typ = msg.get('type')\n"
+        "    if typ == 'prompt':\n"
+        "        send({'type':'response','id':msg['id'],'success':True})\n"
+        "    elif typ == 'get_state':\n"
+        "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n",
+    )
+    assert triage["process_alive"] is True
+    assert triage["rpc_responsive"] is True
+    assert triage["probe_latency_ms"] >= 0.0
+    assert triage["message_count"] == 0  # RPC answers are not turn progress
+
+
+def test_stall_triage_dead_process_reports_dead_by_field(tmp_path):
+    """Child answers the abort by exiting without settling: the triage must
+    report the dead process as a FIELD (process_alive False, probe skipped)
+    — never by rewording the frozen stall message."""
+    triage = _triage_for(
+        tmp_path,
+        "fake-pi-abort-exit",
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    typ = msg.get('type')\n"
+        "    if typ == 'prompt':\n"
+        "        send({'type':'response','id':msg['id'],'success':True})\n"
+        "    elif typ == 'abort':\n"
+        "        sys.exit(0)  # answer the abort by dying, without settling\n",
+    )
+    assert triage["process_alive"] is False
+    assert triage["rpc_responsive"] is None  # no probe on a dead process
+    assert triage["probe_latency_ms"] is None
+
+
 def test_terminated_stall_child_respawns_same_session_id(tmp_path):
     """After the rider kills the child, the next turn respawns the SAME
     native session id on a fresh process (transparent recovery, no lost

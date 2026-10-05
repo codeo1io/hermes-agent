@@ -139,6 +139,26 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "last_turn_activity_at": float(activity) if activity else 0.0,
         "consecutive_failures": int(record.get("consecutive_failures") or 0),
         "pi_model": str(record.get("model") or ""),
+        # v4 turn-liveness evidence: when the last dispatched turn started,
+        # and what a stall-time liveness triage found if one ran. Strictly
+        # additive — older v4 files simply lack them.
+        "turn_started_at": record.get("turn_started_at"),
+        "last_turn_triage": record.get("last_turn_triage") or None,
+        # v4 recovery lineage: which native session this handle was
+        # ORIGINALLY bound to, when a -recovery- mint replaced it. The root
+        # is set once; reason/time name the latest mint.
+        "recovery_of_native_id": record.get("recovery_of_native_id") or None,
+        "recovery_reason": _bounded(record.get("recovery_reason"), 400) or None,
+        "recovered_at": record.get("recovered_at") or None,
+        # Durable forward-progression evidence (additive, version-compatible):
+        # how far the session got and what it last said, so a replacement
+        # supervisor restart-continues instead of guessing. Stamped only by
+        # _bank_durable_progress on terminal turn outcomes.
+        "turns_completed": int(record.get("turns_completed") or 0),
+        "last_line": _bounded(record.get("last_line"), 400) or None,
+        "last_progress_at": record.get("last_progress_at"),
+        "last_turn_duration_s": record.get("last_turn_duration_s"),
+        "last_turn_outcome": record.get("last_turn_outcome") or None,
     }
 
 
@@ -318,6 +338,53 @@ def _bounded_edges(value: Any, maximum: int = _MAX_TEXT) -> str:
     head = available // 3
     tail = available - head
     return text[:head] + marker + text[-tail:]
+
+
+def _last_line_of(text: Any) -> Optional[str]:
+    """Last non-empty line of a turn's final text, or None."""
+    if not isinstance(text, str):
+        return None
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _bank_durable_progress(
+    record: Dict[str, Any], outcome: str, result: Optional[Dict[str, Any]] = None
+) -> None:
+    """Stamp durable forward-progression evidence for one terminal turn.
+
+    Called ONLY from ``_run_turn``'s terminal blocks (anti-whitewash
+    invariant): ``last_progress_at`` moves exactly when durable content
+    changes — never on dispatch, status transitions, persistence re-writes,
+    or reads. A failed turn is durable evidence of activity, so the stamp
+    advances with an ``error`` outcome without touching
+    ``turns_completed``/``last_line``. Caller must hold ``_SESSION_CONDITION``.
+    """
+    record["last_turn_outcome"] = outcome
+    record["last_progress_at"] = time.time()
+    if result is None:
+        return
+    record["turns_completed"] = int(record.get("turns_completed") or 0) + 1
+    duration = result.get("duration_s") if isinstance(result, dict) else None
+    record["last_turn_duration_s"] = (
+        float(duration) if isinstance(duration, (int, float)) else None
+    )
+    record["last_line"] = _bounded(_last_line_of(result.get("text")), 400) or None
+
+
+def _restore_durable_progress(record: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    """Carry persisted progression evidence into a reopened session record.
+
+    Without this, resume would rewrite the durable file with zeroed counters
+    and erase exactly the restart-survival evidence this module guarantees.
+    """
+    record["turns_completed"] = int(meta.get("turns_completed") or 0)
+    for key in ("last_line", "last_progress_at", "last_turn_duration_s"):
+        record[key] = meta.get(key)
+    record["last_turn_outcome"] = meta.get("last_turn_outcome") or None
 
 
 def _message_text(value: Any) -> str:
@@ -580,6 +647,28 @@ def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
 def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
     client = record.get("client")
     last_activity_at = getattr(client, "last_turn_activity_at", None)
+    # U9: turn-liveness truth. `status` alone can lie — a turn thread that
+    # died abnormally leaves it stuck at "running" — and a quiet-but-alive
+    # turn is indistinguishable from a streaming one without a time anchor.
+    # Report both so a supervisor can tell "alive but quiet" from "frozen".
+    thread = record.get("thread")
+    turn_running = bool(record.get("status") == "running") and (
+        thread is None or thread.is_alive()
+    )
+    # `updated_at` moves on every state transition and would mask a stall, so
+    # inactivity anchors only on real activity sources: the client's streamed
+    # activity, the current turn's start, or session creation. Raw float —
+    # callers diff consecutive reads to see growth.
+    now = time.time()
+    anchors = [
+        value
+        for value in (
+            last_activity_at,
+            record.get("turn_started_at"),
+            record.get("created_at"),
+        )
+        if isinstance(value, (int, float))
+    ]
     out = {
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
@@ -590,6 +679,13 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # Durable forward-progression evidence (see _bank_durable_progress for
+        # the stamping discipline).
+        "turns_completed": int(record.get("turns_completed") or 0),
+        "last_line": record.get("last_line"),
+        "last_progress_at": record.get("last_progress_at"),
+        "last_turn_duration_s": record.get("last_turn_duration_s"),
+        "last_turn_outcome": record.get("last_turn_outcome") or None,
         "last_activity_at": (
             float(last_activity_at)
             if isinstance(last_activity_at, (int, float))
@@ -606,6 +702,17 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
             else None
         ),
         "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "turn_running": turn_running,
+        "turn_started_at": record.get("turn_started_at"),
+        "inactive_for_s": max(0.0, now - max(anchors)) if anchors else None,
+        # Surfaced when a stall-time liveness triage ran (banked on the
+        # stall path); None until then.
+        "last_turn_triage": record.get("last_turn_triage") or None,
+        # Recovery lineage: present only when a -recovery- mint replaced the
+        # bound native session at bootstrap.
+        "recovery_of_native_id": record.get("recovery_of_native_id") or None,
+        "recovery_reason": record.get("recovery_reason") or None,
+        "recovered_at": record.get("recovered_at") or None,
     }
     if include_result and record.get("last_result"):
         result = record["last_result"]
@@ -657,6 +764,13 @@ def _durable_summary(
         "pi_session_id": native,  # kept for model-callers
         "status": "offline",
         "cwd": meta.get("cwd"),
+        # Durable forward-progression evidence rides the metadata file, so it
+        # is safe to report offline (no live client needed).
+        "turns_completed": int(meta.get("turns_completed") or 0),
+        "last_line": meta.get("last_line"),
+        "last_progress_at": meta.get("last_progress_at"),
+        "last_turn_duration_s": meta.get("last_turn_duration_s"),
+        "last_turn_outcome": meta.get("last_turn_outcome") or None,
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
         "pending_question": None,
@@ -668,6 +782,16 @@ def _durable_summary(
         # Symmetric with the durable snapshot: name the provider the
         # failure streak was recorded under.
         "pi_model": str(meta.get("pi_model") or ""),
+        # U9: persisted turn-liveness evidence only. turn_running and
+        # inactive_for_s are live-only — with no client or thread to ask,
+        # deriving them offline would fabricate liveness.
+        "turn_started_at": meta.get("turn_started_at"),
+        "last_turn_triage": meta.get("last_turn_triage") or None,
+        # Recovery lineage survives restarts; the chain root is immutable
+        # across incarnations.
+        "recovery_of_native_id": meta.get("recovery_of_native_id") or None,
+        "recovery_reason": meta.get("recovery_reason") or None,
+        "recovered_at": meta.get("recovered_at") or None,
     }
     if note:
         out["note"] = note
@@ -872,6 +996,9 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         state = result.get("state") if isinstance(result, dict) else {}
         with _SESSION_CONDITION:
             record["last_result"] = result
+            # Bank durable forward-progression evidence BEFORE persisting so
+            # the terminal metadata file carries it.
+            _bank_durable_progress(record, "completed", result)
             record["native_session_id"] = (
                 (state.get("sessionId") if isinstance(state, dict) else None)
                 or record.get("native_session_id")
@@ -894,12 +1021,24 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         error_class, retry_after = _classify_turn_exception(exc)
         with _SESSION_CONDITION:
+            # Bank progression evidence (outcome=error) BEFORE persisting:
+            # the metadata file is the evidence the replacement supervisor
+            # will act on. A failed turn is durable activity too.
+            _bank_durable_progress(record, "error")
             record["error"] = _bounded(exc, 2000)
             record["error_class"] = error_class
             record["retry_after"] = retry_after
             record["consecutive_failures"] = (
                 int(record.get("consecutive_failures") or 0) + 1
             )
+            # Stall-time liveness triage rides the typed exception as a
+            # dict; bank it verbatim. A failure without one (non-stall
+            # errors) keeps any previously banked evidence — the most
+            # recent probe remains the best answer to "was the child
+            # actually wedged?".
+            triage = getattr(exc, "liveness_triage", None)
+            if triage:
+                record["last_turn_triage"] = triage
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
@@ -934,6 +1073,10 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
     )
     with _SESSION_CONDITION:
         record["thread"] = thread
+        # U9: anchor when THIS turn began. Set under the lock together with
+        # the status flip so a racing status read never sees running without
+        # the anchor.
+        record["turn_started_at"] = time.time()
         _transition_status_locked(record, "running")
     thread.start()
 
@@ -1070,6 +1213,21 @@ def delegate_session(
                         # no-op: silently dropping the goal made every later
                         # phase of a multi-turn delegation appear to succeed
                         # while no work ran (conductor v5/v6 cycles).
+                        # U7 running-guard: refuse a SECOND concurrent turn.
+                        # send/steer already guard this seam; this branch
+                        # didn't, so a supervisor retry racing its own
+                        # in-flight turn stacked two run_session_prompt calls
+                        # on one client — the concurrent-dispatch wedge of the
+                        # A4 continuity storms. Guard before the provider
+                        # gate: session state is the immediate truth, and a
+                        # busy session cannot take a new turn even on a
+                        # healthy provider.
+                        if existing.get("status") == "running":
+                            return tool_error(
+                                "Delegate session is currently running "
+                                "(error_class=session_busy). Use action='steer' "
+                                "to redirect it, or wait for idle."
+                            )
                         gate_error = _circuit_open_error(
                             str(existing.get("backend") or "pi"),
                             str(existing.get("model") or ""),
@@ -1154,6 +1312,14 @@ def delegate_session(
             return created
 
         requested_native = native_hint or handle
+        # Recovery lineage: carried from the prior incarnation when it
+        # exists; rewritten below only when THIS bootstrap mints a fresh
+        # -recovery- native session. The chain ROOT (the first native id
+        # this handle ever bound) is immutable across re-mints; reason and
+        # timestamp always name the LATEST mint.
+        recovery_of_native_id = (saved or {}).get("recovery_of_native_id") or None
+        recovery_reason = (saved or {}).get("recovery_reason") or None
+        recovered_at = (saved or {}).get("recovered_at") or None
         client = _make_client(requested_native)
         try:
             state = client.start(timeout=min(30.0, effective_timeout))
@@ -1168,39 +1334,76 @@ def delegate_session(
                 )
 
             # A durable Pi handle may outlive a native Pi RPC session that
-            # aborted mid-turn. Reopening the same native id can then wedge
-            # forever at the initial get_state handshake. Keep the Conductor
+            # aborted mid-turn. Reopening the same native id can then fail or
+            # wedge at the initial get_state handshake. Keep the Conductor
             # binding/backend stable, but mint a fresh *native Pi* session and
             # continue from the durable work-order/worktree. This is Pi
             # recovery, never backend failover.
             if backend_name == "pi" and native_hint:
-                recovery_native = (
-                    f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
-                )
-                logger.warning(
-                    "Pi native session %s failed bootstrap; retrying durable "
-                    "delegate handle %s with fresh native session %s: %s",
-                    native_hint,
-                    handle,
-                    recovery_native,
-                    _bounded(exc, 400),
-                )
-                client = _make_client(recovery_native)
+                # Recovery-lineage fidelity: retry the SAME bound native id
+                # once — a fresh client on that id, still bounded by the
+                # same 30s start handshake — before minting -recovery-. A
+                # single failed reopen is usually a dead child process, not
+                # a lost session; minting on first failure silently
+                # substituted the delegated identity every time, and that
+                # unreported identity churn is what the A4 continuity loop
+                # fed on. Substitution now happens only after the bound id
+                # is confirmed unopenable, and is REPORTED via lineage.
+                retry_client = _make_client(native_hint)
                 try:
-                    state = client.start(timeout=min(30.0, effective_timeout))
-                except Exception as recovery_exc:  # noqa: BLE001
+                    state = retry_client.start(
+                        timeout=min(30.0, effective_timeout)
+                    )
+                    client = retry_client
+                    logger.warning(
+                        "Pi native session %s bootstrap failed once; "
+                        "same-id retry succeeded for delegate handle %s: %s",
+                        native_hint,
+                        handle,
+                        _bounded(exc, 400),
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
                     try:
-                        client.close()
+                        retry_client.close()
                     except Exception:
                         logger.debug(
-                            "Could not close failed Pi recovery delegate client",
+                            "Could not close failed Pi same-id retry client",
                             exc_info=True,
                         )
-                    return tool_error(
-                        "Could not start pi delegate session after fresh-native "
-                        f"recovery: {_bounded(recovery_exc, 1000)} "
-                        f"(original: {_bounded(exc, 400)})"
+                    recovery_native = (
+                        f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
                     )
+                    logger.warning(
+                        "Pi native session %s failed bootstrap and same-id "
+                        "retry; retrying durable delegate handle %s with "
+                        "fresh native session %s: %s",
+                        native_hint,
+                        handle,
+                        recovery_native,
+                        _bounded(retry_exc, 400),
+                    )
+                    client = _make_client(recovery_native)
+                    try:
+                        state = client.start(timeout=min(30.0, effective_timeout))
+                    except Exception as recovery_exc:  # noqa: BLE001
+                        try:
+                            client.close()
+                        except Exception:
+                            logger.debug(
+                                "Could not close failed Pi recovery delegate client",
+                                exc_info=True,
+                            )
+                        return tool_error(
+                            "Could not start pi delegate session after fresh-native "
+                            f"recovery: {_bounded(recovery_exc, 1000)} "
+                            f"(same-id retry: {_bounded(retry_exc, 400)}; "
+                            f"original: {_bounded(exc, 400)})"
+                        )
+                    # Lineage lands only once the minted session actually
+                    # opened; it describes why substitution happened.
+                    recovery_of_native_id = recovery_of_native_id or native_hint
+                    recovery_reason = _bounded(retry_exc, 400)
+                    recovered_at = time.time()
             else:
                 return tool_error(
                     f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
@@ -1227,8 +1430,19 @@ def delegate_session(
             "error_class": str((saved or {}).get("error_class") or ""),
             "retry_after": (saved or {}).get("retry_after"),
             "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
+            # U9: a fresh incarnation has no live turn, so turn_started_at
+            # resets; a banked stall triage from the prior incarnation is
+            # evidence the resumed supervisor should see, like the streak.
+            "turn_started_at": None,
+            "last_turn_triage": (saved or {}).get("last_turn_triage") or None,
+            # Recovery lineage threaded from the bootstrap above (chain root
+            # from the prior incarnation, or set by this incarnation's mint).
+            "recovery_of_native_id": recovery_of_native_id,
+            "recovery_reason": recovery_reason,
+            "recovered_at": recovered_at,
             "thread": None,
         }
+        _restore_durable_progress(record, saved or {})
         with _SESSION_LOCK:
             _SESSIONS[handle] = record
         _persist_metadata(record)

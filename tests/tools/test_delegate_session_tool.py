@@ -365,10 +365,17 @@ def test_pi_bootstrap_failure_recovers_with_fresh_native_session(monkeypatch):
     assert resumed["session_id"] == sid
     assert resumed["native_session_id"] != sid
     assert resumed["native_session_id"].startswith(f"{sid}-recovery-")
-    assert len(BootstrapFailingPi.instances) == 2
+    # One same-id retry before the mint (recovery-lineage fidelity): the
+    # bound id is opened twice, then a fresh -recovery- native session.
+    assert len(BootstrapFailingPi.instances) == 3
     assert BootstrapFailingPi.instances[0].session_id == sid
-    assert BootstrapFailingPi.instances[1].session_id == resumed["native_session_id"]
+    assert BootstrapFailingPi.instances[1].session_id == sid
+    assert BootstrapFailingPi.instances[2].session_id == resumed["native_session_id"]
     assert ds._load_metadata(sid)["native_session_id"] == resumed["native_session_id"]
+    # The substitution is REPORTED, not silent.
+    assert resumed["recovery_of_native_id"] == sid
+    assert resumed["recovery_reason"]
+    assert isinstance(resumed["recovered_at"], float)
 
 
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
