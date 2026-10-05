@@ -54,6 +54,10 @@ EP_GET_BOT_QR, EP_GET_QR_STATUS = "ilink/bot/get_bot_qrcode", "ilink/bot/get_qrc
 LONG_POLL_TIMEOUT_MS, API_TIMEOUT_MS, CONFIG_TIMEOUT_MS, QR_TIMEOUT_MS = 35_000, 15_000, 10_000, 35_000
 MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_SECONDS, BACKOFF_DELAY_SECONDS = 3, 2, 30
 SESSION_EXPIRED_ERRCODE, RATE_LIMIT_ERRCODE = -14, -2  # -2: iLink frequency limit — backoff and retry
+# Session-expiry policy: one pause cycle tolerates a transient expiry; a streak past that escalates to a
+# retryable fatal error (re-pair via QR login — connect() re-reads the persisted account and picks it up).
+SESSION_EXPIRY_PAUSE_SECONDS = 600
+SESSION_EXPIRY_FATAL_AFTER = 2
 MESSAGE_DEDUP_TTL_SECONDS = 300
 MEDIA_IMAGE, MEDIA_VIDEO, MEDIA_FILE, MEDIA_VOICE = 1, 2, 3, 4  # getuploadurl media_type
 ITEM_TEXT, ITEM_IMAGE, ITEM_VOICE, ITEM_FILE, ITEM_VIDEO = 1, 2, 3, 4, 5  # item_list entry types
@@ -175,6 +179,14 @@ def load_weixin_account(hermes_home: str, account_id: str) -> Optional[Dict[str,
     return _read_json(_account_dir(hermes_home) / f"{account_id}.json")
 
 
+def _ensure_private_mode(path: Path) -> None:
+    """Context-token files carry live pairing secrets: repair a group/world-readable mode left by an older build."""
+    with contextlib.suppress(OSError):
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            path.chmod(mode & 0o700)
+
+
 class ContextTokenStore:
     """Disk-backed ``context_token`` cache keyed by account + peer."""
 
@@ -194,6 +206,7 @@ class ContextTokenStore:
         path = self._root / f"{account_id}.context-tokens.json"
         if not path.exists():
             return
+        _ensure_private_mode(path)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -218,7 +231,8 @@ class ContextTokenStore:
 
     def _persist(self, account_id: str, payload: Dict[str, str]) -> None:
         try:
-            atomic_json_write(self._root / f"{account_id}.context-tokens.json", payload)
+            # Tokens authorize bot sends as surely as the QR-paired account file: owner-only on disk.
+            atomic_json_write(self._root / f"{account_id}.context-tokens.json", payload, mode=0o600)
         except Exception as exc:
             logger.warning("weixin: failed to persist context tokens for %s: %s", _safe_id(account_id), exc)
 
@@ -231,11 +245,20 @@ class TypingTicketCache:
         self._cache: Dict[str, Tuple[str, float]] = {}
 
     def get(self, user_id: str) -> Optional[str]:
+        self._sweep_expired()
         entry = self._cache.get(user_id)
-        if entry and time.time() - entry[1] < self._ttl_seconds:
-            return entry[0]
-        self._cache.pop(user_id, None)
-        return None
+        return entry[0] if entry else None
+
+    def _sweep_expired(self) -> None:
+        """Drop expired entries on access: presenting a stale ticket makes ``stop_typing`` no-op
+        (the indicator sticks, #38085), and never-read peers would otherwise accumulate forever."""
+        now = time.time()
+        for user_id in [u for u, (_, ts) in self._cache.items() if now - ts >= self._ttl_seconds]:
+            self._cache.pop(user_id, None)
+
+    def clear(self) -> None:
+        """Drop everything — tickets are scoped to one iLink session and must not leak across a reconnect."""
+        self._cache.clear()
 
     def set(self, user_id: str, ticket: str) -> None:
         self._cache[user_id] = (ticket, time.time())
@@ -717,6 +740,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         self._rate_limit_circuit_window_seconds = float(_extra_or_secret(extra, "rate_limit_circuit_window_seconds", "30.0"))
         self._rate_limit_circuit_open_seconds = float(_extra_or_secret(extra, "rate_limit_circuit_open_seconds", "30.0"))
         self._rate_limit_circuit_until, self._rate_limit_events = 0.0, []  # type: float, List[float]
+        self._rate_limit_last_detail: Optional[str] = None  # ret/errcode/errmsg of the failure that opened the cooldown
         self._dm_policy = _extra_or_secret(extra, "dm_policy", "pairing").lower()
         self._group_policy = _extra_or_secret(extra, "group_policy", "disabled").lower()
         # ``extra`` wins even when falsy (an explicit empty list disables the env allowlist).
@@ -776,6 +800,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     async def disconnect(self) -> None:
         _LIVE_ADAPTERS.pop(self._token, None)
         self._running = False
+        self._typing_cache.clear()  # tickets are session-scoped; none may leak across a reconnect
         for task in self._pending_text_batch_tasks.values():
             if not task.done():
                 task.cancel()
@@ -797,6 +822,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         sync_buf = _load_sync_buf(self._hermes_home, self._account_id)
         timeout_ms = LONG_POLL_TIMEOUT_MS
         consecutive_failures = 0
+        consecutive_session_expiries = 0
 
         async def backoff() -> int:
             """Sleep for the failure streak; returns the new streak count (0 after a full streak)."""
@@ -813,8 +839,22 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 ret, errcode = response.get("ret", 0), response.get("errcode", 0)
                 if ret not in {0, None} or errcode not in {0, None}:
                     if _is_session_expired(response, ret, errcode):
-                        logger.error("[%s] Session expired; pausing for 10 minutes", self.name)
-                        await asyncio.sleep(600)
+                        consecutive_session_expiries += 1
+                        if consecutive_session_expiries >= SESSION_EXPIRY_FATAL_AFTER:
+                            # Same token already failed a full pause cycle: escalate instead of retrying it
+                            # forever as an invisible zombie. retryable=True routes through the reconnect
+                            # queue, where connect() re-reads the persisted account and a re-paired token takes over.
+                            detail = f"ret={ret} errcode={errcode} errmsg={response.get('errmsg') or 'unknown'}"
+                            self._set_fatal_error(
+                                "weixin_session_expired",
+                                f"Weixin session expired ({detail}); re-pair via QR login — connect() will pick up the new account",
+                                retryable=True,
+                            )
+                            await self._notify_fatal_error()
+                            return
+                        logger.error("[%s] Session expired; pausing for %d minute(s) before re-poll (%d/%d)", self.name,
+                                     SESSION_EXPIRY_PAUSE_SECONDS // 60, consecutive_session_expiries, SESSION_EXPIRY_FATAL_AFTER)
+                        await asyncio.sleep(SESSION_EXPIRY_PAUSE_SECONDS)
                         consecutive_failures = 0
                         continue
                     consecutive_failures += 1
@@ -823,6 +863,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                     consecutive_failures = await backoff()
                     continue
                 consecutive_failures = 0
+                consecutive_session_expiries = 0
                 # Dispatch before persisting: the off-loop write is an await, and a disconnect that
                 # cancels it must not leave the advanced cursor on disk with this batch undelivered.
                 for message in response.get("msgs") or []:
@@ -974,8 +1015,11 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             retried_without_token = False
             attempt = 0  # counts real failures only — the tokenless re-send must not eat the retry budget
             while True:
-                if self._rate_limit_cooldown_remaining() > 0:
-                    raise RuntimeError(f"iLink sendmessage rate limited; cooldown active for {self._rate_limit_cooldown_remaining():.1f}s")
+                cooldown_remaining = self._rate_limit_cooldown_remaining()
+                if cooldown_remaining > 0:
+                    # Fail-fast must not erase WHY the cooldown opened.
+                    detail = f"; last failure: {self._rate_limit_last_detail}" if self._rate_limit_last_detail else ""
+                    raise RuntimeError(f"iLink sendmessage rate limited; cooldown active for {cooldown_remaining:.1f}s{detail}")
                 try:
                     resp = await _send_message(
                         self._send_session, base_url=self._base_url, token=self._token, to=chat_id, text=chunk,
@@ -995,7 +1039,8 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                         if ret != RATE_LIMIT_ERRCODE and errcode != RATE_LIMIT_ERRCODE:
                             raise RuntimeError(f"iLink sendmessage error: ret={ret} errcode={errcode} errmsg={errmsg or 'unknown error'}")
                         # Keep a descriptive error for when the loop exhausts while still limited.
-                        last_error = RuntimeError(f"iLink sendmessage rate limited: ret={ret} errcode={errcode} errmsg={errmsg or 'rate limited'}")
+                        self._rate_limit_last_detail = f"ret={ret} errcode={errcode} errmsg={errmsg or 'rate limited'}"
+                        last_error = RuntimeError(f"iLink sendmessage rate limited: {self._rate_limit_last_detail}")
                         if self._record_rate_limit_event():
                             last_error = RuntimeError(
                                 f"iLink sendmessage rate limited (ret={ret} errcode={errcode} errmsg={errmsg or 'rate limited'}); "
@@ -1010,6 +1055,7 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                         continue
                     self._rate_limit_events.clear()
                     self._rate_limit_circuit_until = 0.0
+                    self._rate_limit_last_detail = None
                     return
                 except Exception as exc:
                     last_error = exc

@@ -2086,9 +2086,13 @@ class ConnectionManager:
             self._pending_acks.pop(req_id, None)
 
     def schedule_reconnect(self) -> None:
-        """Schedule a reconnect only if running and not already reconnecting."""
+        """Schedule a reconnect only if running and not already reconnecting.
+
+        The task is registered via ``_track_task`` — a bare ``create_task`` is referenced only by the
+        loop's ready queue, so a GC pass mid-backoff drops the reconnect silently, and the gateway's
+        shutdown drain (``cancel_background_tasks``) cannot see it."""
         if self._adapter._running and not self._reconnecting:
-            asyncio.create_task(self._reconnect_with_backoff())
+            self._adapter._track_task(asyncio.create_task(self._reconnect_with_backoff()))
 
     async def _reconnect_with_backoff(self) -> bool:
         if self._reconnecting:
