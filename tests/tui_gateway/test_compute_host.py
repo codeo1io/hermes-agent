@@ -19,7 +19,7 @@ def _stdout_queue(proc: subprocess.Popen) -> queue.Queue[dict]:
     return out
 
 
-def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:
+def _read_json_line(out: queue.Queue[dict], timeout: float = 60.0) -> dict:
     try:
         return out.get(timeout=timeout)
     except queue.Empty as exc:
@@ -43,20 +43,25 @@ def test_compute_host_line_json_hello_and_shutdown():
     assert proc.stdin is not None
     out = _stdout_queue(proc)
     try:
+        # The first frame waits for a cold interpreter to import the
+        # tui_gateway stack, which can take an order of magnitude longer on a
+        # fully-loaded CI runner (12 parallel test workers on 4 vCPU; a 15s
+        # bound was still exceeded on such a shard 2026-10-05). The handshake
+        # content is what this test asserts, not boot latency.
         hello = _read_json_line(out)
         assert hello["type"] == "hello"
         assert hello["host_pid"] == proc.pid
 
         proc.stdin.write(json.dumps({"type": "bogus", "request_id": "b"}) + "\n")
         proc.stdin.flush()
-        error = _read_json_line(out)
+        error = _read_json_line(out, timeout=5.0)
         assert error["type"] == "error"
         assert error["message"] == "unknown frame type: bogus"
 
         proc.stdin.write(json.dumps({"type": "shutdown", "request_id": "stop"}) + "\n")
         proc.stdin.flush()
-        assert _read_json_line(out)["type"] == "shutdown.ack"
-        proc.wait(timeout=2)
+        assert _read_json_line(out, timeout=5.0)["type"] == "shutdown.ack"
+        proc.wait(timeout=5)
     finally:
         if proc.poll() is None:
             proc.kill()
