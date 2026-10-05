@@ -201,7 +201,12 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
         "sess-dedup", owner_key="holder-key", generation=1, timeout=1
     )
     assert holder is not None
-    monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "5")
+    # 300s agent inactivity vs the 0.02s lease clock: a regression that
+    # honors the agent timeout deterministically trips the 5s hang guard
+    # below, while 5s of loaded-runner scheduling (the CI flake in run
+    # 37175933027 tripped a 1s guard) cannot fail the test (policy: outer
+    # wall-clock bounds >= 2s).
+    monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "300")
     monkeypatch.setenv("HERMES_TURN_LEASE_TIMEOUT", "0.02")
 
     runner.session_store.load_transcript.side_effect = AssertionError(
@@ -214,7 +219,7 @@ async def test_full_dispatch_rejects_lease_timeout_without_running_goal_hook(
     runner._post_turn_goal_continuation = AsyncMock()
 
     try:
-        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=1)
+        response = await asyncio.wait_for(runner._handle_message(_event()), timeout=5)
     finally:
         assert runner._turn_leases.release(holder) is True
 
