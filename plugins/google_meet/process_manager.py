@@ -1,8 +1,11 @@
 """Subprocess lifecycle manager for the google_meet bot.
 
 One active meeting at a time, recorded in ``$HERMES_HOME/workspace/meetings/.active.json``
-(``pid, meeting_id, out_dir, url, started_at, session_id, log_path, mode``) so tool calls
-across turns can find the bot. The bot is a detached subprocess reached via files only
+(``pid, pid_start_time, meeting_id, out_dir, url, started_at, session_id, log_path, mode``)
+so tool calls across turns can find the bot. The pid is only trusted together with its
+spawn-time fingerprint (``_pid_is_ours``): pids are recycled, and ``.active.json`` can
+outlive its bot. The bot clears the pointer on every exit path it controls
+(``release_active_if_mine``). The bot is a detached subprocess reached via files only
 (``<meeting-id>/status.json``, ``<meeting-id>/transcript.txt``), so the agent loop can't block.
 """
 
@@ -37,10 +40,46 @@ def _write_active(data: Dict[str, Any]) -> None:
     atomic_json_write(_root() / ".active.json", data)
 
 
-def _pid_alive(pid: int) -> bool:
-    # Not ``os.kill(pid, 0)``: on Windows that can kill the target (bpo-14484).
-    from gateway.status import _pid_exists
-    return bool(pid) and _pid_exists(pid)
+def _pid_start_time(pid: int) -> Optional[float]:
+    """Spawn-time identity fingerprint for *pid* (psutil create_time), or None."""
+    from hermes_cli.process_identity import _process_create_time
+    return _process_create_time(int(pid))
+
+
+def _pid_is_ours(pid: Any, recorded_start_time: Any) -> bool:
+    """True only when *pid* is alive AND is the same process incarnation we spawned.
+
+    A bare pid says nothing once the OS recycles ids: ``.active.json`` can outlive its bot
+    (crash without cleanup), and the recycled pid may be an unrelated process — signaling it
+    kills a victim (the kanban dispatcher solved this exact class with pid fingerprints).
+    Reuses the canonical matcher ``hermes_cli.process_identity._pid_alive_matches``; stricter
+    than kanban's use: a record with NO start-time (pre-fingerprint pointer) is treated as
+    unverifiable, not trusted, because the pointer is frequently stale here.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0 or recorded_start_time is None:
+        return False
+    from hermes_cli.process_identity import _pid_alive_matches
+    try:
+        return _pid_alive_matches(pid, float(recorded_start_time)) is True
+    except (TypeError, ValueError):
+        return False
+
+
+def release_active_if_mine() -> None:
+    """Bot-exit hook: clear ``.active.json`` iff it still names THIS process.
+
+    Every meet_bot exit path (duration expiry, lobby/denied exit, page loss, crash, SIGTERM
+    teardown) calls this, so a finished bot doesn't leave a stale pointer behind. The identity
+    check keeps a late-exiting predecessor from deleting its replacement's pointer.
+    """
+    active = _read_active() or {}
+    if active.get("pid") == os.getpid() and _pid_is_ours(os.getpid(), active.get("pid_start_time")):
+        with contextlib.suppress(OSError):
+            (_root() / ".active.json").unlink(missing_ok=True)
 
 
 def _kill(pid: int, sig) -> None:
@@ -60,7 +99,8 @@ def start(url: str, *, out_dir: Optional[Path] = None, headed: bool = False,
     from plugins.google_meet.meet_bot import _is_safe_meet_url, _meeting_id_from_url
     if not _is_safe_meet_url(url):
         return {"ok": False, "error": "refusing: only https://meet.google.com/ URLs are allowed. got: " + repr(url)}
-    if _pid_alive(int((_read_active() or {}).get("pid", 0))):
+    active = _read_active() or {}
+    if _pid_is_ours(active.get("pid"), active.get("pid_start_time")):
         stop(reason="replaced by new meet_join")
     meeting_id = _meeting_id_from_url(url)
     out = out_dir or (_root() / meeting_id)
@@ -94,7 +134,8 @@ def start(url: str, *, out_dir: Optional[Path] = None, headed: bool = False,
         proc = subprocess.Popen([sys.executable, "-m", "plugins.google_meet.meet_bot"], stdin=subprocess.DEVNULL,
                                 stdout=log_fh, stderr=subprocess.STDOUT, env=env, start_new_session=True,
                                 close_fds=True)
-    record = {"pid": proc.pid, "meeting_id": meeting_id, "out_dir": str(out), "url": url,
+    record = {"pid": proc.pid, "pid_start_time": _pid_start_time(proc.pid),
+              "meeting_id": meeting_id, "out_dir": str(out), "url": url,
               "started_at": time.time(), "session_id": session_id, "log_path": str(log_path), "mode": mode}
     _write_active(record)
     return {"ok": True, **record}
@@ -106,7 +147,7 @@ def status() -> Dict[str, Any]:
     if not active:
         return dict(_NO_ACTIVE)
     pid = int(active.get("pid", 0))
-    return {"ok": True, "alive": _pid_alive(pid), "pid": pid, "meetingId": active.get("meeting_id"),
+    return {"ok": True, "alive": _pid_is_ours(pid, active.get("pid_start_time")), "pid": pid, "meetingId": active.get("meeting_id"),
             "url": active.get("url"), "startedAt": active.get("started_at"), "outDir": active.get("out_dir"),
             **(read_json(Path(active.get("out_dir", "")) / "status.json") or {})}
 
@@ -152,11 +193,12 @@ def stop(*, reason: str = "requested") -> Dict[str, Any]:
     if not active:
         return dict(_NO_ACTIVE)
     pid = int(active.get("pid", 0))
+    start_time = active.get("pid_start_time")
     out_dir = active.get("out_dir")
-    if _pid_alive(pid):
+    if _pid_is_ours(pid, start_time):
         _kill(pid, signal.SIGTERM)
         for _ in range(20):
-            if not _pid_alive(pid):
+            if not _pid_is_ours(pid, start_time):
                 break
             time.sleep(0.5)
         else:

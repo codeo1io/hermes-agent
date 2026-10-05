@@ -434,6 +434,18 @@ _CONTEXT_ARGS = {
 
 
 def run_bot() -> int:
+    try:
+        return _run_bot()
+    finally:
+        # .active.json exit hygiene: every exit path (duration expiry, lobby/denied exit, page
+        # loss, crash, SIGTERM teardown, bad config) releases the pointer — but only while it
+        # still names THIS process, so a replaced meeting's newer pointer is never clobbered
+        # by a late-exiting predecessor.
+        from plugins.google_meet.process_manager import release_active_if_mine
+        release_active_if_mine()
+
+
+def _run_bot() -> int:
     cfg = _config_from_env()
     if not _is_safe_meet_url(cfg.url):
         sys.stderr.write("google_meet bot: refusing to launch — HERMES_MEET_URL must be a "

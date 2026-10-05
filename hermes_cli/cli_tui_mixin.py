@@ -454,6 +454,8 @@ class CLITuiMixin:
 
         def _status_rows(width):
             rows = []
+            # End of the active question block and the row span of its selected choice.
+            focus = {}
             for idx, entry in enumerate(questions_list):
                 answered = entry["qid"] in answers
                 marker = "✓" if answered else ("▸" if idx == active else "·")
@@ -472,8 +474,11 @@ class CLITuiMixin:
                     cb = ("[x] " if i in selected_indices else "[ ] ") if multi_select else ""
                     style = 'class:clarify-selected' if i == selected and not freetext else 'class:clarify-choice'
                     label = f"  {cursor} {cb}{_num_prefix(i)}. {choice}"
+                    first = len(rows)
                     for wrapped in _wrap_panel_text(label, width, subsequent_indent="      "):
                         rows.append((style, wrapped))
+                    if i == selected and not freetext:
+                        focus["selected"] = (first, len(rows))
                 if choices:
                     other_idx = len(choices)
                     mid = _num_prefix(other_idx)
@@ -492,17 +497,31 @@ class CLITuiMixin:
                     else:
                         other_label = f"    {mid}. " + (other_suffix or "Other (type your answer)")
                         other_style = 'class:clarify-choice'
+                    first = len(rows)
                     for wrapped in _wrap_panel_text(other_label, width, subsequent_indent="      "):
                         rows.append((other_style, wrapped))
+                    if freetext or selected == other_idx:
+                        focus["selected"] = (first, len(rows))
                 elif freetext:
                     guidance = "  Type your answer in the prompt below, then press Enter."
                     for wrapped in _wrap_panel_text(guidance, width):
                         rows.append(('class:clarify-active-other', wrapped))
-            return rows
+                focus["end"] = len(rows)
+            return rows, focus
 
-        preview_rows = _status_rows(60)
+        preview_rows, _ = _status_rows(60)
         box_width = _panel_box_width(title, [header] + [text for _, text in preview_rows])
-        rows = _status_rows(max(8, box_width - 2))
+        rows, focus = _status_rows(max(8, box_width - 2))
+        # The panel is an unsized Window, so rows past the viewport are clipped from the
+        # bottom, which is where the active question's choices sit. When the body does not
+        # fit, show the slice that ends with those choices and always holds the selected one.
+        # Top rule, header and bottom rule take three rows.
+        budget = max(1, _term_rows() - _PANEL_RESERVED_BELOW - 3)
+        if len(rows) > budget and "end" in focus:
+            sel_start, _sel_end = focus.get("selected", (focus["end"] - 1, focus["end"]))
+            first = min(sel_start, focus["end"] - budget)
+            first = max(0, min(first, len(rows) - budget))
+            rows = rows[first:first + budget]
 
         panel = _Panel('class:clarify-border', box_width, title, 'class:clarify-title')
         panel.row('class:clarify-question', header)

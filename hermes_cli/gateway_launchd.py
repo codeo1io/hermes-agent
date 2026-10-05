@@ -365,12 +365,17 @@ def generate_launchd_plist() -> str:
     </dict>
 """
 
+    # XML invariant (parity with the systemd twin): EVERY string interpolated below — label,
+    # working dir, env values, log paths — must pass through escape(). ProgramArguments already
+    # does (above); a raw & or < anywhere else writes a plist that launchctl rejects as not
+    # well-formed, silently losing autostart. escape() is the identity for clean inputs, so
+    # is_current parity and byte-stability for ordinary paths are preserved.
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{label}</string>
+    <string>{escape(label)}</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -378,16 +383,16 @@ def generate_launchd_plist() -> str:
     </array>
     
     <key>WorkingDirectory</key>
-    <string>{working_dir}</string>
+    <string>{escape(working_dir)}</string>
     
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>{sane_path}</string>
+        <string>{escape(sane_path)}</string>
         <key>VIRTUAL_ENV</key>
-        <string>{venv_dir}</string>
+        <string>{escape(venv_dir)}</string>
         <key>HERMES_HOME</key>
-        <string>{hermes_home}</string>
+        <string>{escape(hermes_home)}</string>
         <key>HERMES_SUPERVISED_CHILD</key>
         <string>1</string>
     </dict>
@@ -426,10 +431,10 @@ def generate_launchd_plist() -> str:
     <integer>60</integer>
 {nofile_block}
     <key>StandardOutPath</key>
-    <string>{stdout_log}</string>
+    <string>{escape(str(stdout_log))}</string>
     
     <key>StandardErrorPath</key>
-    <string>{stderr_log}</string>
+    <string>{escape(str(stderr_log))}</string>
 </dict>
 </plist>
 """

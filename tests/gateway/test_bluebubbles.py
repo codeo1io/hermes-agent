@@ -1,5 +1,6 @@
 """Tests for the BlueBubbles iMessage gateway adapter."""
 import asyncio
+import contextlib
 import json
 from unittest.mock import AsyncMock
 
@@ -583,3 +584,42 @@ class TestBlueBubblesGateBeforeDownload:
         assert response.status == 200
         assert download.await_count == downloads
         assert len(handled) == handled_count
+
+
+class TestReadReceiptTaskRetention:
+    @pytest.mark.asyncio
+    async def test_read_receipt_task_is_tracked_not_fire_and_forget(self, monkeypatch):
+        """The mark_read receipt must land in _background_tasks like its sibling
+        handle_message task (:605), not leak as an untracked pending task."""
+        adapter = _make_adapter(monkeypatch, send_read_receipts=True)
+
+        async def fake_handle_message(event):
+            pass
+
+        monkeypatch.setattr(adapter, "handle_message", fake_handle_message)
+        started = asyncio.Event()
+
+        async def blocked_mark_read(chat_guid):
+            started.set()
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(adapter, "mark_read", blocked_mark_read)
+        response = await adapter._handle_webhook(_FakeBlueBubblesRequest({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-1",
+                "text": "hello there",
+                "handle": {"address": "+15555550100"},
+                "isFromMe": False,
+                "isGroup": False,
+                "chats": [{"guid": "iMessage;-;+15555550100"}],
+            },
+        }))
+
+        assert response.status == 200
+        await asyncio.wait_for(started.wait(), timeout=5)
+        pending = [t for t in adapter._background_tasks if not t.done()]
+        assert len(pending) == 1, "read-receipt task must be retained in _background_tasks"
+        pending[0].cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pending[0]

@@ -865,3 +865,60 @@ class TestWeixinVoiceGatewayHandoff:
             "VOICE event body leaked Tencent's STT text — runner would trust "
             "the wrong transcript instead of re-transcribing (#27300)."
         )
+
+
+class TestDispatchTaskRetention:
+    """Inbound dispatches and typing fetches must be tracked so ``disconnect()`` can unwind
+    them — an untracked pending task holding a closed session surfaces as "Task was destroyed,
+    but it is pending!" and can write after teardown."""
+
+    @pytest.mark.asyncio
+    async def test_poll_loop_dispatch_tasks_are_tracked_and_cancelled_on_disconnect(self, monkeypatch):
+        adapter = _make_adapter()
+        adapter._poll_session = Mock(closed=True)
+        calls = {"n": 0}
+
+        async def fake_get_updates(session, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ret": 0, "errcode": 0, "msgs": [{"from_user_id": "wxid_friend"}]}
+            await asyncio.sleep(30)  # long-poll semantics: block until cancelled
+
+        monkeypatch.setattr(weixin, "_get_updates", fake_get_updates)
+
+        started = asyncio.Event()
+
+        async def blocked_process(message):
+            started.set()
+            await asyncio.sleep(30)
+
+        adapter._process_message_safe = blocked_process
+        adapter._running = True
+        adapter._poll_task = asyncio.create_task(adapter._poll_loop())
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        pending = [t for t in adapter._dispatch_tasks if not t.done()]
+        assert len(pending) == 1, "message dispatch task must be retained"
+        await adapter.disconnect()
+        assert pending[0].done(), "disconnect() must cancel a tracked in-flight dispatch"
+        assert not adapter._dispatch_tasks
+
+    @pytest.mark.asyncio
+    async def test_typing_fetch_spawned_by_process_message_is_tracked_and_cancelled(self):
+        adapter = _make_adapter()
+        adapter._poll_session = Mock(closed=True)
+        started = asyncio.Event()
+
+        async def blocked_fetch(session, sender_id, context_token, reason):
+            started.set()
+            await asyncio.sleep(30)
+
+        adapter._fetch_typing_ticket = blocked_fetch
+        await adapter._process_message({"from_user_id": "wxid_friend"})
+        await asyncio.wait_for(started.wait(), timeout=5)
+
+        pending = [t for t in adapter._dispatch_tasks if not t.done()]
+        assert len(pending) == 1, "typing-ticket fetch task must be retained"
+        await adapter.disconnect()
+        assert pending[0].done(), "disconnect() must cancel a tracked typing fetch"
+        assert not adapter._dispatch_tasks

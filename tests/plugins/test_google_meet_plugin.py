@@ -136,31 +136,29 @@ def test_transcript_reads_last_n_lines(tmp_path):
     assert res["lines"][-1].endswith("Alice: three")
 
 
-def test_stop_signals_process_and_clears_pointer(tmp_path):
+def test_stop_signals_process_and_clears_pointer(tmp_path, monkeypatch):
+    from hermes_cli import process_identity
     from plugins.google_meet import process_manager as pm
 
     pm._write_active({
-        "pid": 11111, "meeting_id": "x-y-z",
+        "pid": 11111, "pid_start_time": 12345.0,
+        "meeting_id": "x-y-z",
         "out_dir": str(tmp_path / "x-y-z"),
         "url": "https://meet.google.com/x-y-z",
         "started_at": 0,
     })
 
     alive_seq = iter([True, True, False])  # alive at first, gone after SIGTERM
-    def _alive(pid):
-        try:
-            return next(alive_seq)
-        except StopIteration:
-            return False
+    monkeypatch.setattr(process_identity, "_pid_alive_matches",
+                        lambda _pid, _ct: next(alive_seq, False))
 
     sent = []
     def _kill(pid, sig):
         sent.append((pid, sig))
 
-    with patch.object(pm, "_pid_alive", side_effect=_alive), \
-         patch.object(pm.os, "kill", side_effect=_kill), \
-         patch.object(pm.time, "sleep", lambda _s: None):
-        res = pm.stop()
+    monkeypatch.setattr(pm.os, "kill", _kill)
+    monkeypatch.setattr(pm.time, "sleep", lambda _s: None)
+    res = pm.stop()
 
     assert res["ok"] is True
     assert (11111, signal.SIGTERM) in sent
