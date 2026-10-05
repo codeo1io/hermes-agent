@@ -220,10 +220,13 @@ class SessionMaintenanceMixin:
         """Dry-run: sessions a matching prune/archive would touch, oldest first (``older_than_days``
         = inactivity threshold: freshest of ``last_activity_at`` / latest message / ``started_at``)."""
         where, params = self._prune_where(older_than_days, source, filters)
+        # tokens/cost_usd: the values the min/max_tokens & min/max_cost budget filters select
+        # on, so prune previews can show what they filtered on (issue #133013).
         return [dict(row) for row in self._read_all(
             f"""SELECT s.id, s.source, s.title, s.model, s.started_at,
                            {_LAST_ACTIVE_SQL} AS last_active,
-                           s.ended_at, s.message_count, s.archived
+                           s.ended_at, s.message_count, s.archived,
+                           {_TOKENS_SQL} AS tokens, {_COST_SQL} AS cost_usd
                     FROM sessions s WHERE {where}
                     ORDER BY last_active ASC, s.started_at ASC""", params)]
 

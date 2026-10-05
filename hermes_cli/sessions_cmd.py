@@ -54,9 +54,66 @@ def _print_dry_run_preview(candidates, filters) -> None:
     from hermes_cli.session_filters import describe_filters
     print(f"Would export {len(candidates)} session(s) ({describe_filters(filters)}).")
     for row in candidates[:100]:
-        print(f"  {row.get('id')}  {row.get('source', '')}")
+        line = f"  {row.get('id')}  {row.get('source', '')}"
+        for field in _dim_fields(row, _active_preview_dims(filters)):
+            line += f"  {field}"
+        print(line)
     if len(candidates) > 100:
         print_truncated(len(candidates) - 100)
+
+
+def _active_preview_dims(filters) -> "tuple[bool, bool, bool, bool]":
+    """Which filtered dimensions a destructive preview must show per row (issue #133013:
+    a confirmation asks the user to approve what the filters selected on).
+
+    The time entry distinguishes the bound that drove the selection: --before/--after select
+    on STARTED, --older-than/--newer-than on last ACTIVITY — showing the other timestamp
+    would confirm the wrong value (the two are not interchangeable; see
+    hermes_cli.session_filters).
+    """
+    return (
+        filters.get("started_before") is not None or filters.get("started_after") is not None,
+        filters.get("last_active_before") is not None or filters.get("last_active_after") is not None,
+        filters.get("min_tokens") is not None or filters.get("max_tokens") is not None,
+        filters.get("min_cost") is not None or filters.get("max_cost") is not None,
+    )
+
+
+def _dim_fields(row, dims) -> "list[str]":
+    """Labeled per-row values for every active dimension: time bounds first, then measures
+    (kept in _active_preview_dims order)."""
+    from hermes_cli.session_filters import format_epoch
+    started, activity, tokens, cost = dims
+    fields = []
+    if started:
+        fields.append(f"started {format_epoch(row.get('started_at'))}")
+    if activity:
+        fields.append(f"last-active {format_epoch(row.get('last_active'))}")
+    if tokens:
+        fields.append(f"{int(row.get('tokens') or 0)} tok")
+    if cost:
+        fields.append(f"${float(row.get('cost_usd') or 0.0):.2f}")
+    return fields
+
+
+def _preview_row(s, dims) -> str:
+    """One prune/archive preview row. With no filtered dimension active, the historical
+    unlabeled layout is kept byte-for-byte; otherwise every dimension the filters selected
+    on is shown, labeled, so the confirmation approves visible values (issue #133013)."""
+    from hermes_cli.session_filters import format_epoch
+    model = (s.get("model") or "-").split("/")[-1][:24]
+    fields = _dim_fields(s, dims)
+    if not fields:
+        return (f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
+                f"{s['message_count']:>4} msgs  {(s.get('title') or '')[:36]}")
+    n_time = sum(dims[:2])
+    row = f"  {s['id']}"
+    for field in fields[:n_time]:
+        row += f"  {field}"
+    row += f"  {s['source']:<10} {model:<24} {s['message_count']:>4} msgs"
+    for field in fields[n_time:]:
+        row += f"  {field}"
+    return row + f"  {(s.get('title') or '')[:36]}"
 
 
 _FILTER_ARGS = (
@@ -701,10 +758,9 @@ def _cmd_prune_or_archive(db, args, action):
     if args.dry_run or not args.yes:
         shown = candidates if args.dry_run else candidates[:15]
         print(f"{len(candidates)} session(s) match ({describe_filters(filters)}; {_span}):")
+        dims = _active_preview_dims(filters)
         for s in shown:
-            model = (s.get("model") or "-").split("/")[-1][:24]
-            print(f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
-                  f"{s['message_count']:>4} msgs  {(s.get('title') or '')[:36]}")
+            print(_preview_row(s, dims))
         if len(candidates) > len(shown):
             print_truncated(len(candidates) - len(shown))
         if args.dry_run:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import struct
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 
 _GGUF_MAGIC = b"GGUF"
 
@@ -21,6 +21,23 @@ _PART_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
 def model_id_from_stem(stem: str) -> str:
     """Model id from a GGUF file stem (split-part suffix stripped)."""
     return _PART_SUFFIX_RE.sub("", stem)
+
+
+# Companion GGUFs ride alongside a base model: vision projectors (mmproj/projector),
+# speculative draft/MTP heads, dSpark partners. They hold no standalone language head —
+# llama.cpp cannot serve them — so every consumer (staging, presets, the HF repo picker)
+# treats them as baggage of the model they accompany, never a servable entry (#133037).
+_COMPANION_PREFIXES = ("mmproj-", "projector-", "dspark-")
+_COMPANION_SUBSTRINGS = ("-mmproj-", "projector-", "-mtp-", "-draft-", "draft-", "-dspark-")
+
+
+def is_companion_gguf(path) -> bool:
+    """True for a GGUF that accompanies a base model instead of being one (see the block
+    above). Judged on the FILE NAME, case-blind; accepts paths from directory walks."""
+    name = PurePath(path).name.lower()
+    if name.endswith(".gguf"):
+        name = name[: -len(".gguf")]
+    return name.startswith(_COMPANION_PREFIXES) or any(sub in name for sub in _COMPANION_SUBSTRINGS)
 
 
 # ggml tensor type sizes: type_id -> (block_bytes, block_elems). IQ-family verified against

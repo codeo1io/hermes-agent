@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from hermes_cli.local_runtime.binaries import runtimes_root
-from hermes_cli.local_runtime.gguf import SPLIT_PART_RE, model_id_from_stem
+from hermes_cli.local_runtime.gguf import SPLIT_PART_RE, is_companion_gguf, model_id_from_stem
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,8 @@ def staged_in(models_dir: Path, *, require_complete: bool = True) -> "list[Path]
     names = {p.name for p in files}
     out = []
     for p in files:
+        if is_companion_gguf(p.name):
+            continue  # mmproj/draft/MTP companions ride with a base model; never servable (#133037)
         m = SPLIT_PART_RE.search(p.name)
         if m is None:
             out.append(p)
