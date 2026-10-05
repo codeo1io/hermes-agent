@@ -468,5 +468,29 @@ class TestEndToEnd:
 
 
 
+class TestTruncatedInputFailsClosed:
+    """远程输入截断 → 解码失败（fail-closed）：partial varint / LEN overrun 不得被当成
+    合法帧解析，必须抛 ValueError 并由 except→None 包装丢弃（否则截断的 seq/msg-id
+    会错误地解码成部分值并误导 ack 关联）。"""
+
+    def test_decode_varint_missing_terminator_raises(self):
+        with pytest.raises(ValueError):
+            _decode_varint(b"\x80", 0)  # continuation bit set, buffer ends
+
+    def test_parse_fields_len_overrun_raises(self):
+        with pytest.raises(ValueError):
+            _parse_fields(b"\x0a\x05ab")  # LEN 声明 5 字节，实剩 2
+
+    def test_parse_fields_truncated_length_varint_raises(self):
+        with pytest.raises(ValueError):
+            _parse_fields(b"\x0a\x80")  # length varint 本身被截断
+
+    def test_decode_inbound_push_truncated_len_returns_none(self):
+        assert decode_inbound_push(b"\x0a\x10ab") is None
+
+    def test_decode_inbound_push_truncated_varint_returns_none(self):
+        assert decode_inbound_push(b"\x08\x80") is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

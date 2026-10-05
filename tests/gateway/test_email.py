@@ -1094,13 +1094,17 @@ class TestSenderAuthentication(unittest.TestCase):
             msg["Authentication-Results"] = ar
         return msg
 
-    def _verify(self, from_addr, auth_results=None, authserv_id=""):
+    def _verify(self, from_addr, auth_results=None, authserv_id=None):
         from plugins.platforms.email.adapter import (
             _verify_sender_authentication,
             _extract_email_address,
         )
         msg = self._msg(from_addr, auth_results)
         addr = _extract_email_address(from_addr)
+        # Default pin: the topmost header's own authserv-id — what a correctly configured
+        # receiving MTA stamps. Rows exercising the fail-closed path pass authserv_id="".
+        if authserv_id is None:
+            authserv_id = (auth_results or [""])[0].split(";", 1)[0].strip().lower()
         return _verify_sender_authentication(msg, addr, authserv_id=authserv_id)
 
     def test_dmarc_pass_authenticates(self):
@@ -1142,6 +1146,94 @@ class TestSenderAuthentication(unittest.TestCase):
             authserv_id="mx.ourserver.com",
         )
         self.assertFalse(ok, reason)
+
+    def test_missing_pin_fails_closed(self):
+        """No EMAIL_AUTHSERV_ID configured: the topmost Authentication-Results may be
+        one the SENDER wrote, so nothing is trusted and the verdict names the fix."""
+        ok, reason = self._verify(
+            "admin@example.com",
+            ["mx.google.com; dmarc=pass header.from=example.com"],
+            authserv_id="",
+        )
+        self.assertFalse(ok)
+        self.assertIn("authserv-id is not configured", reason)
+
+    def test_aligned_but_not_exact_authserv_id_rejected(self):
+        """Domain-ALIGNED is not the operator's server: mail.ourserver.com and
+        mx.ourserver.com share a registrable domain, but only an exact id match counts."""
+        ok, reason = self._verify(
+            "admin@example.com",
+            ["mail.ourserver.com; dmarc=pass header.from=example.com"],
+            authserv_id="mx.ourserver.com",
+        )
+        self.assertFalse(ok)
+        self.assertIn("trusted authserv-id", reason)
+
+    def test_lower_matching_header_does_not_authorize(self):
+        """Only the TOPMOST header is consulted: a lower header carrying the pinned id
+        (injected, or echoed by a forwarder) must not authenticate the sender."""
+        ok, reason = self._verify(
+            "admin@example.com",
+            [
+                "mail.forwarder.example; dmarc=fail header.from=example.com",
+                "mx.ourserver.com; dmarc=pass header.from=example.com",
+            ],
+            authserv_id="mx.ourserver.com",
+        )
+        self.assertFalse(ok)
+        self.assertIn("trusted authserv-id", reason)
+
+    def test_missing_pin_warns_once_per_account_at_connect(self):
+        """Unpinned but sender-auth-required: warns ONCE per account at connect (even via
+        the reconnect watcher), not per dropped message — discoverable without log flood."""
+        import asyncio
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+        address = "hermes@test.com"
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": address, "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com", "EMAIL_SMTP_HOST": "smtp.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+        self.addCleanup(EmailAdapter._missing_pin_warned.discard, address)
+        EmailAdapter._missing_pin_warned.discard(address)
+
+        async def _idle_poll(self):
+            await asyncio.sleep(0)
+
+        with patch.object(EmailAdapter, "_probe_imap", return_value=True), \
+                patch.object(EmailAdapter, "_probe_smtp", return_value=True), \
+                patch.object(EmailAdapter, "_poll_loop", _idle_poll), \
+                patch.object(EmailAdapter, "_wire_plugin_handlers", lambda self_, handlers: None):
+            with self.assertLogs("plugins.platforms.email.adapter", level="WARNING") as logs:
+                self.assertTrue(asyncio.run(adapter.connect()))
+                self.assertTrue(asyncio.run(adapter.connect(is_reconnect=True)))
+        pin_warnings = [line for line in logs.output if "authserv-id is not configured" in line]
+        self.assertEqual(len(pin_warnings), 1, logs.output)
+
+    def test_pinned_adapter_does_not_warn_at_connect(self):
+        """The warning is exclusive to the missing-pin state: a pinned adapter connects silently."""
+        import asyncio
+        from gateway.config import PlatformConfig
+        from plugins.platforms.email.adapter import EmailAdapter
+        address = "hermes2@test.com"
+        with patch.dict(os.environ, {
+            "EMAIL_ADDRESS": address, "EMAIL_PASSWORD": "secret",
+            "EMAIL_IMAP_HOST": "imap.test.com", "EMAIL_SMTP_HOST": "smtp.test.com",
+            "EMAIL_AUTHSERV_ID": "mx.test.com",
+        }, clear=False):
+            adapter = EmailAdapter(PlatformConfig(enabled=True))
+        self.addCleanup(EmailAdapter._missing_pin_warned.discard, address)
+
+        async def _idle_poll(self):
+            await asyncio.sleep(0)
+
+        with patch.object(EmailAdapter, "_probe_imap", return_value=True), \
+                patch.object(EmailAdapter, "_probe_smtp", return_value=True), \
+                patch.object(EmailAdapter, "_poll_loop", _idle_poll), \
+                patch.object(EmailAdapter, "_wire_plugin_handlers", lambda self_, handlers: None):
+            with self.assertNoLogs("plugins.platforms.email.adapter", level="WARNING"):
+                self.assertTrue(asyncio.run(adapter.connect()))
 
 
 if __name__ == "__main__":

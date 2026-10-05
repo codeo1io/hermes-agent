@@ -1091,11 +1091,14 @@ def _cgroup_chain_limits(
     """The most-binding (cpu cores, pids.max, pids.current) over this
     process's cgroup dir and every ancestor up to the mount root.
 
-    v2 primary (unified hierarchy); on a v1 host, best-effort walk of the
-    ``cpu``/``pids`` controller mounts named in /proc/self/cgroup. An
-    axis that cannot be resolved is None — the derivation fail-opens to
-    the remaining terms. pids.current is taken from the deepest level
-    that carries pids.max."""
+    v2 primary (unified hierarchy) with v1 controller chains walked
+    ALONGSIDE it: a systemd hybrid host mounts both, keeps cpu/pids on
+    the v1 controller mounts, and leaves the unified hierarchy unlimited —
+    walking only v2 there derives (None, None, None) and the worker
+    ceiling silently no-ops back to cpu_count*2 (the incident mode this
+    derivation exists to prevent). An axis that cannot be resolved is
+    None — the derivation fail-opens to the remaining terms. pids.current
+    is taken from the deepest level that carries pids.max."""
     if proc_self_cgroup is None:
         proc_self_cgroup = _PROC_SELF_CGROUP
     if mount_root is None:
@@ -1105,16 +1108,17 @@ def _cgroup_chain_limits(
     v2_dir = _resolve_self_cgroup_dir(proc_self_cgroup, mount_root)
     if v2_dir is not None:
         chains.append((v2_dir, mount))
-    else:
-        for line in (_read_text(proc_self_cgroup) or "").splitlines():
-            parts = line.split(":", 2)
-            if len(parts) != 3 or not parts[1]:
-                continue
-            for controller in parts[1].split(","):
-                if controller in ("cpu", "pids"):
-                    base = mount / controller
-                    rel = parts[2].strip("/")
-                    chains.append((base if not rel else base / rel, base))
+    v1_walked: set = set()
+    for line in (_read_text(proc_self_cgroup) or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3 or not parts[1]:
+            continue  # the 0:: unified line or malformed
+        for controller in parts[1].split(","):
+            if controller in ("cpu", "pids") and controller not in v1_walked:
+                v1_walked.add(controller)
+                base = mount / controller
+                rel = parts[2].strip("/")
+                chains.append((base if not rel else base / rel, base))
     cpu_ceiling: Optional[float] = None
     pids_max: Optional[int] = None
     pids_current: Optional[int] = None

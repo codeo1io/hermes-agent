@@ -98,6 +98,10 @@ EMAIL_SMTP_HOST=smtp.gmail.com
 
 # Security (recommended)
 EMAIL_ALLOWED_USERS=your@email.com,colleague@work.com
+# Required for inbound sender authentication: the authserv-id your receiving server stamps
+# in Authentication-Results (topmost header, exact match). Unset = senders cannot prove
+# authenticity (fail closed); opt out with EMAIL_TRUST_FROM_HEADER=true.
+EMAIL_AUTHSERV_ID=mx.gmail.com
 
 # Optional
 EMAIL_IMAP_PORT=993                    # Default: 993 (IMAP SSL)
@@ -186,7 +190,7 @@ Email access is stricter by default than chat-style platforms:
 |---------|----------|
 | **"IMAP connection failed"** at startup | Verify `EMAIL_IMAP_HOST` and `EMAIL_IMAP_PORT`. Ensure IMAP is enabled on the account. For Gmail, enable it in Settings → Forwarding and POP/IMAP. |
 | **"SMTP connection failed"** at startup | Verify `EMAIL_SMTP_HOST` and `EMAIL_SMTP_PORT`. Check that your password is correct (use App Password for Gmail). |
-| **Messages not received** | Check `EMAIL_ALLOWED_USERS` includes the sender's email. Check spam folder — some providers flag automated replies. |
+| **Messages not received** | Check `EMAIL_ALLOWED_USERS` includes the sender's email. Check spam folder — some providers flag automated replies. If the log shows `Dropping sender with unauthenticated From` with reason `authserv-id is not configured`, set `EMAIL_AUTHSERV_ID` to the value your receiving server stamps (topmost `Authentication-Results` id); with the wrong value (`no Authentication-Results from trusted authserv-id`), copy the id from a raw message header. |
 | **"Authentication failed"** | For Gmail, you must use an App Password, not your regular password. Ensure 2FA is enabled first. |
 | **Duplicate replies** | Ensure only one gateway instance is running. Check `hermes gateway status`. |
 | **Slow response** | The default poll interval is 15 seconds. Reduce with `EMAIL_POLL_INTERVAL=5` for faster response (but more IMAP connections). |
@@ -202,6 +206,7 @@ Email access is stricter by default than chat-style platforms:
 
 - Use **App Passwords** instead of your main password (required for Gmail with 2FA)
 - Set `EMAIL_ALLOWED_USERS` to restrict who can interact with the agent
+- Set `EMAIL_AUTHSERV_ID` to the authserv-id your receiving server stamps — without it, inbound sender authentication fails closed (only the topmost `Authentication-Results` header with an exact id match authenticates a sender)
 - The password is stored in `~/.hermes/.env` — protect this file (`chmod 600`)
 - IMAP uses SSL (port 993) and SMTP uses STARTTLS (port 587) by default — connections are encrypted
 
@@ -219,5 +224,6 @@ Email access is stricter by default than chat-style platforms:
 | `EMAIL_SMTP_PORT` | No | `587` | SMTP server port |
 | `EMAIL_POLL_INTERVAL` | No | `15` | Seconds between inbox checks |
 | `EMAIL_ALLOWED_USERS` | No | — | Comma-separated allowed sender addresses |
+| `EMAIL_AUTHSERV_ID` | No | — | Receiving server's `Authentication-Results` authserv-id (required for inbound sender authentication; unset = fail closed) |
 | `EMAIL_HOME_ADDRESS` | No | — | Default delivery target for cron jobs |
 | `EMAIL_ALLOW_ALL_USERS` | No | `false` | Allow all senders (not recommended) |

@@ -73,7 +73,8 @@ def _encode_varint(value: int) -> bytes:
 
 
 def _decode_varint(data: bytes, pos: int) -> tuple[int, int]:
-    """从 data[pos:] 解码 varint，返回 (value, new_pos)"""
+    """从 data[pos:] 解码 varint，返回 (value, new_pos)；终止字节缺失（缓冲区末尾仍是续位）
+    视为截断抛 ValueError —— 远端输入必须 fail-closed，不得把 partial 值当合法 varint。"""
     result = 0
     shift = 0
     while pos < len(data):
@@ -82,10 +83,10 @@ def _decode_varint(data: bytes, pos: int) -> tuple[int, int]:
         result |= (b & 0x7F) << shift
         shift += 7
         if not (b & 0x80):
-            break
+            return result, pos
         if shift >= 64:
             raise ValueError("varint too long")
-    return result, pos
+    raise ValueError("truncated varint: continuation bit set at end of buffer")
 
 
 def _encode_field(field_number: int, wire_type: int, value: bytes) -> bytes:
@@ -131,6 +132,8 @@ def _parse_fields(data: bytes) -> list[tuple[int, int, bytes | int]]:
             else:
                 raise ValueError(f"unknown wire type {wire_type} at pos {pos - 1}")
             val = data[pos: pos + length]
+            if len(val) < length:  # 截断帧：声明的长度越过缓冲区末尾，宁可不解码也不得把短值当合法
+                raise ValueError(f"truncated field: need {length} bytes at pos {pos}, have {len(val)}")
             pos += length
         fields.append((tag >> 3, wire_type, val))
     return fields

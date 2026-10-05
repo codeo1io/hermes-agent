@@ -37,3 +37,7 @@ optional_env:
     description: "Default address for cron / notification delivery"
     prompt: "Home address"
     password: false
+  - name: EMAIL_AUTHSERV_ID
+    description: "Receiving server's Authentication-Results authserv-id (e.g. mx.example.com). Required for inbound sender authentication; when unset, From-authentication fails closed"
+    prompt: "Authserv-id your receiving server stamps"
+    password: false
