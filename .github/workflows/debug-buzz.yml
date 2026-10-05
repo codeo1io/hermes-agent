@@ -1,12 +1,11 @@
-name: debug buzz hang v2 (8591a599)
-# Lane-exact replication of the "Run tests (8)" shard on the exact validated
-# tree (PR #358 head 68057f7d4e31), with a py-spy watchdog that dumps the
-# stack of a stalled tests/gateway/test_buzz_websocket.py subprocess.
-# Deviations from conductor-tests.yml, all disclosed:
-#   - HERMES_TEST_FILE_RETRIES=0 (one 600s stall is enough evidence; the
-#     dump lands long before the cap)
-#   - no actions/cache restores (fresh runner, same as a cache-miss lane job)
-#   - py-spy installed into the venv for diagnostics
+name: debug buzz hang v3 (8591a599)
+# Same lane-exact replica as v2, with a hardened dump watchdog:
+#  - heartbeat every 60s printing any process whose argv mentions
+#    buzz_websocket.py (so we see WHAT the watchdog sees)
+#  - py-spy dump when such a process ages past 45s, repeat every 60s
+#  - set +e inside the watchdog (bash -e hazards cannot kill it)
+# Disclosed deviations from conductor-tests.yml: HERMES_TEST_FILE_RETRIES=0,
+# no actions/cache restores, py-spy installed for diagnostics.
 # Delete this branch after use.
 on:
   push:
@@ -62,34 +61,35 @@ jobs:
           uv --version
           .venv/bin/python -c "import sys, sqlite3, pytest, pytest_asyncio, websockets; print(sys.version); print('sqlite', sqlite3.sqlite_version); print('pytest', pytest.__version__, 'asyncio', pytest_asyncio.__version__, 'websockets', websockets.__version__)"
 
-      - name: Run tests (8/8) with buzz watchdog
+      - name: Run tests (8/8) with buzz watchdog v3
         run: |
           source .venv/bin/activate
-          export TZ=UTC LANG=C.UTF-8
           (
+            set +e
+            T0=$(date +%s)
             DUMPS=0
-            LAST_PID=""
-            while [ $DUMPS -lt 12 ]; do
-              P=$(pgrep -f 'pytest tests/gateway/test_buzz_websocket.py' | head -1 || true)
-              if [ -n "$P" ]; then
-                E=$(ps -o etimes= -p $P | tr -d ' ')
-                if [ "$E" -gt 45 ]; then
-                  echo "=== WATCHDOG: buzz subprocess pid=$P age=${E}s (dump $((DUMPS+1))/12) $(date -u +%H:%M:%S) ==="
-                  ps -o pid,ppid,stat,etimes,wchan:32,cmd -p $P
-                  grep -E 'State|Threads|voluntary' /proc/$P/status || true
-                  echo "open fds: $(ls /proc/$P/fd 2>/dev/null | wc -l)"
-                  .venv/bin/py-spy dump --pid $P --nonblocking 2>&1 || true
+            while [ $DUMPS -lt 15 ]; do
+              NOW=$(date +%s); AGE=$((NOW - T0))
+              SNAP=$(ps -eo pid,etimes,args --no-headers | grep 'buzz_websocket' | grep -v grep)
+              if [ -n "$SNAP" ]; then
+                echo "=== WD heartbeat ${AGE}s: buzz procs ==="
+                echo "$SNAP"
+                PID=$(echo "$SNAP" | head -1 | awk '{print $1}')
+                ET=$(echo "$SNAP" | head -1 | awk '{print $2}')
+                if [ -n "$PID" ] && [ "${ET:-0}" -gt 45 ] 2>/dev/null; then
+                  echo "=== WD DUMP #$((DUMPS+1)) pid=$PID age=${ET}s $(date -u +%H:%M:%S) ==="
+                  grep -E 'State|Threads|voluntary|nonvoluntary' /proc/$PID/status
+                  echo "open fds: $(ls /proc/$PID/fd 2>/dev/null | wc -l)"
+                  .venv/bin/py-spy dump --pid $PID 2>&1
+                  .venv/bin/py-spy dump --pid $PID --native 2>&1 | head -40
                   DUMPS=$((DUMPS+1))
-                  LAST_PID=$P
-                  sleep 75
-                else
-                  sleep 10
                 fi
               else
-                sleep 5
+                echo "=== WD heartbeat ${AGE}s: no buzz proc ==="
               fi
+              sleep 45
             done
-            echo "=== WATCHDOG: finished ($DUMPS dumps) ==="
+            echo "=== WD done ($DUMPS dumps) ==="
           ) &
           WD=$!
           export HERMES_TEST_WORKERS=12
@@ -100,4 +100,6 @@ jobs:
           timeout 2100 scripts/run_tests.sh --slice 8/8 --file-timeout 600
           RC=$?
           kill $WD 2>/dev/null || true
+          sleep 2
+          kill -9 $WD 2>/dev/null || true
           echo "RUN_TESTS_RC=$RC"
