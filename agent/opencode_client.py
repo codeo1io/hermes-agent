@@ -653,8 +653,12 @@ class OpenCodeClient:
         # wall budget (deliberate, unlike pi's inactivity window), so
         # zero_activity is not a structural signal here; classify from the
         # text the turn actually streamed, else fall back to agent_stall.
+        # transport_observed stays False: streamed assistant text is content,
+        # not provider runtime truth — a delegate reporting its own child-tool
+        # "timed out" must not open the provider breaker. Unambiguous refusal
+        # wording (429 / rate limit / 503) still classifies.
         error_class, provider_signal, retry_after = classify_delegate_failure(
-            evidence_text, zero_activity=False
+            evidence_text, zero_activity=False, transport_observed=False
         )
         if not evidence_text.strip():
             error_class = "agent_stall"

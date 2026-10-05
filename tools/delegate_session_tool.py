@@ -780,6 +780,22 @@ def _ledger_record_failure(key: tuple[str, str], error_class: str) -> None:
         logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
 
 
+def _ledger_release_probe(key: tuple[str, str]) -> None:
+    """Return a half-open probe grant this dispatch consumed but will not use.
+
+    ``check()`` grants the probe as a side effect; a path that consults the
+    gate and then dispatches no turn (no-goal bootstrap, a closed-session
+    race inside ``_run_turn``) must hand the grant back — otherwise the key
+    is stranded open until the probe TTL re-grant, and one leaked probe
+    silences every delegation on that (backend, model) in this process.
+    Fail-open like every ledger call: the TTL bounds the damage anyway.
+    """
+    try:
+        get_delegate_health_ledger().release_probe(key)
+    except Exception:
+        logger.debug("delegate health release_probe failed (fail-open)", exc_info=True)
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
     ledger_key = (
@@ -788,6 +804,9 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     )
     with _SESSION_CONDITION:
         if record.get("status") == "closed":
+            # The dispatching gate already consumed this turn's half-open
+            # probe grant (if any); a turn that never runs must give it back.
+            _ledger_release_probe(ledger_key)
             return
         record["error"] = ""
         _transition_status_locked(record, "running")
@@ -1149,6 +1168,12 @@ def delegate_session(
         _persist_metadata(record)
         if goal and goal.strip():
             _dispatch_turn(record, _initial_prompt(goal, context), effective_timeout)
+        else:
+            # The pre-spawn gate above granted the half-open probe (if the
+            # circuit was open and cooled down); a bootstrap without a goal
+            # runs no turn, so the grant must go back rather than strand the
+            # (backend, model) key until the probe TTL re-grant.
+            _ledger_release_probe((backend_name, model_arg))
         return json.dumps(
             {"success": True, "created": True, **_summary(record)}, ensure_ascii=False
         )

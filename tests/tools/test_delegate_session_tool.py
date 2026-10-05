@@ -11,7 +11,11 @@ import pytest
 
 import tools.delegate_session_tool as ds
 from agent.delegate_errors import DelegateTurnStalled
-from agent.delegate_health import reset_delegate_health_ledger
+from agent.delegate_health import (
+    INITIAL_COOLDOWN_S,
+    DelegateHealthLedger,
+    reset_delegate_health_ledger,
+)
 
 
 class Parent:
@@ -1395,6 +1399,47 @@ def test_open_circuit_refuses_followup_send_and_degraded_steer(monkeypatch, tmp_
 
     # No turn was dispatched through any of the three paths.
     assert ds._SESSIONS[sid]["client"].messages == []
+
+
+def test_no_goal_start_after_cooldown_does_not_strand_the_probe(monkeypatch):
+    """F1 (review): a bootstrap that consults the gate but dispatches no
+    turn (start/resume without a goal) consumed the half-open probe grant.
+    Before the fix the (backend, model) key stayed refused forever — a
+    fail-closed state inside a module whose contract says it must never add
+    one. The grant must be returned so the next send dispatches normally."""
+    clock = {"t": 1000.0}
+    ledger = DelegateHealthLedger(now=lambda: clock["t"])
+    monkeypatch.setattr(ds, "get_delegate_health_ledger", lambda: ledger)
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+    for _ in range(3):
+        ledger.record_failure(("pi", "glm-4.6"), "rate_limit")
+    clock["t"] += INITIAL_COOLDOWN_S + 1.0  # cooldown elapsed: gate will grant
+
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    assert started.get("success") is True  # bootstrap ran, no turn dispatched
+
+    send = payload(
+        ds.delegate_session(
+            action="send",
+            session_id=started["session_id"],
+            message="real work now",
+            parent_agent=parent,
+        )
+    )
+    assert "circuit open" not in (send.get("error") or ""), send
+    # The turn actually ran (the FakePiClient completes it) and resolved the
+    # probe as a success — wait on the LEDGER state (record_success runs
+    # after last_result + a metadata persist on the turn thread) — then the
+    # key is fully usable again: closed, not half-open.
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if ledger.check(("pi", "glm-4.6")) is None:
+            break
+        time.sleep(0.02)
+    assert ledger.check(("pi", "glm-4.6")) is None
+    assert ds._SESSIONS[started["session_id"]]["client"].messages
 
 
 def test_provider_failures_from_turns_open_the_circuit(monkeypatch, tmp_path):

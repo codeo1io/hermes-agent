@@ -117,7 +117,7 @@ def _evidence_line(text: str, start: int, default: str) -> str:
 
 
 def classify_delegate_failure(
-    text: str, *, zero_activity: bool
+    text: str, *, zero_activity: bool, transport_observed: bool = False
 ) -> tuple[str, str, float | None]:
     """Classify delegate failure text -> ``(error_class, provider_signal, retry_after)``.
 
@@ -129,24 +129,40 @@ def classify_delegate_failure(
     phrases win over the structural signal so a rate-limit line streamed just
     before silence still classifies as ``rate_limit``. Fail-open: unmatched
     text degrades to ``agent_stall``/``unknown`` instead of raising.
+
+    ``transport_observed`` marks evidence the RPC client itself watched during
+    the stalled turn (streamed deltas + the child's stderr for THIS turn).
+    Only there may generic "timed out"/"aborted" wording classify ``timeout``:
+    in an arbitrary exception's text (or assistant prose relayed by another
+    backend) the same words describe child-tool timeouts and local aborts —
+    provider classes that open the breaker must not fire on ambiguous prose.
     """
     lowered = (text or "").lower()
-    for markers, error_class in (
+    signature_tables = [
         (_RATE_LIMIT_MARKERS, "rate_limit"),
         (_OVERLOADED_MARKERS, "overloaded"),
         (_TIMEOUT_MARKERS, "timeout"),
         (_RESOURCE_MARKERS, "resource_exhausted"),
         (_TRANSPORT_MARKERS, "transport"),
-    ):
+    ]
+    if not transport_observed:
+        # Generic "timed out"/"aborted" wording is provider truth only when
+        # the RPC client observed it on the stalled turn itself. See docstring.
+        signature_tables = [t for t in signature_tables if t[1] != "timeout"]
+    for markers, error_class in signature_tables:
         for marker in markers:
             start, phrase = _find_marker(lowered, marker)
             if start >= 0:
+                line = _evidence_line(text, start, phrase)
                 retry_after: float | None = None
                 if error_class == "rate_limit":
-                    match = _RETRY_AFTER_RE.search(lowered)
+                    # Scoped to the matched line: a "for N seconds" phrase on
+                    # some OTHER line of the evidence is unrelated advice and
+                    # must not set the retry hint.
+                    match = _RETRY_AFTER_RE.search(line.lower())
                     if match:
                         retry_after = float(match.group(1))
-                return error_class, _evidence_line(text, start, phrase), retry_after
+                return error_class, line, retry_after
     if zero_activity:
         return "provider_stall", "", None
     if lowered.strip():

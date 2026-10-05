@@ -71,8 +71,11 @@ def test_delegate_turn_stalled_is_a_timeout_error_with_typed_attrs():
     ],
 )
 def test_signature_table(text, expected_class):
+    # transport_observed=True: this pins the FULL marker table as the RPC
+    # client uses it on turn evidence. Generic timeout wording from other
+    # callers (exception text, assistant prose) is gated separately below.
     error_class, provider_signal, _retry_after = classify_delegate_failure(
-        text, zero_activity=False
+        text, zero_activity=False, transport_observed=True
     )
     assert error_class == expected_class
     assert provider_signal  # a text match always yields bounded evidence
@@ -138,8 +141,55 @@ def test_rate_limit_beats_lower_priority_tables():
     error_class, _signal, _retry = classify_delegate_failure(
         "429 retry soon; service overloaded; request timed out",
         zero_activity=False,
+        transport_observed=True,
     )
     assert error_class == "rate_limit"
+
+
+def test_generic_timeout_wording_requires_transport_observed():
+    """An arbitrary exception saying "timed out"/"aborted" describes a
+    child-tool timeout or local abort far more often than a provider death,
+    and provider classes open the breaker — so from un-observed text the
+    wording degrades to agent_stall (fail-open) instead. Unambiguous
+    provider-refusal wording still classifies from any text."""
+    for text in (
+        "RuntimeError: subprocess timed out waiting for file lock",
+        "operation was aborted by the user",
+        "request timed out upstream",
+    ):
+        error_class, _signal, retry_after = classify_delegate_failure(
+            text, zero_activity=False
+        )
+        assert error_class == "agent_stall", text
+        assert retry_after is None
+        # The same wording on client-observed turn evidence (the pi stall
+        # path) is provider truth and keeps the timeout class.
+        error_class, _signal, _retry = classify_delegate_failure(
+            text, zero_activity=False, transport_observed=True
+        )
+        assert error_class == "timeout", text
+    # Refusal wording is unambiguous from any source — keeps classifying.
+    error_class, _signal, _retry = classify_delegate_failure(
+        "HTTP 429 Too Many Requests", zero_activity=False
+    )
+    assert error_class == "rate_limit"
+
+
+def test_retry_after_comes_only_from_the_matched_line():
+    """The cooldown hint is parsed from the rate-limit line itself, not from
+    any "for N seconds" phrase anywhere in the evidence (a sibling line's
+    "slept for 47 seconds" is unrelated advice)."""
+    _cls, _signal, retry_after = classify_delegate_failure(
+        "Rate limit: disabling model glm-4.6 for 1800 seconds (cooling down)",
+        zero_activity=False,
+    )
+    assert retry_after == 1800.0
+    _cls, _signal, retry_after = classify_delegate_failure(
+        "Rate limit: disabling model glm-4.6 (cooling down)\n"
+        "also slept for 47 seconds before failing",
+        zero_activity=False,
+    )
+    assert retry_after is None
 
 
 def test_provider_signal_is_bounded_and_case_preserving():

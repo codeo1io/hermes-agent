@@ -129,6 +129,48 @@ def test_failed_probe_doubles_cooldown_up_to_cap():
     assert state.retry_after_s == pytest.approx(MAX_COOLDOWN_S)
 
 
+def test_stranded_probe_grant_is_regranted_after_one_cooldown():
+    """A grant whose dispatch never ran a turn (no-goal bootstrap, closed-
+    session race) must not strand the key until process restart: one full
+    cooldown after the grant, the probe is handed out again."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # grant consumed, nothing resolves it
+    # Inside the TTL window a second dispatch is still refused —
+    assert isinstance(ledger.check(KEY), CircuitOpen)
+    # — with the REMAINING ttl as the hint, not a full cooldown.
+    clock.advance(INITIAL_COOLDOWN_S / 2)
+    state = ledger.check(KEY)
+    assert isinstance(state, CircuitOpen)
+    assert 0 < state.retry_after_s < INITIAL_COOLDOWN_S
+    # Past one full cooldown the grant cannot be the probe: re-granted.
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None
+    # And the re-granted probe behaves like any probe: success closes.
+    ledger.record_success(KEY)
+    assert ledger.check(KEY) is None
+
+
+def test_release_probe_returns_the_grant_without_resolving_it():
+    """Callers that consume a grant but dispatch no turn hand it back: the
+    next dispatch gets a fresh probe immediately, and the streak/cooldown
+    state is untouched (the probe tested nothing). No-op otherwise."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # grant
+    ledger.release_probe(KEY)
+    # Grant is back in the pool: next check() hands it out again.
+    assert ledger.check(KEY) is None
+    # No resolution happened — the circuit is still open, just half-open.
+    assert isinstance(ledger.check(KEY), CircuitOpen)
+    ledger.release_probe(KEY)  # no probe in flight: no-op, never raises
+    ledger.release_probe(("pi", "never-opened"))  # unknown key: no-op
+    ledger.release_probe(KEY)
+    assert ledger.check(KEY) is None  # still grantable
+
+
 def test_success_closes_and_resets_the_streak():
     ledger, clock = make_ledger()
     ledger.record_failure(KEY, "rate_limit")

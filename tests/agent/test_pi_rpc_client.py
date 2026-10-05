@@ -166,7 +166,7 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
         + "    typ = msg.get('type')\n"
         + "    if typ == 'prompt':\n"
         + "        send({'type':'response','id':msg['id'],'success':True})\n"
-        + "        for i in range(6):\n"
+        + "        for i in range(13):\n"
         # 10x scheduling margin between the tick gap and the stall budget:
         # tighter margins (2x-3x) false-positived stalls under the parallel
         # test runner when a single tick's reader-thread wakeup was delayed.
@@ -190,7 +190,11 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
     started = time.monotonic()
     result = client.run_session_prompt("go", timeout_seconds=1.0)
     elapsed = time.monotonic() - started
-    assert elapsed > 0.50
+    # The tick train (13 x 0.10s = 1.3s) deliberately OUTLASTS the 1.0s
+    # budget: with an absolute wall-clock cap the turn would be cut mid-train
+    # at 1.0s. Asserting only elapsed > 0.5s (6 ticks = 0.6s) made this pin
+    # vacuous — a capped implementation passed it too (review F2).
+    assert elapsed > 1.0
     assert result["text"] == "done"
     client.close()
 
@@ -297,6 +301,70 @@ def test_streamed_provider_outage_line_classifies_rate_limit(tmp_path):
     assert err.error_class == "rate_limit"
     assert "Rate limit" in err.provider_signal
     assert err.retry_after == 1800.0
+
+
+def test_stderr_rate_limit_line_during_the_turn_classifies_rate_limit(tmp_path):
+    """A cooling-down line on the child's stderr DURING this turn is fresh
+    evidence and types the stall (the 09-30 storm surfaced exactly this
+    line in the agent log)."""
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-stderr-fresh",
+        "        sys.stderr.write('Rate limit: disabling model glm-4.6 "
+        "for 1800 seconds (cooling down)\\n'); sys.stderr.flush()\n",
+    )
+    assert err.error_class == "rate_limit"
+    assert err.retry_after == 1800.0
+
+
+def test_stale_stderr_from_before_the_turn_does_not_type_the_stall(tmp_path):
+    """Review F4: the stderr tail is process-lifetime diagnostic history. A
+    rate-limit line from a PREVIOUS turn must not type this turn's
+    zero-activity stall — the structural signal owns that case
+    (provider_stall), never a stale refusal line. Turn 1 streams one and
+    completes normally; turn 2 stalls silently."""
+    script = tmp_path / "fake-pi-stderr-stale"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "def stderr(s): sys.stderr.write(s + chr(10)); sys.stderr.flush()\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        if msg.get('message') == 'first':\n"
+        + "            send({'type':'response','id':msg['id'],'success':True})\n"
+        + "            stderr('Rate limit: disabling model glm-4.6 for 1800 "
+        "seconds (cooling down)')\n"
+        + "            time.sleep(0.2)  # let the stderr reader drain it\n"
+        + "            send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'text_delta','delta':'ok'}})\n"
+        + "            send({'type':'agent_settled'})\n"
+        + "        else:\n"
+        + "            send({'type':'response','id':msg['id'],'success':True})\n"
+        + "            time.sleep(30)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://stall-stale-stderr",
+        persistent_session=True,
+    )
+    try:
+        first = client.run_session_prompt("first", timeout_seconds=5.0)
+        assert first["text"] == "ok"  # turn 1 completed with stderr present
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("second", timeout_seconds=0.08)
+        err = excinfo.value
+        assert err.zero_activity is True
+        assert err.error_class == "provider_stall"
+        assert err.retry_after is None
+    finally:
+        client.close()
 
 
 def test_stall_message_keeps_suffix_and_gains_timeout_prefix(tmp_path):

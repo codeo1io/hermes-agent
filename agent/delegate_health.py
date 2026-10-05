@@ -22,6 +22,13 @@ Semantics (kept deliberately small — this is a breaker, not a scheduler):
 - Cooldown ladder 900s -> 1800s (doubling, capped): after the cooldown one
   half-open probe is granted; a probe failure re-opens with double the
   cooldown, a success closes fully.
+- A granted probe is time-boxed by the same cooldown: a grant that never
+  resolves (the dispatch that asked for it never ran a turn — a no-goal
+  bootstrap, a closed-session race) is re-granted one cooldown later instead
+  of stranding the key until process restart. Callers that consume a grant
+  without dispatching a turn return it via ``release_probe``; the TTL is the
+  safety net for any path that forgets. The breaker must never become a new
+  way to fail closed — including through its own half-open state.
 """
 
 from __future__ import annotations
@@ -41,6 +48,7 @@ __all__ = [
     "MAX_COOLDOWN_S",
     "WINDOW_S",
     "get_delegate_health_ledger",
+    "release_probe",
     "reset_delegate_health_ledger",
 ]
 
@@ -87,6 +95,7 @@ class DelegateHealthLedger:
                     "opened_at": None,
                     "cooldown": INITIAL_COOLDOWN_S,
                     "probing": False,
+                    "probe_at": None,
                 },
             )
             entry["last_error_class"] = error_class
@@ -101,6 +110,7 @@ class DelegateHealthLedger:
                 # failures would re-open the provider to the storm after every
                 # single probe (the window prunes the history that opened it).
                 entry["probing"] = False
+                entry["probe_at"] = None
                 entry["cooldown"] = min(entry["cooldown"] * 2, MAX_COOLDOWN_S)
                 entry["opened_at"] = now
                 return
@@ -114,17 +124,34 @@ class DelegateHealthLedger:
         with self._lock:
             self._entries.pop(key, None)
 
+    def release_probe(self, key: LedgerKey) -> None:
+        """Return a granted half-open probe without resolving it.
+
+        For callers that consumed a ``check()`` grant but then dispatch no
+        turn (a no-goal bootstrap, a closed-session race): the probe tested
+        nothing, so it goes back in the pool instead of stranding the key
+        until the TTL re-grant. No-op when no probe is in flight.
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry.get("probing"):
+                entry["probing"] = False
+                entry["probe_at"] = None
+
     def check(self, key: LedgerKey) -> CircuitOpen | None:
         """`None` = dispatch may proceed; `CircuitOpen` = refuse/defer.
 
         While the cooldown has elapsed, exactly one half-open probe is
-        granted; a second check before that probe resolves is still refused.
+        granted; a second check before that probe resolves is still refused
+        — unless the grant has outlived a full cooldown (TTL), in which case
+        it cannot still be the probe and a fresh one is granted.
         """
         with self._lock:
             entry = self._entries.get(key)
             if entry is None or entry["opened_at"] is None:
                 return None
-            elapsed = self._now() - entry["opened_at"]
+            now = self._now()
+            elapsed = now - entry["opened_at"]
             if elapsed < entry["cooldown"]:
                 return CircuitOpen(
                     retry_after_s=entry["cooldown"] - elapsed,
@@ -133,10 +160,19 @@ class DelegateHealthLedger:
                 )
             if not entry["probing"]:
                 entry["probing"] = True
+                entry["probe_at"] = now
                 return None
-            # Probe already in flight: stay closed to it until it resolves.
+            # Probe already in flight: stay closed to it until it resolves —
+            # or until the grant is older than one cooldown, which means the
+            # dispatch that consumed it never ran a turn (leaked grant). The
+            # key must not stay dead until process restart; re-grant.
+            probe_ttl = entry["cooldown"]
+            probe_age = now - (entry.get("probe_at") or entry["opened_at"])
+            if probe_age >= probe_ttl:
+                entry["probe_at"] = now
+                return None
             return CircuitOpen(
-                retry_after_s=entry["cooldown"],
+                retry_after_s=probe_ttl - probe_age,
                 consecutive=entry["consecutive"],
                 last_error_class=entry["last_error_class"],
             )

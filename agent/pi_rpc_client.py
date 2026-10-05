@@ -265,6 +265,13 @@ class PiRPCClient:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._stderr_tail: deque[str] = deque(maxlen=40)
+        # Per-turn stderr view: the reader appends here alongside the
+        # process-lifetime `_stderr_tail`, and the turn start resets it. Stall
+        # classification must only see stderr from THIS turn — the lifetime
+        # deque keeps diagnostic history across turns, so classifying from it
+        # lets yesterday's rate-limit (or host-exhaustion) line type today's
+        # zero-activity stall.
+        self._turn_stderr: list[str] = []
         self._text_parts: list[str] = []
         self._reasoning_parts: list[str] = []
         self._settled = threading.Event()
@@ -515,6 +522,7 @@ class PiRPCClient:
             return
         for line in proc.stderr:
             self._stderr_tail.append(line.rstrip("\n"))
+            self._turn_stderr.append(line.rstrip("\n"))
 
     def _send_pi(self, command: dict) -> None:
         proc = self._proc
@@ -833,6 +841,7 @@ class PiRPCClient:
             self._spawn()
             self._text_parts = []
             self._reasoning_parts = []
+            self._turn_stderr = []
             self._settled = threading.Event()
             self.text_streamed = False
             started = time.monotonic()
@@ -875,10 +884,12 @@ class PiRPCClient:
                     # the tail of the streamed deltas.
                     with self._turn_activity_lock:
                         zero_activity = self._turn_event_count == 0
+                    # Only THIS turn's stderr (see `_turn_stderr`): the
+                    # process-lifetime tail carries cross-turn history.
                     evidence = (
                         "".join(self._text_parts[-16:])
                         + "".join(self._reasoning_parts[-16:])
-                        + "\n".join(self._stderr_tail)
+                        + "\n".join(self._turn_stderr[-16:])
                     )[-4096:]
                     try:
                         self._send_pi({"type": "abort"})
@@ -894,7 +905,11 @@ class PiRPCClient:
                         # native session, not a lost one.
                         self._terminate_after_stall()
                     error_class, provider_signal, retry_after = (
-                        classify_delegate_failure(evidence, zero_activity=zero_activity)
+                        classify_delegate_failure(
+                            evidence,
+                            zero_activity=zero_activity,
+                            transport_observed=True,
+                        )
                     )
                     detail = (
                         "pi session turn timed out: "
