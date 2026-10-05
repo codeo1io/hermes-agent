@@ -556,3 +556,31 @@ def test_run_prompt_timeout_without_streamed_text_is_agent_stall():
         client.run_session_prompt("hi", timeout_seconds=0.2, poll_interval=0.05)
     assert excinfo.value.error_class == "agent_stall"
     assert excinfo.value.retry_after is None
+
+
+def test_run_prompt_advances_liveness_activity_on_transcript_change():
+    """Review fix: opencode turns expose the same wall-clock liveness signal
+    the delegate observer reads. Every observed transcript change stamps
+    ``last_turn_activity_at``, so a healthy long opencode turn is
+    distinguishable from a wedged one mid-turn — before this the observer
+    had no signal to read for opencode backends and durable metadata
+    advertised no activity for the whole turn."""
+    final = [_msg("m1", "user", "hi", 1), _msg("m2", "assistant", "hello!", 2)]
+    transport = FakeTransport(
+        [
+            (204, ""),  # prompt_async accepted
+            (200, [_msg("m1", "user", "hi", 1)]),  # baseline snapshot
+        ],
+        default=lambda _m, _p, _b: (200, final if _p.startswith("/session") else []),
+    )
+    client = make_client(transport)
+    # No activity before the turn (None, not a fake 0.0 timestamp).
+    assert client.last_turn_activity_at is None
+    before = time.time()
+    result = client.run_session_prompt("hi", timeout_seconds=5.0)
+    after = time.time()
+    assert result["text"] == "hello!"
+    # The stamp is wall-clock (the observer compares it against other
+    # wall-clock activity sources) and lands inside the turn.
+    assert isinstance(client.last_turn_activity_at, float)
+    assert before <= client.last_turn_activity_at <= after

@@ -46,6 +46,7 @@ from pathlib import Path
 import pytest
 
 from tests.e2e.core.upgrade._helpers import (
+    BWRAP_OK,
     WORKTREE,
     describe,
     isolated_env,
@@ -764,9 +765,15 @@ def test_serve_announces_ready_and_stops_cleanly_on_sigterm(tmp_path):
             record = json.loads(record_file.read_text(encoding="utf-8"))
             assert record.get("port") == port, record
 
-            # bwrap's own argv also carries these strings: match the interpreter's argv[1] exactly.
-            reaper_proc = next(p for p in psutil.Process(proc.pid).children(recursive=True)
-                               if p.cmdline()[1:2] == [str(reaper)])
+            # Under bwrap, proc is the sandbox wrapper and the reaper python is a
+            # descendant whose argv[1] is the script path (bwrap's own argv also
+            # carries these strings, so match the interpreter's argv[1] exactly).
+            # Without a usable bwrap — the GitHub-hosted runner image ships none —
+            # sandbox_argv passes through and proc IS the reaper.
+            reaper_proc = psutil.Process(proc.pid)
+            if BWRAP_OK:
+                reaper_proc = next(p for p in reaper_proc.children(recursive=True)
+                                   if p.cmdline()[1:2] == [str(reaper)])
             serve = next(p for p in reaper_proc.children() if p.cmdline()[1:3] == ["-m", "hermes_cli.main"])
             descendants = [p.pid for p in serve.children(recursive=True)]
             serve.send_signal(signal.SIGTERM)
