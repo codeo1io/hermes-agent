@@ -48,7 +48,13 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     def transcript() -> str:
         return tmux("capture-pane", "-p", "-J", "-t", "p", "-S", "-", "-E", "-")
 
-    def wait_for(needle: str, timeout: float = 60.0) -> None:
+    def wait_for(needle: str, timeout: float = 150.0) -> None:
+        # The reply itself is a 3-4 s scripted stream, but on CI the CLI boots
+        # and streams under the e2e lane's parallel workers, where a 60 s bound
+        # assumed a near-exclusive runner and starved the fake provider's
+        # server thread (flake policy: timing tests must not assume a quiet
+        # runner). 150 s waits for the same needle; it does not weaken the
+        # once-in-scrollback invariant asserted below.
         end = time.monotonic() + timeout
         while needle not in transcript():
             assert time.monotonic() < end, f"{needle!r} never appeared:\n{transcript()[-3000:]}"
