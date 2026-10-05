@@ -72,7 +72,14 @@ jobs:
     name: Python tests
     needs: detect
     if: needs.detect.outputs.python == 'true'
-    uses: ./.github/workflows/tests.yml
+    # Ephemeral "Conductor CI validation" PRs pair this fork's code with
+    # origin/main's workflow files, whose tests.yml cannot finish on this
+    # account's hosted-only runner pool (one ~150m unit job + 32-core pinned
+    # e2e lanes that never leave the queue). conductor-tests.yml reruns the
+    # same suites sharded across hosted runners so those PRs complete.
+    # Real PRs and pushes are unaffected: this swap only ever executes in
+    # ci.yaml copies carried by a validation snapshot.
+    uses: ./.github/workflows/conductor-tests.yml
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the
@@ -142,7 +149,10 @@ jobs:
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
     if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    uses: ./.github/workflows/e2e-desktop-core.yml
+    # Same story as the `tests` swap above: conductor-e2e-desktop-core.yml is
+    # the identical lane plus a suite-presence guard for snapshot trees from
+    # before apps/desktop/e2e/core existed; it only runs on validation PRs.
+    uses: ./.github/workflows/conductor-e2e-desktop-core.yml
 
   docs-site:
     name: Docs Site
