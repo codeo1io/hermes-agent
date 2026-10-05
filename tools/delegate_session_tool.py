@@ -50,6 +50,10 @@ _METADATA_VERSION = 4
 # advance, so a long healthy turn stays visible to outside readers of the
 # durable file (the evidence-source wedge) without write churn. Module-level
 # constants (no env vars); tests inject tighter values via monkeypatch.
+# Consumption contract: worst-case lag from turn start to the durable
+# "running" flip is ~_ACTIVITY_REFRESH_MIN_S + _OBSERVER_POLL_S (the
+# watermark is seeded from the previous turn's last observed activity), so
+# supervisor escalation windows must stay above that bound (~35 s here).
 _OBSERVER_POLL_S = 5.0
 _ACTIVITY_REFRESH_MIN_S = 30.0
 
@@ -85,7 +89,8 @@ def _backend_client_class(backend: str):
 
 
 def _session_store_root() -> Path:
-    """Profile-scoped durable metadata store (IDs/cwd only; never prompt text)."""
+    """Profile-scoped durable metadata store (IDs/cwd plus the bounded v4
+    operational ledger — status/pid/activity/error class; never prompt text)."""
     try:
         from hermes_constants import get_hermes_home
 
@@ -192,25 +197,27 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        # Build the snapshot under the lock so turn-thread and watcher
-        # persists serialize on one consistent view of the record.
+        # Snapshot AND write under the lock: a persist that started while the
+        # turn was "running" and then loses the race to the turn's terminal
+        # transition re-snapshots here (the transition holds the same lock),
+        # so a stale "running" file can never replace a terminal one.
+        # RLock: transition-path callers already holding the lock re-enter.
         with _SESSION_LOCK:
             snapshot = _metadata_snapshot(record)
-        tmp.write_text(
-            json.dumps(snapshot, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        tmp.replace(path)
-        _prune_durable_metadata(path.parent)
-        # Advance the in-turn refresh watermark (in-memory only) so the
-        # observer's write cap stays exact across watcher and transition
-        # persists. Placed after the replace: only successful writes count.
-        with _SESSION_LOCK:
+            tmp.write_text(
+                json.dumps(snapshot, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            try:
+                tmp.chmod(0o600)
+            except OSError:
+                pass
+            tmp.replace(path)
+            # Advance the in-turn refresh watermark (in-memory only) so the
+            # observer's write cap stays exact across watcher and transition
+            # persists. Placed after the replace: only successful writes count.
             record["last_persisted_activity"] = snapshot.get("last_turn_activity_at")
+        _prune_durable_metadata(path.parent)
     except OSError:
         logger.debug(
             "Could not persist delegate-session metadata for %s",
@@ -876,6 +883,21 @@ def _observer_loop(record: Dict[str, Any]) -> None:
             _persist_metadata(record)
 
 
+def _scoped_thread(target, *, name: str, daemon: bool, args: tuple) -> threading.Thread:
+    """Unstarted thread running *target* under the spawner's contextvars.
+
+    Turn and observer persists resolve the session store through
+    ``get_hermes_home()``; under a multiplex gateway that resolution is a
+    context-local profile override. A bare ``threading.Thread`` drops it and
+    silently writes the launch home instead of the served profile's store
+    (the cross-profile leak class; see tools/AGENTS.md "New threads from
+    scoped code use ``spawn_context_thread``").
+    """
+    from agent.memory_provider import spawn_context_thread
+
+    return spawn_context_thread(target, name=name, daemon=daemon, args=args)
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
     with _SESSION_CONDITION:
@@ -887,8 +909,8 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         record["turn_started_at"] = time.time()
         record["turn_count"] = int(record.get("turn_count") or 0) + 1
         _transition_status_locked(record, "running")
-    observer = threading.Thread(
-        target=_observer_loop,
+    observer = _scoped_thread(
+        _observer_loop,
         args=(record,),
         name=f"delegate-{record['session_id'][:8]}-obs",
         # Daemon: the observer only refreshes a file; it must never keep the
@@ -944,8 +966,8 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
-    thread = threading.Thread(
-        target=_run_turn,
+    thread = _scoped_thread(
+        _run_turn,
         args=(record, message, timeout),
         name=f"delegate-{record['session_id'][:8]}",
         # Keep the interpreter alive until the active delegated turn reaches a
