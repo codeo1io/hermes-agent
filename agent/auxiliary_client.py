@@ -1115,15 +1115,17 @@ def _scoped_key_env(name: str) -> str:
     """Read a provider API key (or its paired base-URL) env var through the profile secret scope.
 
     In agent turns the scope's verdict is authoritative (a scoped miss must not borrow another
-    profile's key); unscoped startup/CLI paths fall back to os.environ.
+    profile's key); only the unscoped default-profile path (``UnscopedSecretError``) reads
+    ``os.environ`` -- any other scope failure propagates instead of borrowing the ambient env.
     """
     if not name:
         return ""
-    with contextlib.suppress(Exception):
-        from agent.secret_scope import UnscopedSecretError, get_secret
-        with contextlib.suppress(UnscopedSecretError):
-            return (get_secret(name) or "").strip()
-    return (os.getenv(name) or "").strip()
+    from agent.secret_scope import UnscopedSecretError, get_secret
+
+    try:
+        return (get_secret(name) or "").strip()
+    except UnscopedSecretError:
+        return (os.getenv(name) or "").strip()
 
 
 # Codex Responses → chat.completions adapter, so aux consumers need no changes.
@@ -3341,6 +3343,12 @@ def _is_structured_output_rejection(exc: Exception) -> bool:
     ):
         return True
     if "response_format" in err_lower and "unavailable" in err_lower:
+        return True
+    # Gemini native names its own generationConfig keys, never ours: "Function calling with a response
+    # mime type: 'application/json' is unsupported" (pre-Gemini-3 + tools via a proxy), or an
+    # "Unknown name"/"Invalid value" 400 on response_schema / response_json_schema for a schema the
+    # surface cannot express. Same remedy: one retry without the format.
+    if _contains_any(err_lower, ("response mime type", "response_schema", "response_json_schema")):
         return True
     # Gateways that validate the request body with a strict pydantic model reject the
     # OBJECT-form json_schema by shape ("str type expected" on response_format.json_schema,
