@@ -50,6 +50,11 @@
     "kind": "bare_which"
   },
   {
+    "path": "agent/opencode_client.py",
+    "symbol": "_opencode_command",
+    "kind": "bare_which"
+  },
+  {
     "path": "agent/secret_sources/bitwarden.py",
     "symbol": "find_bws",
     "kind": "bare_which"
@@ -127,6 +132,11 @@
   {
     "path": "hermes_cli/auth.py",
     "symbol": "_external_process_spec",
+    "kind": "bare_which"
+  },
+  {
+    "path": "hermes_cli/auth.py",
+    "symbol": "resolve_external_process_provider_credentials",
     "kind": "bare_which"
   },
   {
@@ -502,6 +512,11 @@
   {
     "path": "tools/computer_use/cua_backend_driver.py",
     "symbol": "resolve_cua_driver_cmd",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/delegate_session_tool.py",
+    "symbol": "check_delegate_session_requirements",
     "kind": "bare_which"
   },
   {

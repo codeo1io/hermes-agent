@@ -71,8 +71,38 @@ jobs:
   tests:
     name: Python tests
     needs: detect
-    if: needs.detect.outputs.python == 'true'
+    # Standard lane for real PRs and pushes. Ephemeral "Conductor CI
+    # validation" PRs take tests-conductor below instead: they pair this
+    # fork's code with origin/main's workflow files, whose tests.yml cannot
+    # finish on this account's hosted-only runner pool (one ~150m unit job
+    # + 32-core pinned e2e lanes that never leave the queue). The guard is
+    # the SAME exemption review-labels.yml uses, so the conductor lanes are
+    # selected ONLY on those PRs; on a push (no head_ref / PR title) both
+    # startsWith are false and this lane runs.
+    if: >-
+      ${{
+        needs.detect.outputs.python == 'true'
+        && !(
+          startsWith(github.head_ref, 'conductor/ci-')
+          && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+        )
+      }}
     uses: ./.github/workflows/tests.yml
+
+  tests-conductor:
+    name: Python tests (conductor validation)
+    needs: detect
+    # Hosted-runner rerun of the same suites (8-way shard + runner-based
+    # e2e, WAL-guarded, TUI-built — see conductor-tests.yml) so ephemeral
+    # validation PRs complete inside the caller's wait window. Guarded to
+    # those PRs only; everything else takes the standard `tests` lane.
+    if: >-
+      ${{
+        needs.detect.outputs.python == 'true'
+        && startsWith(github.head_ref, 'conductor/ci-')
+        && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+      }}
+    uses: ./.github/workflows/conductor-tests.yml
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the
@@ -141,8 +171,32 @@ jobs:
     needs: detect
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
-    if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
+    # Conductor validation PRs take e2e-desktop-core-conductor below (same
+    # head_ref + title guard as the `tests` lane split above).
+    if: >-
+      ${{
+        (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')
+        && !(
+          startsWith(github.head_ref, 'conductor/ci-')
+          && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+        )
+      }}
     uses: ./.github/workflows/e2e-desktop-core.yml
+
+  e2e-desktop-core-conductor:
+    name: Desktop core E2E (conductor validation)
+    needs: detect
+    # Same story as the `tests` split above: conductor-e2e-desktop-core.yml
+    # is the identical lane plus a suite-presence guard for snapshot trees
+    # from before apps/desktop/e2e/core existed; selected only on
+    # conductor validation PRs.
+    if: >-
+      ${{
+        (needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true')
+        && startsWith(github.head_ref, 'conductor/ci-')
+        && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+      }}
+    uses: ./.github/workflows/conductor-e2e-desktop-core.yml
 
   docs-site:
     name: Docs Site
@@ -236,6 +290,7 @@ jobs:
     needs:
       - detect
       - tests
+      - tests-conductor
       - tests-os
       - lint
       - js-tests
@@ -243,6 +298,7 @@ jobs:
       - rust-tests
       - e2e-desktop
       - e2e-desktop-core
+      - e2e-desktop-core-conductor
       - docs-site
       - history-check
       - contributor-check
