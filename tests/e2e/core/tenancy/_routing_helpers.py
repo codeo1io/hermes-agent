@@ -137,6 +137,27 @@ class Fleet:
         for srv in self.servers.values():
             srv.stop()
 
+    def wait_quiet(self, settle: float = 1.5, timeout: float = 30.0) -> None:
+        """Block until no fleet server has received a request for ``settle`` seconds.
+
+        Spares the switch legs from racing an aux call (first-turn title generation) that
+        was correctly scoped to the PREVIOUS host when it fired but whose HTTP POST lands
+        after the session has moved — indistinguishable from a routing leak in the fake
+        server's log. Does not weaken the per-leg invariant: every request inside a leg's
+        window must still come from that leg's selected host with that host's key.
+        """
+        deadline = time.monotonic() + timeout
+        last = {role: len(srv.requests) for role, srv in self.servers.items()}
+        last_change = time.monotonic()
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            now = {role: len(srv.requests) for role, srv in self.servers.items()}
+            if now != last:
+                last, last_change = now, time.monotonic()
+            elif time.monotonic() - last_change >= settle:
+                return
+        raise AssertionError(f"fleet did not quiet down within {timeout}s; last request counts {last}")
+
     def marks(self) -> dict[str, int]:
         return {role: len(srv.requests) for role, srv in self.servers.items()}
 

@@ -84,8 +84,8 @@ def _ra():
 
 AGENT_RUNTIME_POST_HOOK_TOOL_NAMES = frozenset({
     "todo_list", "session_search", "memory", "clarify", "read_terminal", "desktop_preview",
-    "drive_preview", "annotate_preview", "read_window_below", "manage_connections", "setup_mcp", "gui_tour",
-    "delegate_task",
+    "drive_preview", "annotate_preview", "read_window_below", "manage_connections", "manage_catalog", "setup_mcp",
+    "gui_tour", "delegate_task",
 })
 
 _TRAJECTORY_SYSTEM_PROMPT = (
@@ -2371,7 +2371,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     no display logic. Used by the concurrent path; the sequential path keeps its own inline
     invocation for display."""
     from agent.inline_tool_executors import (
-        InlineToolContext, emit_terminal_post_tool_call, resolve_invoke_tool_executor, tool_hook_ids
+        InlineToolContext, apply_transform_tool_result, emit_terminal_post_tool_call,
+        resolve_invoke_tool_executor, tool_hook_ids,
     )
     if not isinstance(function_args, dict):
         function_args = {}
@@ -2415,11 +2416,19 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 duration_ms=int((time.monotonic() - tool_start_time) * 1000),
                 middleware_trace=_tool_middleware_trace,
             )
-            return result
+            # Inline dispatch never reaches handle_function_call, so the concurrent path
+            # owns the transform_tool_result contract here, exactly as the sequential
+            # publisher does for inline tools ("every tool", once per call).
+            return apply_transform_tool_result(
+                agent, function_name=function_name,
+                function_args=next_args if isinstance(next_args, dict) else function_args,
+                result=result, effective_task_id=effective_task_id, tool_call_id=tool_call_id,
+                duration_ms=int((time.monotonic() - tool_start_time) * 1000),
+            )
     elif function_name == "delegate_session":
         def _execute(next_args: dict) -> Any:
             from tools.delegate_session_tool import delegate_session as _delegate_session
-            return _delegate_session(
+            result = _delegate_session(
                 action=next_args.get("action") or "start",
                 session_id=next_args.get("session_id"),
                 goal=next_args.get("goal"),
@@ -2427,6 +2436,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 message=next_args.get("message"),
                 timeout=next_args.get("timeout"),
                 parent_agent=agent,
+            )
+            # Same contract as inline tools: delegate dispatch bypasses handle_function_call.
+            return apply_transform_tool_result(
+                agent, function_name=function_name, function_args=next_args, result=result,
+                effective_task_id=effective_task_id, tool_call_id=tool_call_id,
+                duration_ms=int((time.monotonic() - tool_start_time) * 1000),
             )
     else:
         def _execute(next_args: dict) -> Any:
