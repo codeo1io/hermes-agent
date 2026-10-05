@@ -85,6 +85,24 @@ def test_build_auth_event_shape_and_owner_tag():
     assert event["pubkey"] == nostr_auth.public_key_hex(TEST_PRIVATE_KEY)
 
 
+async def _cancel_and_await(task: "asyncio.Task[None]", timeout: float = 5.0) -> None:
+    """Cancel ``task`` and wait for it with a bound that holds on Python 3.11.
+
+    ``asyncio.wait_for`` keeps waiting for its inner task after its own timeout
+    fires, and on Python 3.11 a task cancelled mid-``sleep`` can wedge in
+    ``cancelling`` state forever (bpo-42130 family) — the whole file then dies
+    to the per-file runner timeout.  ``asyncio.timeout`` cancels *this*
+    coroutine instead, which the event loop always honours, so the wait stays
+    bounded; a wedged task is left pending and reported at loop close.
+    """
+    task.cancel()
+    try:
+        async with asyncio.timeout(timeout):
+            await task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
 # ── Adapter WS wiring ─────────────────────────────────────────────────────
 
 
@@ -181,11 +199,7 @@ async def test_websocket_loop_reconnects_when_read_goes_silent(monkeypatch, capl
             await asyncio.sleep(0.02)
     finally:
         release_parked_receive.set()
-        task.cancel()
-        try:
-            await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        await _cancel_and_await(task)
 
     assert len(sockets) >= 2, "idle read watchdog did not force a reconnect"
     assert sockets[0].exited, "the silent connection was not closed before reconnecting"
@@ -244,11 +258,7 @@ async def test_websocket_loop_reconnects_when_discovery_send_sees_closed_socket(
         while len(sockets) < 2 and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
     finally:
-        task.cancel()
-        try:
-            await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        await _cancel_and_await(task)
 
     assert len(sockets) >= 2, "a closed socket seen by the discovery sweep did not force a reconnect"
     assert sockets[0].exited, "the dead connection was not closed before reconnecting"
@@ -283,11 +293,7 @@ async def test_websocket_loop_backs_off_and_publishes_retrying_on_clean_relay_cl
     try:
         await asyncio.sleep(0.3)
     finally:
-        task.cancel()
-        try:
-            await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            pass
+        await _cancel_and_await(task)
 
     assert len(sockets) == 1, f"clean close must back off before reconnecting, got {len(sockets)} connects in 0.3s"
     assert sockets[0].exited, "the closed connection was not exited before backing off"
@@ -340,7 +346,12 @@ async def test_websocket_loop_dispatches_frames_and_closes_cleanly(monkeypatch):
 
     task = asyncio.create_task(adapter._websocket_loop())
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 10.0)
+        # asyncio.timeout cancels THIS coroutine if the loop wedges instead of
+        # exiting, so a regression fails the test instead of hanging the file
+        # past the per-file runner timeout (asyncio.wait_for would keep waiting
+        # for the inner task after its own bound on 3.11).
+        async with asyncio.timeout(10.0):
+            await task
 
     assert sockets[0].exited, "clean close did not exit the async-with block"
     assert handled and handled[0][0] == CHANNEL
@@ -445,11 +456,7 @@ async def test_websocket_loop_drops_restricted_channel_without_reconnect():
     )
     assert not task.done(), "websocket_loop must not exit/reconnect on a restricted CLOSED"
 
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
+    await _cancel_and_await(task)
 
 
 @pytest.mark.asyncio
@@ -514,11 +521,7 @@ async def test_websocket_loop_reconnects_on_non_restricted_closed():
         "non-restricted CLOSED must not add channel to _restricted_channels"
     )
 
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
+    await _cancel_and_await(task)
 
 
 def test_restricted_channels_skipped_during_subscribe():
@@ -674,11 +677,7 @@ async def test_closed_membership_phrases_prune_without_reconnect(detail):
     assert CHANNEL not in adapter._channel_state
     assert not task.done(), "membership rejection must not reconnect the socket"
 
-    task.cancel()
-    try:
-        await task
-    except (asyncio.CancelledError, Exception):
-        pass
+    await _cancel_and_await(task)
 
 
 @pytest.mark.asyncio
@@ -742,11 +741,9 @@ async def test_ws_discovery_loop_subscribes_newly_discovered_conversation(monkey
         while not ws.sent and time.monotonic() < deadline:
             await asyncio.sleep(0.02)
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        # Bounded: a raw ``await task`` here can wedge past the per-file runner
+        # timeout when the cancellation lands inside the sweep's cleanup.
+        await _cancel_and_await(task)
 
     assert new_dm in subscriptions.values(), "sweep did not subscribe the new conversation"
     req = ws.sent[0]
@@ -791,7 +788,9 @@ async def test_ws_discovery_task_cancelled_when_connection_exits(monkeypatch):
 
     task = real_create_task(adapter._websocket_loop())
     with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(task, 10.0)
+        # Bounded for the same reason as the clean-close test above.
+        async with asyncio.timeout(10.0):
+            await task
 
     assert started, "discovery task was never started with the connection"
     assert all(t.done() for t in started), "discovery task outlived its connection"
