@@ -697,8 +697,9 @@ class TelegramAdapter(BasePlatformAdapter):
         super()._set_fatal_error(code, message, retryable=retryable)
         # Permanent fatal: no reconnect will drain, so discard the hold queue (later holds are refused).
         # Discard the hold queue now and refuse further holds (teardown salvage / late enqueue must not
-        # re-populate a queue that can never drain — review #83878).
-        if not retryable:
+        # re-populate a queue that can never drain — review #83878) — UNLESS a replacement is pending:
+        # the queue then travels into the rebuilt adapter and drains through it (#132829).
+        if not retryable and not self._held_inbound_has_pending_owner():
             held = getattr(self, "_held_inbound_events", None)
             n = len(held) if held else 0
             if held:
@@ -721,6 +722,26 @@ class TelegramAdapter(BasePlatformAdapter):
         if live is not None and live is not self and getattr(live, "_bot", None):
             return live
         return None
+
+    def _held_inbound_has_pending_owner(self) -> bool:
+        """True when a replacement adapter is installed or this platform is queued for one: the
+        hold queue must survive to be carried into that replacement (``carry_held_inbound``)
+        instead of being discarded with a non-retryable fatal on the retired instance (#132829)."""
+        if self._replacement_telegram_adapter() is not None:
+            return True
+        runner = getattr(self, "gateway_runner", None)
+        platform = getattr(self, "platform", None)
+        if platform is None:
+            return False
+        pending = getattr(runner, "_failed_platforms", None)
+        if isinstance(pending, dict) and platform in pending:
+            return True
+        profile_pending = getattr(runner, "_profile_failed_platforms", None)
+        if isinstance(profile_pending, dict):
+            for per_profile in profile_pending.values():
+                if isinstance(per_profile, dict) and platform in per_profile:
+                    return True
+        return False
 
     async def _wait_for_reconnection(self) -> bool:
         """Wait for ``_bot`` or a replacement adapter; False on expiry or permanent fatal."""
@@ -780,6 +801,12 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning(
                 "[Telegram] Discarding inbound under non-retryable fatal (%s, %d chars)", where, len(getattr(event, "text", None) or ""))
             return
+        live = self._replacement_telegram_adapter()
+        if live is not None:
+            # A retired instance must not park events on itself — its drain never runs again.
+            # Hold (and schedule) on the replacement that owns the connection (#132829).
+            live._hold_inbound_event(event, where=where, schedule=schedule)
+            return
         held = getattr(self, "_held_inbound_events", None)
         if held is None:
             self._held_inbound_events = held = []
@@ -809,6 +836,20 @@ class TelegramAdapter(BasePlatformAdapter):
         redispatch task) is cancelled+awaited here so ``_mark_connected`` stays synchronous."""
         if prior is not asyncio.current_task():  # a self-redispatch must not cancel itself
             await cancel_task(prior)
+        live = self._replacement_telegram_adapter()
+        if live is not None:
+            # Retired instance: its backlog belongs to the replacement. Normally the list is
+            # already shared (carry_held_inbound adopted it by reference) and only the schedule
+            # needs handing over; a backlog stranded on a private list moves over explicitly.
+            held = getattr(self, "_held_inbound_events", None)
+            if held:
+                if getattr(live, "_held_inbound_events", None) is not held:
+                    for event in list(held):
+                        live._hold_inbound_event(event, where="replacement-handoff", schedule=True)
+                    logger.warning("[Telegram] Handed %d held inbound message(s) to the replacement adapter", len(held))
+                    held.clear()
+            live._schedule_held_inbound_redispatch()
+            return
         held = getattr(self, "_held_inbound_events", None)
         if self._is_permanent_fatal():
             if held:

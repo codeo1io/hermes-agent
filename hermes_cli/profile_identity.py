@@ -115,12 +115,19 @@ def _purge_profile_identity(canon: str, live_mux: bool) -> bool:
         return False
 
     from hermes_cli.profiles import get_profile_dir
-    from hermes_constants import get_default_hermes_root
+    from hermes_constants import get_default_hermes_root, named_profile_is_deleted
     from hermes_state_registry import acquire, release_or_close
     root = get_default_hermes_root()
     purged = True
     for db_path in (root / "state.db", get_profile_dir(canon) / "state.db"):
         if not db_path.exists():
+            continue
+        # A tombstoned home (the delete tombstones BEFORE its rmtree) is going away with its
+        # directory: that store's rows die with it, and the live-guard in acquire() refuses to
+        # open a writer under a tombstoned home — acquiring it turned every cold delete into a
+        # false "identity purge failed" settlement (#132825). The default root's store above
+        # carries the identity rows that actually survive the delete.
+        if named_profile_is_deleted(db_path.parent):
             continue
         db = None
         try:

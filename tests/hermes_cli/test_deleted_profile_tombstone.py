@@ -317,3 +317,42 @@ class TestNamedProfileHome:
         (profiles_dir / ".deleted").mkdir(parents=True)
         worker = profiles_dir / "worker"
         assert named_profile_home(worker / "logs") == worker
+
+
+class TestDeleteSettlesIdentityWithoutFalseFailure:
+    """Delete tombstones the profile home BEFORE settling its identity; the cold purge used to
+    acquire that (tombstoned) home's state.db, whose live-guard refuses with FileNotFoundError —
+    turning every cold delete into a false "identity purge failed" settlement (#132825)."""
+
+    def test_cold_purge_skips_tombstoned_profile_store(self, profile_env):
+        """A tombstoned home's store dies with its directory; the purge must skip it (the default
+        root's store carries the identity rows that survive the delete) and settle cleanly."""
+        import sqlite3
+
+        from hermes_cli.profile_identity import purge_profile_identity
+        from hermes_constants import mark_named_profile_deleted
+
+        profile_dir = create_profile("worker", no_alias=True, no_skills=True)
+        sqlite3.connect(profile_dir / "state.db").close()  # a live store at delete time
+        mark_named_profile_deleted(profile_dir)
+
+        assert purge_profile_identity("worker") is True
+
+    def test_delete_with_existing_state_db_settles_identity(self, profile_env, capsys):
+        """Real-path regression: delete a profile that HAS a state.db; the tombstoned store must
+        not turn the delete into a false-failure settlement warning."""
+        import sqlite3
+
+        profile_dir = create_profile("worker", no_alias=True, no_skills=True)
+        sqlite3.connect(profile_dir / "state.db").close()
+
+        with patch("hermes_cli.profiles._cleanup_gateway_service"), patch(
+            "hermes_cli.profiles._stop_profile_backends"
+        ):
+            delete_profile("worker", yes=True)
+
+        assert not profile_dir.exists()
+        err = capsys.readouterr().err
+        assert "identity purge failed" not in err, (
+            "Cold delete reported a false identity-purge failure for the tombstoned home's store"
+        )

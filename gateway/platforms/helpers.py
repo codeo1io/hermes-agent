@@ -84,6 +84,35 @@ def carry_inbound_dedup(caches: Optional[dict], adapter: Any) -> None:
             current.absorb(previous)
 
 
+def held_inbound_events(adapter: Any) -> Optional[list]:
+    """The adapter's held-inbound backlog (events the platform already acked but could not yet
+    dispatch), by reference so late holds on the retired instance still reach the replacement
+    that carries it."""
+    held = getattr(adapter, "_held_inbound_events", None)
+    return held if isinstance(held, list) else None
+
+
+def carry_held_inbound(held: Optional[list], adapter: Any) -> None:
+    """Seed a rebuilt adapter's held-inbound backlog from the instance it replaces.
+
+    The reconnect watcher rebuilds the platform adapter; the fresh instance starts with an empty
+    hold queue, so events the retired instance held (offset already advanced — no redelivery)
+    were stranded. The backlog list travels BY REFERENCE, like the dedup caches: the queue entry
+    keeps the same object, a failed rebuild attempt leaves the events in place for the next
+    attempt, and the retired instance's late holds land in the list its replacement drains."""
+    if not isinstance(held, list) or not held:
+        return
+    current = getattr(adapter, "_held_inbound_events", None)
+    if current is held:
+        return
+    if not current:
+        adapter._held_inbound_events = held
+        return
+    for event in held:  # defensive: an adapter that already holds events keeps its own list
+        if not any(existing is event for existing in current):
+            current.append(event)
+
+
 # Worker-thread handoff used by the off-loop persist paths.  A module attribute
 # so tests can replace THIS seam instead of patching ``asyncio.to_thread``
 # globally.

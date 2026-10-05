@@ -21,7 +21,12 @@ from contextvars import Context
 from datetime import datetime, timedelta, timezone
 from gateway.config import SHARED_LISTENER_MIRROR_PLATFORMS, Platform, platform_binds_port as _platform_binds_port
 from gateway.platforms.base import BasePlatformAdapter
-from gateway.platforms.helpers import carry_inbound_dedup, inbound_dedup_caches
+from gateway.platforms.helpers import (
+    carry_held_inbound,
+    carry_inbound_dedup,
+    held_inbound_events,
+    inbound_dedup_caches,
+)
 from gateway.restart import is_global_startup_conflict
 from gateway.run_shutdown import _log_suppressed
 from gateway.session import SessionSource
@@ -221,6 +226,7 @@ class GatewayAdapterLifecycleMixin:
             "credential_claim": self._adapter_credential_claim(platform, adapter),
             "listener_claim": self._adapter_listener_claim(platform, adapter),
             "inbound_dedup": inbound_dedup_caches(adapter),
+            "held_inbound": held_inbound_events(adapter),
         }
 
     def _queue_retryable_fatal_platform(self, adapter: BasePlatformAdapter) -> bool:
@@ -742,6 +748,7 @@ class GatewayAdapterLifecycleMixin:
                 self._drop_from_reconnect_queue(platform, "adapter creation returned None")
                 return
             carry_inbound_dedup(info.get("inbound_dedup"), adapter)
+            carry_held_inbound(info.get("held_inbound"), adapter)
             self._wire_adapter_handlers(adapter)
             # is_reconnect keeps the server-side update queue so offline-period messages are delivered.
             success = await self._connect_adapter_with_timeout(adapter, platform, is_reconnect=True)
@@ -753,6 +760,17 @@ class GatewayAdapterLifecycleMixin:
                     "Reconnect %s: non-retryable error (%s), removing from retry queue",
                     platform.value, adapter.fatal_error_message,
                 )
+                # No replacement can follow this branch: the queue entry is dropped below, so
+                # its held-inbound backlog (kept alive through retryable attempts) is discarded
+                # HERE, where the queue's lifetime is decided — not inside the adapter, which
+                # cannot tell a pending replacement from a final one (#132829).
+                held = info.get("held_inbound") or []
+                if held:
+                    logger.warning(
+                        "Reconnect %s: discarding %d held inbound message(s) — no replacement pending",
+                        platform.value, len(held),
+                    )
+                    held.clear()
                 # Never installed on self.adapters: dispose here or its __init__ resources leak ~2 fds each.
                 # The adapter is about to be dropped from the queue without ever being installed on
                 # self.adapters, so nothing else will call disconnect() on it. We must dispose it here,
@@ -782,8 +800,15 @@ class GatewayAdapterLifecycleMixin:
             logger.warning("Reconnect %s error: %s, next retry in %ds", platform.value, e, backoff)
 
     def _drop_from_reconnect_queue(self, platform, reason: str) -> None:
+        info = self._failed_platforms.pop(platform, None)
         logger.warning("Reconnect %s: %s, removing from retry queue", platform.value, reason)
-        del self._failed_platforms[platform]
+        held = (info or {}).get("held_inbound") or []
+        if held:
+            logger.warning(
+                "Reconnect %s: discarding %d held inbound message(s) — no replacement pending",
+                platform.value, len(held),
+            )
+            held.clear()
 
     def _publish_primary_adapter(self, platform, adapter) -> None:
         """Register a connected primary adapter and wire voice mode/input (transcription without /voice join)."""
@@ -1216,7 +1241,9 @@ class GatewayAdapterLifecycleMixin:
                 and _platform_binds_port(platform.value, getattr(getattr(adapter, "config", None), "extra", None)):
             adapter._shared_listener_profile = profile_name
 
-    async def _secondary_reconnect_attempt(self, profile_name: str, platform: Platform, inbound_dedup=None):
+    async def _secondary_reconnect_attempt(
+        self, profile_name: str, platform: Platform, inbound_dedup=None, held_inbound=None
+    ):
         """One scoped attempt to rebuild+connect a secondary adapter → ``(adapter, success)``;
         ``(None, None)`` = give up for good (disabled, credential removed, adapter unavailable). Caller
         tears down a RETURNED adapter; one whose configure/connect raised is torn down here."""
@@ -1249,6 +1276,7 @@ class GatewayAdapterLifecycleMixin:
                 )
                 return None, None
             carry_inbound_dedup(inbound_dedup, adapter)
+            carry_held_inbound(held_inbound, adapter)
             try:
                 self._configure_profile_adapter(adapter, profile_name, platform)
                 success = await self._connect_adapter_with_timeout(adapter, platform, is_reconnect=True)
@@ -1259,7 +1287,7 @@ class GatewayAdapterLifecycleMixin:
             return adapter, success
 
     async def _run_secondary_profile_reconnect(
-        self, profile_name: str, platform: Platform, inbound_dedup=None
+        self, profile_name: str, platform: Platform, inbound_dedup=None, held_inbound=None
     ) -> None:
         """Reconnect a retryable secondary adapter under its own profile scope."""
         from gateway.run import _profile_runtime_scope, _reconnect_backoff
@@ -1272,9 +1300,19 @@ class GatewayAdapterLifecycleMixin:
                 adapter = None
                 try:
                     adapter, success = await self._secondary_reconnect_attempt(
-                        profile_name, platform, inbound_dedup
+                        profile_name, platform, inbound_dedup, held_inbound
                     )
                     if adapter is None:
+                        # Give-up for good (disabled, credential removed, adapter unavailable):
+                        # no replacement can ever drain the backlog, so discard it here — where
+                        # the retry loop's lifetime is decided — instead of orphaning it (#132829).
+                        if held_inbound:
+                            logger.warning(
+                                "Secondary %s reconnect gave up; discarding %d held inbound "
+                                "message(s) — no replacement pending (profile: %s)",
+                                platform.value, len(held_inbound), profile_name,
+                            )
+                            held_inbound.clear()
                         return
                     if success and self._running:
                         profile_map = self._profile_adapters.setdefault(profile_name, {})
@@ -1394,7 +1432,8 @@ class GatewayAdapterLifecycleMixin:
         if platform in profile_pending:
             return
         profile_pending[platform] = self._retain_background_task(asyncio.create_task(
-            self._run_secondary_profile_reconnect(profile_name, platform, inbound_dedup_caches(adapter)),
+            self._run_secondary_profile_reconnect(
+                profile_name, platform, inbound_dedup_caches(adapter), held_inbound_events(adapter)),
             name=f"secondary-reconnect:{profile_name}:{platform.value}",
         ))
 

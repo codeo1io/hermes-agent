@@ -953,7 +953,11 @@ class CLIInfoMixin:
                         if _name not in merged:
                             merged.append(_name)
                     enabled_override = merged
-                refresh_agent_mcp_tools(self.agent, enabled_override=enabled_override, quiet_mode=True)
+                # content_aware: an explicit /reload-mcp must republish same-name tools whose
+                # definitions changed server-side; the name-set gate alone would keep them stale (#132857).
+                refresh_agent_mcp_tools(
+                    self.agent, enabled_override=enabled_override, quiet_mode=True, content_aware=True
+                )
                 if enabled_override is not None:
                     self.enabled_toolsets = enabled_override
 
