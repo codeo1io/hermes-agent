@@ -68,11 +68,15 @@ jobs:
   # Lane-gated sub-workflows. Each runs in parallel after detect finishes.
   # Skipped workflows (if condition is false) don't spin up runners.
   # ─────────────────────────────────────────────────────────────────────
+  # Hosted-4-core variant: same lanes, same suite, but the unit lane runs as
+  # an 8-shard --slice matrix (the single 96-core-era job cannot fit a 4-vCPU
+  # runner's wall) and the e2e lanes run on stock hosted runners. See
+  # conductor-tests.yml header. Keep tests.yml in tree for larger-runner fleets.
   tests:
     name: Python tests
     needs: detect
     if: needs.detect.outputs.python == 'true'
-    uses: ./.github/workflows/tests.yml
+    uses: ./.github/workflows/conductor-tests.yml
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the

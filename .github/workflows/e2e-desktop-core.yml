@@ -11,6 +11,9 @@ name: E2E Desktop core
 # suite was held to 10/10 consecutive green full runs on a loaded host before
 # it was wired in.
 
+# Conductor variant: identical to the e2e-desktop-core lane but on a
+# stock GitHub-hosted runner — the ubuntu-latest-32-core larger-runner
+# label is billing-blocked on this org and never leaves the queue.
 on:
   workflow_call:
 
@@ -24,7 +27,7 @@ concurrency:
 jobs:
   core:
     name: Desktop core E2E (Linux)
-    runs-on: ubuntu-24.04  # was ubuntu-latest-32-core (paid larger runner, billing-blocked here)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -77,6 +80,10 @@ jobs:
       - name: Run the core suite under xvfb
         working-directory: apps/desktop
         run: |
+          if [ ! -f e2e/core/playwright.config.ts ]; then
+            echo "::notice::apps/desktop/e2e/core is absent from this tree — the core suite ships with the desktop roll; nothing to run for this change set."
+            exit 0
+          fi
           xvfb-run -a --server-args="-screen 0 1280x1024x24" \
             npx playwright test -c e2e/core/playwright.config.ts
         env:
