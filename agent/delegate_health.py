@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Callable
 
 from agent.delegate_errors import PROVIDER_FAILURE_CLASSES
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, hermes_home_key
 
 __all__ = [
     "CircuitOpen",
@@ -243,6 +243,18 @@ class DelegateHealthLedger:
         """Count a failure. Non-provider classes are ignored entirely: they
         carry no information about the upstream provider."""
         if error_class not in PROVIDER_FAILURE_CLASSES:
+            # A non-provider outcome still resolves an in-flight probe: the
+            # probe dispatched, and something local answered for it. Leaving
+            # ``probing`` set would refuse every later check forever — the
+            # fail-closed wedge this ledger exists to prevent. Failure counts
+            # are untouched: a transport/local error is not evidence against
+            # the provider.
+            with self._lock:
+                self._ensure_loaded_locked()
+                entry = self._entries.get(key)
+                if entry is not None and entry.get("probing"):
+                    entry["probing"] = False
+                    self._persist_locked()
             return
         now = self._now()
         with self._lock:
@@ -314,17 +326,32 @@ class DelegateHealthLedger:
             )
 
 
-_LEDGER = DelegateHealthLedger()
+# One process may serve many profiles (gateway multiplex): a single global
+# ledger would load profile A's state once and later merge/persist it into
+# profile B's home. Ledgers are slotted by hermes_home_key() so each profile
+# gets its own breaker memory and its own state file.
+_LEDGERS: dict[str, DelegateHealthLedger] = {}
+_LEDGERS_LOCK = threading.Lock()
 
 
 def get_delegate_health_ledger() -> DelegateHealthLedger:
-    """The process-wide ledger (delegate turns in one gateway share state)."""
-    return _LEDGER
+    """The ledger for the current profile (delegate turns in one gateway
+    share state within a home; distinct homes never share breaker memory)."""
+    slot = str(hermes_home_key())
+    with _LEDGERS_LOCK:
+        ledger = _LEDGERS.get(slot)
+        if ledger is None:
+            ledger = DelegateHealthLedger()
+            _LEDGERS[slot] = ledger
+        return ledger
 
 
 def reset_delegate_health_ledger() -> DelegateHealthLedger:
-    """Replace the process-wide ledger with a fresh one. Test seam — also
-    used to drop all breaker state at once if an operator force-recovers."""
-    global _LEDGER
-    _LEDGER = DelegateHealthLedger()
-    return _LEDGER
+    """Replace every profile slot with fresh ledgers and return the one for
+    the current profile. Test seam — also used to drop all breaker state at
+    once if an operator force-recovers."""
+    with _LEDGERS_LOCK:
+        _LEDGERS.clear()
+        ledger = DelegateHealthLedger()
+        _LEDGERS[str(hermes_home_key())] = ledger
+    return ledger

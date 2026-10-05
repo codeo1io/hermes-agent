@@ -128,6 +128,29 @@ def test_failed_probe_doubles_cooldown_up_to_cap():
     assert state.retry_after_s == pytest.approx(MAX_COOLDOWN_S)  # 900 * 2
     clock.advance(MAX_COOLDOWN_S)
     assert ledger.check(KEY) is None  # second probe
+
+
+def test_probe_transport_failure_does_not_wedge():
+    """A probe turn that dies NON-provider (spawn failure, transport, local
+    error) must resolve the in-flight probe instead of refusing every later
+    check forever: those errors carry no evidence against the provider, and
+    this ledger must never itself become a fail-closed loop."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # the single probe is granted
+    # The probe turn dies before reaching the provider (e.g. pi binary
+    # failed to spawn -> classify_delegate_failure -> "transport").
+    ledger.record_failure(KEY, "transport")
+    # Cooldown has elapsed and no probe is in flight: the next dispatch gets
+    # a fresh probe — not a permanent "probe already in flight" refusal.
+    assert ledger.check(KEY) is None
+    # The ledger is still coherent: that probe failing provider-side re-opens
+    # with a doubled cooldown, exactly like a normal failed probe.
+    ledger.record_failure(KEY, "rate_limit")
+    state = ledger.check(KEY)
+    assert isinstance(state, CircuitOpen)
+    assert state.retry_after_s == pytest.approx(MAX_COOLDOWN_S)
     ledger.record_failure(KEY, "rate_limit")
     state = ledger.check(KEY)
     # 1800 * 2 would be 3600; the ladder is capped.
@@ -160,6 +183,39 @@ def test_reset_delegate_health_ledger_clears_global_state():
     fresh = reset_delegate_health_ledger()
     assert fresh is get_delegate_health_ledger()
     assert fresh.check(KEY) is None
+
+
+def test_ledger_registry_is_per_profile_home(tmp_path, monkeypatch):
+    """Multiplex: one process, two profiles (A→B→A). Breaker memory must be
+    slotted by hermes_home_key() — an open circuit in profile A must neither
+    refuse profile B's dispatches nor merge entries into B's state file."""
+    reset_delegate_health_ledger()
+    home_a = tmp_path / "profiles" / "a"
+    home_b = tmp_path / "profiles" / "b"
+    for home in (home_a, home_b):
+        (home / "cache").mkdir(parents=True)
+
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    ledger_a = get_delegate_health_ledger()
+    for _ in range(FAILURE_THRESHOLD):
+        ledger_a.record_failure(KEY, "rate_limit")
+    assert isinstance(ledger_a.check(KEY), CircuitOpen)
+    assert (home_a / "cache" / "delegate-provider-health.json").exists()
+
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    ledger_b = get_delegate_health_ledger()
+    assert ledger_b is not ledger_a
+    assert ledger_b.check(KEY) is None  # B inherits nothing from A
+    # B's own state file carries only B's entries — never A's.
+    ledger_b.record_failure(OTHER_KEY, "rate_limit")
+    state_b = home_b / "cache" / "delegate-provider-health.json"
+    assert state_b.exists()
+    assert "glm-4.6" not in state_b.read_text(encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    assert get_delegate_health_ledger() is ledger_a  # A's slot survives
+    assert isinstance(get_delegate_health_ledger().check(KEY), CircuitOpen)
+    reset_delegate_health_ledger()
 
 
 # --- durable state across restarts (the emergency-restart shape) ----------

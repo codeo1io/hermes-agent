@@ -1635,7 +1635,9 @@ def test_successful_probe_turn_closes_the_circuit(monkeypatch, tmp_path):
 
     clock = {"t": 1000.0}
     monkeypatch.setattr(
-        dh, "_LEDGER", dh.DelegateHealthLedger(now=lambda: clock["t"])
+        dh,
+        "_LEDGERS",
+        {str(dh.hermes_home_key()): dh.DelegateHealthLedger(now=lambda: clock["t"])},
     )
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))

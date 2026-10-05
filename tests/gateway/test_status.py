@@ -1295,7 +1295,10 @@ class TestReadProcessCmdlinePsFallback:
             status.subprocess, "run",
             lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="/usr/libexec/bluetoothuserd\n"),
         )
-        result = status._read_process_cmdline(873)
+        # 4194304 = 2^22 sits at the kernel pid ceiling (pid_max is exclusive), so no host can
+        # have a live process here: psutil raises NoSuchProcess instead of answering with a real
+        # cmdline (pid 873 collided with cron on hosted CI runners and psutil won the branch).
+        result = status._read_process_cmdline(4194304)
         assert result == "/usr/libexec/bluetoothuserd"
 
 
