@@ -72,7 +72,7 @@ jobs:
     name: Python tests
     needs: detect
     if: needs.detect.outputs.python == 'true'
-    uses: ./.github/workflows/tests.yml
+    uses: ./.github/workflows/conductor-tests.yml
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the
@@ -142,7 +142,7 @@ jobs:
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
     if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
-    uses: ./.github/workflows/e2e-desktop-core.yml
+    uses: ./.github/workflows/conductor-e2e-desktop-core.yml
 
   docs-site:
     name: Docs Site
