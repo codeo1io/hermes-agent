@@ -71,8 +71,35 @@ jobs:
   tests:
     name: Python tests
     needs: detect
-    if: needs.detect.outputs.python == 'true'
+    if: >-
+      ${{
+        needs.detect.outputs.python == 'true'
+        && !(
+          startsWith(github.head_ref, 'conductor/ci-')
+          && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+        )
+      }}
     uses: ./.github/workflows/tests.yml
+
+  # Conductor-only twin of the `tests` lane for ephemeral "Conductor CI
+  # validation" PRs (head_ref conductor/ci-* + that title — the same
+  # exemption review-labels.yml uses). conductor-tests.yml runs the identical
+  # suite selection on GitHub-hosted runners (8-shard unit matrix + hosted
+  # e2e); tests.yml's own ubuntu-latest-32-core e2e lanes are pinned to paid
+  # larger runners that are billing-blocked on this account and never leave
+  # the queue, so a validation PR routed through tests.yml would sit on
+  # pending checks that can never start. Real PRs and pushes always take
+  # tests.yml; only the throwaway conductor branches take the twin.
+  tests-conductor:
+    name: Python tests (conductor validation)
+    needs: detect
+    if: >-
+      ${{
+        needs.detect.outputs.python == 'true'
+        && startsWith(github.head_ref, 'conductor/ci-')
+        && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+      }}
+    uses: ./.github/workflows/conductor-tests.yml
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
   # the OS-marked tests it collects are skipped there by design (see the
@@ -236,6 +263,7 @@ jobs:
     needs:
       - detect
       - tests
+      - tests-conductor
       - tests-os
       - lint
       - js-tests
