@@ -520,6 +520,16 @@ def _run_one_file_once(
     # parent's cleanup of ``temproot`` removes them too instead of leaving them in /tmp.
     env["TMPDIR"] = temproot
 
+    # Arm the interpreter's fault handler so a hung file can be asked WHERE
+    # it is stuck: the per-file timeout path below sends SIGABRT before the
+    # SIGKILL, and an armed faulthandler turns that into a dump of every
+    # thread's stack (see scripts/run_tests_parallel.py 2026-10-04/05 fleet
+    # incident: tests/gateway/test_buzz_websocket.py hung twice on hosted
+    # runners for the full 600s cap and died with NO diagnostic output —
+    # the SIGKILL produced only "3 dots and silence"). Cost when nothing
+    # hangs: none (the handler only runs on a fatal signal).
+    env["PYTHONFAULTHANDLER"] = "1"
+
     subproc_start = time.monotonic()
     # launch the pytest process
     proc = subprocess.Popen(
@@ -551,6 +561,25 @@ def _run_one_file_once(
         output, _ = proc.communicate(timeout=file_timeout)
         rc = proc.returncode
     except subprocess.TimeoutExpired:
+        # Ask the hung interpreter where it is stuck before killing it.
+        # With PYTHONFAULTHANDLER armed (env above), SIGABRT makes CPython
+        # print every thread's stack and then die — turning a silent
+        # 600s "3 dots and a SIGKILL" into an actionable traceback in the
+        # failure output. Give the dump a moment to flush; a wedged loop
+        # (or a hang inside C with the GIL held) may not manage it, and the
+        # SIGKILL below then proceeds exactly as before. POSIX only: the
+        # Windows taskkill path has no group signal to piggyback on.
+        if pgid is not None:
+            import signal as _signal
+
+            try:
+                os.killpg(pgid, _signal.SIGABRT)  # windows-footgun: ok
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         _kill_tree(proc, pgid=pgid)
         try:
             output, _ = proc.communicate(timeout=10)

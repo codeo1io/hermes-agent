@@ -7,6 +7,7 @@ lifecycle as wired into BuzzAdapter.
 """
 
 import asyncio
+import functools
 import json
 import time
 
@@ -29,6 +30,42 @@ SELF_PUBKEY = "9fd5c7ba6d3ef224da78f541e0fcb9c50f72cc63edb19aae76ac6a0474dfa860"
 # BIP-340 test vector 0 private key
 TEST_PRIVATE_KEY = "00" * 31 + "03"
 CHANNEL = "ccc2bc1a-7a82-5a8f-8c4e-57a070cbe7cd"
+
+
+def _wall_clock_bounded(seconds: float = 30.0):
+    """Fail-fast wall-clock bound for the async lifecycle tests.
+
+    Every bounded test already has internal 5s asyncio deadlines, but the
+    fake-socket machinery parks receives on ``asyncio.Event().wait()`` and
+    waits for reconnects with ``asyncio.wait`` — an environment that stalls
+    one of those parks (hosted-runner hang, 2026-10-04/05: the file froze
+    after 3 dots for the full 600s per-file cap twice, no diagnostics)
+    would otherwise hang the subprocess until the runner SIGKILLs the
+    whole tree. Converting the hang into an immediate failure gives the
+    runner's file-retry a chance to pass on a fresh interpreter and puts
+    the point of stall in the traceback instead of in /dev/null.
+
+    30s is ~15x the slowest healthy observed duration for these tests
+    (the whole 20-test file runs in ~20s), so a legitimate slow runner
+    never trips it.
+    """
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await asyncio.wait_for(fn(*args, **kwargs), timeout=seconds)
+            except asyncio.TimeoutError:
+                pytest.fail(
+                    f"{fn.__name__} exceeded its {seconds:.0f}s wall-clock bound — "
+                    "the fake-socket lifecycle machinery stalled (hosted-runner "
+                    "hang class, 2026-10-04/05); see the runner's SIGABRT dump "
+                    "if this repeats"
+                )
+
+        return wrapper
+
+    return deco
 
 
 def _make_adapter(extra=None):
@@ -134,6 +171,7 @@ class _ScriptedWebSocket(_FakeWebSocket):
         return await self._anext_behavior()
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_loop_reconnects_when_read_goes_silent(monkeypatch, caplog):
     """A relay close the transport never surfaces must not park the loop.
@@ -193,6 +231,7 @@ async def test_websocket_loop_reconnects_when_read_goes_silent(monkeypatch, capl
     assert states[:2] == ["retrying", "connected"], f"health must flip to retrying and back, got {states}"
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_loop_reconnects_when_discovery_send_sees_closed_socket(monkeypatch):
     """A send-side ConnectionClosed proves the socket is dead even while the read is parked.
@@ -254,6 +293,7 @@ async def test_websocket_loop_reconnects_when_discovery_send_sees_closed_socket(
     assert sockets[0].exited, "the dead connection was not closed before reconnecting"
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_loop_backs_off_and_publishes_retrying_on_clean_relay_close(monkeypatch):
     """A relay that accepts, then cleanly closes after subscribe, is a disconnect like any other.
@@ -294,6 +334,7 @@ async def test_websocket_loop_backs_off_and_publishes_retrying_on_clean_relay_cl
     assert states == ["retrying"], f"a clean relay close must publish retrying, got {states}"
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_loop_dispatches_frames_and_closes_cleanly(monkeypatch):
     """The watchdog refactor preserves the healthy path: frames dispatch to
@@ -347,6 +388,7 @@ async def test_websocket_loop_dispatches_frames_and_closes_cleanly(monkeypatch):
     assert handled[0][1]["id"] == "e1"
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_auth_raises_on_rejection():
     adapter = _make_adapter()
@@ -362,6 +404,7 @@ async def test_websocket_auth_raises_on_rejection():
         await adapter._authenticate_websocket(RejectingWs())
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_auth_uses_credentials_owner_tag():
     adapter = _make_adapter()
@@ -373,6 +416,7 @@ async def test_websocket_auth_uses_credentials_owner_tag():
 # ── CLOSED frame handling ──────────────────────────────────────────────────
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_loop_drops_restricted_channel_without_reconnect():
     """A CLOSED frame with 'restricted: not a channel member' must silently
@@ -452,6 +496,7 @@ async def test_websocket_loop_drops_restricted_channel_without_reconnect():
         pass
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_websocket_loop_reconnects_on_non_restricted_closed():
     """A CLOSED frame that is NOT 'restricted' must NOT add the channel to
@@ -558,6 +603,7 @@ def test_restricted_channels_skipped_during_subscribe():
 # ── Fresh-conversation subscription window (#78429) ────────────────────────
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_new_subscription_without_high_water_mark_has_no_since_floor():
     """A conversation adopted mid-run (last_ts == 0) must NOT subscribe with
@@ -584,6 +630,7 @@ async def test_new_subscription_without_high_water_mark_has_no_since_floor():
     assert req_filter["#h"] == [CHANNEL]
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_seeded_subscription_resumes_from_high_water_mark():
     """A channel with a real high-water mark keeps the since-resume contract
@@ -681,6 +728,7 @@ async def test_closed_membership_phrases_prune_without_reconnect(detail):
         pass
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_restricted_channel_not_readopted_by_discovery():
     """The live-discovery paths must skip _restricted_channels; otherwise the
@@ -709,6 +757,7 @@ async def test_restricted_channel_not_readopted_by_discovery():
 # ── WS periodic discovery (#93557 / #75107) ────────────────────────────────
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_ws_discovery_loop_subscribes_newly_discovered_conversation(monkeypatch):
     """Without a kind-44100 membership event, the WS transport's periodic
@@ -755,6 +804,7 @@ async def test_ws_discovery_loop_subscribes_newly_discovered_conversation(monkey
     assert "since" not in req[2]
 
 
+@_wall_clock_bounded()
 @pytest.mark.asyncio
 async def test_ws_discovery_task_cancelled_when_connection_exits(monkeypatch):
     """The companion discovery task must not outlive its connection."""
