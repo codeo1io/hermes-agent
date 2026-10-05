@@ -168,6 +168,22 @@ def _consume_ws_read_task(task: asyncio.Task) -> None:
             task.exception()
 
 
+def _honour_pending_cancel() -> None:
+    """Re-deliver a stop-cancel that an eating await dropped.
+
+    A cancel that lands while ``asyncio.wait_for``/``wait`` is resuming with an
+    already-done inner awaitable is swallowed (CPython 3.11 semantics: the result is
+    returned, the cancellation is never raised), so a stopped adapter's WebSocket
+    loops could reconnect forever as zombies while the gateway believed the platform
+    had stopped. ``Task.cancelling()`` still counts the eaten request; convert it back
+    into the cancellation it should have been.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        task.uncancel()
+        raise asyncio.CancelledError
+
+
 def _effective_port(parsed) -> Optional[int]:
     try:
         if parsed.port is not None:
@@ -559,6 +575,8 @@ class BuzzAdapter(BasePlatformAdapter):
         self._channel_state: Dict[str, dict] = {}
         # Cursors read from disk at connect(), consumed by each channel's first seed.
         self._restored_cursors: Dict[str, dict] = {}
+        # Orders off-loop cursor writes: each snapshot is taken under it, so an older one never lands last.
+        self._cursor_write_lock = asyncio.Lock()
         self._channel_names: Dict[str, str] = {}
         # channel_id -> raw ``channels list`` entry; drives DM-vs-channel classification.
         self._channel_meta: Dict[str, dict] = {}
@@ -1086,6 +1104,7 @@ class BuzzAdapter(BasePlatformAdapter):
 
         interval = max(self.poll_interval * _DM_DISCOVERY_EVERY, _MIN_POLL_INTERVAL)
         while True:
+            _honour_pending_cancel()
             await asyncio.sleep(interval)
             try:
                 await self._rediscover_and_subscribe(websocket, subscriptions)
@@ -1100,6 +1119,7 @@ class BuzzAdapter(BasePlatformAdapter):
         backoff = 1.0
         reconnecting = False
         while True:
+            _honour_pending_cancel()
             try:
                 async with websockets.connect(
                     self._websocket_url(), open_timeout=_WS_AUTH_TIMEOUT, close_timeout=5,
@@ -1144,6 +1164,7 @@ class BuzzAdapter(BasePlatformAdapter):
         """Read frames until the relay closes; a close or an idle read raises ConnectionError to reconnect."""
         frame_iter = websocket.__aiter__()
         while True:
+            _honour_pending_cancel()
             read_task = asyncio.ensure_future(frame_iter.__anext__())
             try:
                 done, _ = await asyncio.wait(
@@ -1255,8 +1276,8 @@ class BuzzAdapter(BasePlatformAdapter):
             seen = [str(event_id) for event_id in raw_seen][-_SEEN_CAP:] if isinstance(raw_seen, list) else []
             self._restored_cursors[str(channel_id)] = {"chat_type": str(entry.get("chat_type") or ""), "last_ts": last_ts, "seen": seen}
 
-    def _save_cursors(self) -> None:
-        """Persist every watched channel's cursor.  Never raises."""
+    def _cursor_payload(self) -> dict:
+        """Snapshot of every watched channel's cursor (taken on the loop: ``_channel_state`` is loop-owned)."""
         channels = {
             channel_id: {
                 "chat_type": state.get("chat_type") or "group", "last_ts": int(state.get("last_ts") or 0),
@@ -1264,10 +1285,17 @@ class BuzzAdapter(BasePlatformAdapter):
             }
             for channel_id, state in self._channel_state.items()
         }
-        payload = {"identity": self._self_pubkey, "relay": self.relay_url, "channels": channels}
+        return {"identity": self._self_pubkey, "relay": self.relay_url, "channels": channels}
+
+    def _save_cursors(self) -> None:
+        """Persist every watched channel's cursor.  Never raises."""
+        self._write_cursors(self._cursor_path(), self._cursor_payload())
+
+    @staticmethod
+    def _write_cursors(path: Path, payload: dict) -> None:
         try:
             from utils import atomic_json_write
-            atomic_json_write(self._cursor_path(), payload, indent=None)
+            atomic_json_write(path, payload, indent=None)
         except Exception:
             logger.debug("Buzz: could not persist channel cursors", exc_info=True)
 
@@ -1382,7 +1410,9 @@ class BuzzAdapter(BasePlatformAdapter):
             await self._handle_event(channel_id, state, event)
         self._trim_seen(state)
         if self._cursor_mark(state) != before:
-            self._save_cursors()
+            # The write fsyncs + renames, and on the WebSocket transport this runs once per inbound event.
+            async with self._cursor_write_lock:
+                await asyncio.to_thread(self._write_cursors, self._cursor_path(), self._cursor_payload())
 
     @staticmethod
     def _parse_imeta_attachments(event: dict) -> Tuple[List[dict], int]:
