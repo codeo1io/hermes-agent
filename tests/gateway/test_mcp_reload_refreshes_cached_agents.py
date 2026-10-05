@@ -174,3 +174,43 @@ async def test_reload_mcp_preserves_per_agent_toolset_overrides():
     assert captured_calls, "get_tool_definitions was never called to refresh the cache"
     assert captured_calls[0]["enabled_toolsets"] == ["safe"]
     assert captured_calls[0]["disabled_toolsets"] == ["terminal"]
+
+
+@pytest.mark.asyncio
+async def test_reload_mcp_republishes_same_name_definition_changes():
+    """A server whose tool DEFINITION changed under the same name must have that change republished
+    by /reload-mcp; the name-set diff alone would keep every cached agent on the stale schema
+    until a history-destroying /new (#132857)."""
+    runner = _make_runner_with_cached_agents(num_agents=2)
+
+    # Same NAMES as the post-reload set, v1 definitions: only a content-aware republish can
+    # replace them — the name-set gate alone sees an unchanged set and skips the publish.
+    v1_tool_defs = [
+        {"type": "function", "function": {"name": "read_file", "description": "v1", "parameters": {}}},
+    ]
+    fresh_tool_defs = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "v2: reads a file with range support",
+                "parameters": {},
+            },
+        },
+    ]
+    for agent, _sig in runner._agent_cache.values():
+        agent.tools = list(v1_tool_defs)
+        agent.valid_tool_names = {"read_file"}
+
+    with (
+        patch("tools.mcp_tool_lifecycle.shutdown_mcp_servers"),
+        patch("tools.mcp_tool_discovery.discover_mcp_tools", return_value=["reader"]),
+        patch.dict("tools.mcp_tool._servers", {"reader": object()}, clear=True),
+        patch("model_tools.get_tool_definitions", return_value=fresh_tool_defs),
+    ):
+        await runner._execute_mcp_reload(_make_event())
+
+    for key, (agent, _sig) in runner._agent_cache.items():
+        assert agent.tools == fresh_tool_defs, (
+            f"Agent {key} kept a stale same-name definition: {agent.tools}"
+        )

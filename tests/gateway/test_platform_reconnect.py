@@ -413,6 +413,76 @@ class TestReconnectKeepsInboundDedup:
         assert new._dedup.is_duplicate("m2") is False
 
 
+class TestReconnectKeepsHeldInbound:
+    """The watcher's rebuilt adapter must inherit the retired instance's held-inbound backlog
+    (events the platform already acked — no redelivery) and drain it through the replacement
+    (#132829); when the queue gives up for good, the backlog is discarded where the queue's
+    lifetime is decided."""
+
+    @pytest.mark.asyncio
+    async def test_held_backlog_carried_into_replacement_by_reference(self):
+        runner = _make_runner()
+        runner.stop = AsyncMock()
+        runner._sync_voice_mode_state_to_adapter = MagicMock()
+        old, new = StubAdapter(), StubAdapter()
+        old.handle_message = AsyncMock()
+        new.handle_message = AsyncMock()
+        held_event = MagicMock()
+        old._held_inbound_events = [held_event]
+        runner.adapters[Platform.TELEGRAM] = old
+
+        old._set_fatal_error("network_error", "socket closed", retryable=True)
+        await runner._handle_adapter_fatal_error(old)
+        # The queue entry snapshots the backlog by reference: late holds on the retired
+        # instance while the replacement is pending still land in the carried list.
+        entry_held = runner._failed_platforms[Platform.TELEGRAM]["held_inbound"]
+        assert entry_held is old._held_inbound_events
+
+        with patch.object(runner, "_create_adapter", return_value=new):
+            await runner._reconnect_failed_platform(Platform.TELEGRAM, time.monotonic() + 1)
+
+        assert runner.adapters[Platform.TELEGRAM] is new
+        assert new._held_inbound_events is entry_held
+        assert new._held_inbound_events == [held_event]
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_give_up_discards_carried_backlog(self):
+        runner = _make_runner()
+        runner._update_platform_runtime_status = MagicMock()
+        held_event = MagicMock()
+        held_list = [held_event]
+        runner._failed_platforms[Platform.TELEGRAM] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "attempts": 1,
+            "next_retry": 0.0,
+            "held_inbound": held_list,
+        }
+        give_up = StubAdapter(fatal_error="revoked token", fatal_retryable=False)
+
+        with patch.object(runner, "_create_adapter", return_value=give_up):
+            await runner._reconnect_failed_platform(Platform.TELEGRAM, time.monotonic() + 1)
+
+        assert Platform.TELEGRAM not in runner._failed_platforms
+        assert held_list == []  # discarded with the queue entry — no replacement can drain it
+
+    @pytest.mark.asyncio
+    async def test_drop_from_reconnect_queue_discards_carried_backlog(self):
+        runner = _make_runner()
+        held_event = MagicMock()
+        held_list = [held_event]
+        runner._failed_platforms[Platform.TELEGRAM] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "attempts": 1,
+            "next_retry": 0.0,
+            "held_inbound": held_list,
+        }
+
+        runner._drop_from_reconnect_queue(Platform.TELEGRAM, "no bot credential on queued config")
+
+        assert Platform.TELEGRAM not in runner._failed_platforms
+        assert held_list == []
+
+
 # --- Pause / resume circuit breaker ---
 
 

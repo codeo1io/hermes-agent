@@ -489,7 +489,7 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
     # Same fuzzy engine as the file patch tool (whitespace/indent/escape normalization,
     # block anchors) so minor formatting mismatches don't fail.
     from tools.fuzzy_match import fuzzy_find_and_replace
-    new_content, match_count, _strategy, match_error = fuzzy_find_and_replace(
+    new_content, match_count, strategy, match_error = fuzzy_find_and_replace(
         content, old_string, new_string, replace_all)
     if match_error:
         with suppress(Exception):
@@ -502,10 +502,15 @@ def _patch_skill(name: str, old_string: str, new_string: str, file_path: str = N
         return _err(f"Patch would break SKILL.md structure: {err}")
     if guard := _guarded_write(name, skill_dir, target, "patch", target_label, new_content):
         return guard
+    # Fuzzy strategies can match more than the byte-literal ask (whitespace/indent/escape
+    # normalization, block anchors); the result must SAY which one matched so the model and
+    # review surfaces can see a fuzzy patch happened, not a literal one.
+    match_note = f", matched via {strategy}" if strategy and strategy != "exact" else ""
     result = {
         "success": True,
-        "message": f"Patched {target_label} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
-        "_change": {"old": _clip(old_string, 200, "…"), "new": _clip(new_string, 200, "…")}}
+        "message": f"Patched {target_label} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}{match_note}).",
+        "_change": {"old": _clip(old_string, 200, "…"), "new": _clip(new_string, 200, "…"),
+                   "strategy": strategy or "exact"}}
     result = _attach_org_note(result, name, skill_dir)
     # SKILL.md grows by patches, not by creates: surface findings on the patch that crosses a line
     # (oversized-body, incident-log-shape) — a clean patch attaches nothing and stays quiet.

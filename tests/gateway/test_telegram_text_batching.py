@@ -511,3 +511,152 @@ class TestHoldInboundAcrossReconnect:
         await adapter._redispatch_held_inbound()
         held_texts = [e.text for e in adapter._held_inbound_events]
         assert held_texts == ["boom", "after"]
+
+
+class TestHeldInboundAcrossReplacement:
+    """A replaced adapter's held inbound must reach the replacement (#132829).
+
+    The reconnect watcher rebuilds the platform adapter on fatal errors; the fresh instance
+    starts with an empty hold queue, so events PTB already acked on the old instance (offset
+    advanced — no redelivery) were stranded there, or discarded outright when a non-retryable
+    fatal hit a retired instance while a replacement was pending. The backlog travels with the
+    platform slot and drains through the replacement, original event object intact."""
+
+    @pytest.mark.asyncio
+    async def test_carried_backlog_drains_through_replacement_same_event_object(self):
+        from gateway.platforms.helpers import carry_held_inbound, held_inbound_events
+
+        old = _make_adapter()
+        old._mark_disconnected()
+        old._enqueue_text_event(_make_event("held on retired instance"))
+        event = old._held_inbound_events[0]
+
+        held = held_inbound_events(old)
+        assert held is not None and held  # the queue entry snapshots the list itself
+        new = _make_adapter()
+        carry_held_inbound(held, new)
+        assert new._held_inbound_events is held  # by reference: late holds still reach it
+
+        # Idempotent carry (the entry survives a failed rebuild attempt for the next one).
+        carry_held_inbound(held, new)
+        assert [e.text for e in new._held_inbound_events] == ["held on retired instance"]
+
+        new._mark_connected()  # replacement's connect path
+        await new._held_inbound_redispatch_task
+        # Provenance preserved: the ORIGINAL event object, not a re-derived copy — identity
+        # and authz travel with it (AC A).
+        assert new.handle_message.call_args[0][0] is event
+        assert new.handle_message.call_args[0][0].source.chat_id == event.source.chat_id
+        assert old._held_inbound_events == []
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_fatal_keeps_held_while_replacement_pending(self):
+        """Discard may only fire when NO replacement is pending (AC C): a retired instance can
+        hit its non-retryable fatal after the platform was already queued for reconnection."""
+        import types
+
+        from gateway.platforms.base import BasePlatformAdapter
+
+        adapter = _make_adapter()
+        adapter._held_inbound_events = [_make_event("waiting for replacement")]
+        adapter.gateway_runner = types.SimpleNamespace(
+            _failed_platforms={Platform.TELEGRAM: {"attempts": 1}},
+            _profile_failed_platforms={},
+            adapters={},
+        )
+
+        def _base_fatal(self, code, message, *, retryable):
+            self._fatal_error_code = code
+            self._fatal_error_message = message
+            self._fatal_error_retryable = retryable
+            self._running = False
+
+        with patch.object(BasePlatformAdapter, "_set_fatal_error", _base_fatal):
+            adapter._set_fatal_error("auth", "revoked mid-retry", retryable=False)
+
+        assert [e.text for e in adapter._held_inbound_events] == ["waiting for replacement"]
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_fatal_keeps_held_when_live_replacement_installed(self):
+        import types
+
+        from gateway.platforms.base import BasePlatformAdapter
+
+        old, live = _make_adapter(), _make_adapter()
+        live._bot = object()  # connected replacement installed by the watcher
+        old.gateway_runner = types.SimpleNamespace(
+            _failed_platforms={}, _profile_failed_platforms={}, adapters={Platform.TELEGRAM: live}
+        )
+        old._held_inbound_events = [_make_event("replacement is live")]
+
+        def _base_fatal(self, code, message, *, retryable):
+            self._fatal_error_code = code
+            self._fatal_error_message = message
+            self._fatal_error_retryable = retryable
+
+        with patch.object(BasePlatformAdapter, "_set_fatal_error", _base_fatal):
+            old._set_fatal_error("auth", "revoked after replacement", retryable=False)
+
+        assert [e.text for e in old._held_inbound_events] == ["replacement is live"]
+
+    @pytest.mark.asyncio
+    async def test_late_hold_on_retired_instance_delegates_to_live_replacement(self):
+        import types
+
+        old, live = _make_adapter(), _make_adapter()
+        live._bot = object()
+        old.gateway_runner = types.SimpleNamespace(adapters={Platform.TELEGRAM: live})
+        old._mark_disconnected()
+        event = _make_event("late on retired")
+
+        old._hold_inbound_event(event, where="text-flush-cancelled")
+
+        assert old._held_inbound_events == []  # not parked on the retired instance
+        drain = live._held_inbound_redispatch_task
+        assert drain is not None  # the live adapter owns the schedule now
+        await asyncio.wait_for(drain, timeout=1.0)
+        assert live.handle_message.call_args[0][0] is event
+
+    @pytest.mark.asyncio
+    async def test_retired_drain_hands_stranded_backlog_to_live_replacement(self):
+        import types
+
+        old, live = _make_adapter(), _make_adapter()
+        live._bot = object()
+        old.gateway_runner = types.SimpleNamespace(adapters={Platform.TELEGRAM: live})
+        stranded = _make_event("stranded on retired")
+        old._held_inbound_events = [stranded]
+        old._drop_delayed_deliveries = True  # retired: its own drain would re-hold forever
+
+        await old._redispatch_held_inbound()
+
+        assert old._held_inbound_events == []
+        drain = live._held_inbound_redispatch_task
+        assert drain is not None
+        await asyncio.wait_for(drain, timeout=1.0)
+        assert live.handle_message.call_args[0][0] is stranded
+
+    @pytest.mark.asyncio
+    async def test_shared_backlog_no_double_delivery_on_concurrent_drains(self):
+        """Carry shares ONE list; a retired instance's pending drain and the replacement's
+        connect drain must not deliver the event twice (identity-dedup + atomic ownership)."""
+        import types
+
+        old, live = _make_adapter(), _make_adapter()
+        live._bot = object()
+        old.gateway_runner = types.SimpleNamespace(adapters={Platform.TELEGRAM: live})
+        event = _make_event("one delivery only")
+        shared = [event]
+        old._held_inbound_events = shared
+        live._held_inbound_events = shared  # what carry_held_inbound installs
+
+        old_task = asyncio.get_running_loop().create_task(old._redispatch_held_inbound())
+        await asyncio.wait_for(old_task, timeout=1.0)
+        live._mark_connected()
+        if live._held_inbound_redispatch_task is not None:
+            await asyncio.wait_for(live._held_inbound_redispatch_task, timeout=1.0)
+
+        delivered = [c.args[0] for c in live.handle_message.await_args_list]
+        assert delivered == [event]  # once, by the replacement
+        old.handle_message.assert_not_called()
+        assert shared == []

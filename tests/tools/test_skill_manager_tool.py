@@ -1188,3 +1188,30 @@ class TestCuratorConsolidationDeleteGuard:
             assert allowed["success"] is True, allowed
 
         _reset_background_review_read_marks()
+
+
+class TestPatchSkillMatchStrategy:
+    """A fuzzy match can change more than the byte-literal ask (whitespace/indent/escape
+    normalization, block anchors); the patch result must say which strategy matched so the model
+    and review surfaces can see a fuzzy patch happened, not a literal one."""
+
+    def test_patch_fuzzy_match_labels_strategy(self, tmp_path):
+        from tools.fuzzy_match import STRATEGIES
+
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            # Indentation-flexible ask: the anchor's leading whitespace differs from the file's.
+            result = _patch_skill("my-skill", "    Step 1: Do the thing.", "Step 1: Do the new thing.")
+        assert result["success"] is True, result.get("error")
+        assert result["_change"]["strategy"] != "exact"
+        assert result["_change"]["strategy"] in {name for name, _ in STRATEGIES}
+        assert f"matched via {result['_change']['strategy']}" in result["message"]
+        assert "Do the new thing." in (tmp_path / "my-skill" / "SKILL.md").read_text()
+
+    def test_patch_exact_match_stays_quiet_about_strategy(self, tmp_path):
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            result = _patch_skill("my-skill", "Do the thing.", "Do the new thing.")
+        assert result["success"] is True
+        assert result["_change"]["strategy"] == "exact"
+        assert "matched via" not in result["message"]

@@ -542,3 +542,70 @@ def test_snapshot_rebuild_never_grants_message_agent_to_unauthorized_sessions(
         assert _message_agent_schema_count(agent) == 0
         assert "message_agent" not in agent.valid_tool_names
         _assert_tool_snapshot_coherent(agent)
+
+
+def _same_name_content_agent():
+    """Agent snapshot carrying v1 definitions for two same-named tools."""
+    agent = _agent(["read_file", "terminal"])
+    return agent
+
+
+def _defs(desc):
+    return [
+        {"type": "function", "function": {"name": "read_file", "description": desc, "parameters": {}}},
+        {"type": "function", "function": {"name": "terminal", "description": "v1 term", "parameters": {}}},
+    ]
+
+
+def test_content_aware_refresh_republishes_same_name_definition_changes(monkeypatch):
+    """An explicit MCP reload must republish tools whose DEFINITION changed under the same name;
+    the default name-set gate keeps the stale schema forever (#132857)."""
+    import model_tools
+    agent = _same_name_content_agent()
+    fresh = _defs("v2: reads a file with range support")
+    monkeypatch.setattr(model_tools, "get_tool_definitions", lambda **kw: fresh)
+
+    added = _mcp_agent.refresh_agent_mcp_tools(agent, content_aware=True)
+
+    assert added == set()  # no NEW names — this is purely a content republish
+    descriptions = {t["function"]["name"]: t["function"]["description"] for t in agent.tools}
+    assert descriptions["read_file"] == "v2: reads a file with range support"
+
+
+def test_default_refresh_keeps_stale_definition_under_same_name(monkeypatch):
+    """The default (background/between-turns) refresh stays name-gated: it must NOT republish
+    content-only changes, preserving prompt-cache byte-stability outside explicit reloads."""
+    import model_tools
+    agent = _same_name_content_agent()
+    fresh = _defs("v2: reads a file with range support")
+    monkeypatch.setattr(model_tools, "get_tool_definitions", lambda **kw: fresh)
+
+    added = _mcp_agent.refresh_agent_mcp_tools(agent)
+
+    assert added == set()
+    descriptions = {t["function"]["name"]: t["function"]["description"] for t in agent.tools}
+    assert descriptions["read_file"] != "v2: reads a file with range support"
+
+
+def test_content_aware_with_preserve_prefix_keeps_slots_and_appends_new(monkeypatch):
+    """An explicit reload inside a live conversation composes both contracts: same-name content
+    refreshes IN PLACE (slot preserved — the prefix stays byte-stable for unchanged tools), new
+    tools APPEND at the tail, and nothing moves between positions."""
+    import model_tools
+    agent = _agent(["read_file", "terminal"])
+    agent.tools[0]["function"]["description"] = "v1 reads"
+    fresh = [
+        {"type": "function", "function": {"name": "read_file", "description": "v2 reads", "parameters": {}}},
+        {"type": "function", "function": {"name": "terminal", "description": "term", "parameters": {}}},
+        {"type": "function", "function": {"name": "mcp_new_server_tool", "description": "new", "parameters": {}}},
+    ]
+    monkeypatch.setattr(model_tools, "get_tool_definitions", lambda **kw: fresh)
+
+    added = _mcp_agent.refresh_agent_mcp_tools(agent, content_aware=True, preserve_prefix=True)
+
+    assert added == {"mcp_new_server_tool"}
+    names = [t["function"]["name"] for t in agent.tools]
+    assert names == ["read_file", "terminal", "mcp_new_server_tool"]  # slots kept, new at tail
+    by_name = {t["function"]["name"]: t for t in agent.tools}
+    assert by_name["read_file"]["function"]["description"] == "v2 reads"  # content DID refresh
+    assert by_name["terminal"]["function"]["description"] == "term"  # untouched tool byte-stable
