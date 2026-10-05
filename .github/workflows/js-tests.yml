@@ -7,18 +7,6 @@ on:
 jobs:
   check:
     name: JS & TS checks
-    # Conductor-hosted snapshot guard: the check suite (vitest + tsc + eslint
-    # over 10 workspaces) targets the current-main JS tree. A conductor
-    # validation snapshot may carry a pre-roll JS tree (113 files of ui-tui/
-    # fixes absent, e.g. the vi.waitFor timer re-sync fix and the blank-line
-    # eslint sweep); running this suite against such a tree fails on code the
-    # branch never contained. goalStatus.ts arrives with that JS tree — the
-    # era probe below skips every later step when it is absent (the snapshot
-    # predates the suite's target; its product JS is the exact JS its own
-    # era's CI validated). The probe reads the checked-out workspace, so it
-    # cannot be a job-level `if`: expressions there evaluate before any
-    # checkout exists and hashFiles is not available at that level — a
-    # step that owns the verdict is the smallest correct form.
     # One 32-core job replaces a 14-leg matrix. The matrix spread about 612s
     # of check payload over 4-core runners. It paid about 371s of repeated
     # setup to do it: 14 checkouts, 14 node installs, 14 node_modules
@@ -30,19 +18,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      # Era probe (see job comment): needs the checked-out workspace, so it
-      # runs as the first post-checkout step; everything after keys off it.
-      - name: Snapshot-era guard (skip lane on pre-roll JS trees)
-        id: era
-        run: |
-          if [ ! -f ui-tui/src/app/goalStatus.ts ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::ui-tui/src/app/goalStatus.ts is absent — the JS tree predates this suite's target roll; skipping JS & TS checks (this snapshot's product JS is exactly what its own era's CI validated)."
-          fi
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        if: steps.era.outputs.skip != 'true'
         with:
           node-version: 26
           cache: npm
@@ -55,14 +31,13 @@ jobs:
       # (electron/portal-session-live.test.ts) and skips without a display,
       # so give the runner a virtual one the same way the Playwright lane does.
       - name: Install zsh and a virtual display for Electron
-        if: runner.os == 'Linux' && steps.era.outputs.skip != 'true'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y zsh xvfb \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
             xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
 
       - name: grab npm 12
-        if: steps.era.outputs.skip != 'true'
         run: |
           # No-op once the bundled npm is already 12.x — saves ~5-15s/job and
           # keeps the installed major aligned with the npm12 cache-key tag.
@@ -85,7 +60,6 @@ jobs:
       # makes the archive larger.
       - name: Restore node_modules
         id: node-modules-cache
-        if: steps.era.outputs.skip != 'true'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: |
@@ -98,7 +72,7 @@ jobs:
           key: node-modules-scripts-${{ runner.os }}-node26-npm12-${{ hashFiles('package-lock.json') }}
 
       - uses: ./.github/actions/retry
-        if: steps.node-modules-cache.outputs.cache-hit != 'true' && steps.era.outputs.skip != 'true'
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
         with:
           command: npm ci
 
@@ -120,5 +94,4 @@ jobs:
       # not an empty run, because an empty run reports green after it checks
       # nothing.
       - name: Run all workspace checks
-        if: steps.era.outputs.skip != 'true'
         run: node .github/scripts/run-workspace-checks.mjs
