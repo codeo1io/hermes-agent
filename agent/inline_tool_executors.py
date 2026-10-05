@@ -313,7 +313,7 @@ def resolve_invoke_tool_executor(agent, function_name: str) -> Optional[InlineTo
     """
     if function_name in INVOKE_TOOL_PRE_MEMORY_MANAGER_NAMES:
         return INLINE_TOOL_EXECUTORS[function_name]
-    memory_manager = agent._memory_manager
+    memory_manager = getattr(agent, "_memory_manager", None)
     if memory_manager and memory_manager.has_tool(function_name):
         return lambda agent, args, ctx: agent._memory_manager.handle_tool_call(function_name, args)
     if function_name == "message_agent":
