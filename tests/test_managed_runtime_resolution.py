@@ -228,6 +228,10 @@ def _source_files() -> list[Path]:
                 d for d in dirnames
                 if d not in _EXEMPT_DIRS and not _is_packaging_copy(d)
             ]
+        else:
+            # Prune vendored dependency trees at ANY depth: apps/desktop/node_modules
+            # (a local desktop build) otherwise leaks gyp/ninja sources into the scan.
+            dirnames[:] = [d for d in dirnames if d != "node_modules"]
         for fname in filenames:
             if fname.endswith(".py"):
                 files.append(Path(dirpath) / fname)
