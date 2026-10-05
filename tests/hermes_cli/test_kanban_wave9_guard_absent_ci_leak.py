@@ -114,10 +114,22 @@ def test_choke_refuses_live_board_from_test_context(wave9_ci_topology):
     from hermes_cli import kanban_db_connect as kbc
 
     root, _ = wave9_ci_topology
-    before = (root / "kanban.db").stat().st_mtime_ns
+    live = root / "kanban.db"
+    # The choke refuses by path shape under the real platform root — it never
+    # stat()s or creates the board — so the refusal itself is assertable on
+    # EVERY host, including clean ephemeral CI runners that have no live
+    # board (2026-10-05: the unguarded stat() below failed such runners with
+    # FileNotFoundError while the choke had actually fired correctly).
+    before = live.stat().st_mtime_ns if live.exists() else None
     with pytest.raises(RuntimeError, match="test-isolation guard"):
-        kbc._ensure_test_isolation(root / "kanban.db")
-    assert (root / "kanban.db").stat().st_mtime_ns == before
+        kbc._ensure_test_isolation(live)
+    if before is not None:
+        # Fleet runner (real board): the choke fired before any sqlite touch.
+        assert live.stat().st_mtime_ns == before
+    else:
+        # Clean host: the refused board must not have been created — the
+        # connect-time guard never mkdirs what it refuses.
+        assert not live.exists()
 
 
 def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
