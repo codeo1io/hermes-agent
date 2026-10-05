@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 import agent.opencode_client as oc
+from agent.delegate_errors import DelegateTurnStalled
 from agent.opencode_client import OpenCodeClient
 
 
@@ -508,3 +509,50 @@ def test_config_fingerprint_tracks_xdg_opencode_files(tmp_path, monkeypatch):
 
     assert first != second
     assert first[0] == str(config_dir)
+
+
+def test_run_prompt_timeout_raise_is_typed_with_classification():
+    """The timeout raise is a DelegateTurnStalled (A1/D2 sibling).
+
+    Message text stays byte-stable for existing consumers, while the class
+    and attrs let the supervisor read error_class instead of re-parsing
+    prose. Classification evidence = the assistant text the turn streamed
+    before timing out (a provider rate-limit line outranks the prose).
+    """
+    rate_limited = [
+        _msg("m1", "user", "hi", 1),
+        _msg(
+            "m2",
+            "assistant",
+            "Rate limit: disabling model glm-4.6 for 1800 seconds (cooling down)",
+            2,
+        ),
+    ]
+    transport = FakeTransport(
+        [
+            (204, ""),  # prompt_async accepted
+            (200, [_msg("m1", "user", "hi", 1)]),  # baseline: m2 stays fresh
+        ],
+        default=lambda _m, _p, _b: (
+            (200, rate_limited if _p.startswith("/session") else [])
+        ),
+    )
+    client = make_client(transport)
+    with pytest.raises(DelegateTurnStalled) as excinfo:
+        client.run_session_prompt("hi", timeout_seconds=0.2, poll_interval=0.05)
+    err = excinfo.value
+    assert isinstance(err, TimeoutError)  # subclass contract preserved
+    assert str(err) == "OpenCode turn timed out after 0s"
+    assert err.error_class == "rate_limit"
+    assert err.retry_after == 1800.0
+    assert "Rate limit" in err.provider_signal
+
+
+def test_run_prompt_timeout_without_streamed_text_is_agent_stall():
+    """No assistant text at all: not a provider signal, an agent stall."""
+    transport = FakeTransport([(204, "")], default=(200, []))
+    client = make_client(transport)
+    with pytest.raises(DelegateTurnStalled) as excinfo:
+        client.run_session_prompt("hi", timeout_seconds=0.2, poll_interval=0.05)
+    assert excinfo.value.error_class == "agent_stall"
+    assert excinfo.value.retry_after is None
