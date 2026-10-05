@@ -35,7 +35,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   detect:
     name: Detect affected areas
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # fork CI policy: public repo -> GitHub-hosted, no larger/paid labels
     timeout-minutes: 1
     outputs:
       python: ${{ steps.classify.outputs.python }}
@@ -136,6 +136,14 @@ jobs:
     if: false
     uses: ./.github/workflows/e2e-desktop.yml
 
+  e2e-desktop-core:
+    name: Desktop core E2E
+    needs: detect
+    # The deterministic core suite (apps/desktop/e2e/core): transcript
+    # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
+    if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
+    uses: ./.github/workflows/e2e-desktop-core.yml
+
   docs-site:
     name: Docs Site
     needs: detect
@@ -234,6 +242,7 @@ jobs:
       - installer-tests
       - rust-tests
       - e2e-desktop
+      - e2e-desktop-core
       - docs-site
       - history-check
       - contributor-check
@@ -253,7 +262,7 @@ jobs:
       # to block a merge. A separate run also stops it from holding this
       # run open. That is what blocked ``gh run rerun``.
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # fork CI policy: public repo -> GitHub-hosted, no larger/paid labels
     timeout-minutes: 10
     outputs:
       needs-json: ${{ steps.evaluate.outputs.needs-json }}
@@ -296,7 +305,7 @@ jobs:
     name: CI timing report
     needs: [all-checks-pass]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # fork CI policy: public repo -> GitHub-hosted, no larger/paid labels
     timeout-minutes: 10
     steps:
       - name: Checkout code
