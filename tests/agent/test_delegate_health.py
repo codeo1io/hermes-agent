@@ -276,3 +276,52 @@ def test_concurrent_mutation_and_persist_never_raises(tmp_path):
     # The surviving file is well-formed despite 8 interleaved writers.
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(payload.get("entries"), dict)
+
+
+# --- per-profile isolation (the multiplex / conductor-spool shape) --------
+# One spool or gateway process serves every profile; breaker state must be
+# keyed by the profile home or profile A's outage gates profile B's
+# dispatches — and A's open entries would lazily-persist into B's state file.
+
+
+def test_ledger_registry_is_keyed_per_profile_home(tmp_path, monkeypatch):
+    """Two homes in ONE process (A -> B -> A): each gets its own ledger
+    instance and its own durable state file; a failure recorded under B
+    never touches A's in-memory circuit or A's file."""
+    home_a = tmp_path / "profiles" / "alpha"
+    home_b = tmp_path / "profiles" / "beta"
+    home_a.mkdir(parents=True)
+    home_b.mkdir(parents=True)
+
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    reset_delegate_health_ledger()
+    ledger_a = get_delegate_health_ledger()
+    for _ in range(FAILURE_THRESHOLD):
+        ledger_a.record_failure(KEY, "rate_limit")
+    assert isinstance(ledger_a.check(KEY), CircuitOpen)
+    file_a = home_a / "cache" / "delegate-provider-health.json"
+    assert file_a.exists()
+    a_bytes = file_a.read_bytes()
+
+    # Same process, different profile: no shared in-memory state, no gating,
+    # no contamination of A's durable file.
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    ledger_b = get_delegate_health_ledger()
+    assert ledger_b is not ledger_a
+    assert ledger_b.check(KEY) is None  # A's open circuit never gates B
+    ledger_b.record_failure(KEY, "rate_limit")
+    file_b = home_b / "cache" / "delegate-provider-health.json"
+    assert file_b.exists()  # B's streak persisted to B's own file
+    assert file_a.read_bytes() == a_bytes  # ...and only to B's file
+
+    # A -> B -> A: re-entering A's scope keeps A's open circuit alive (the
+    # registry entry survived the excursion; a reset would still recover it
+    # from A's own file, per the restart tests above).
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    assert get_delegate_health_ledger() is ledger_a
+    assert isinstance(get_delegate_health_ledger().check(KEY), CircuitOpen)
+
+    # Registry hygiene: reset drops every home's ledger at once.
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    reset_delegate_health_ledger()
+    assert get_delegate_health_ledger() is not ledger_b

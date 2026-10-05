@@ -1640,7 +1640,9 @@ def test_successful_probe_turn_closes_the_circuit(monkeypatch, tmp_path):
 
     clock = {"t": 1000.0}
     monkeypatch.setattr(
-        dh, "_LEDGER", dh.DelegateHealthLedger(now=lambda: clock["t"])
+        dh,
+        "_LEDGERS",
+        {dh.hermes_home_key(): dh.DelegateHealthLedger(now=lambda: clock["t"])},
     )
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))
@@ -1909,3 +1911,57 @@ def test_wedge_e2e_real_pi_client_durable_running_evidence(monkeypatch, tmp_path
     assert status["pi_model"] == ""
 
     stale["client"].close()
+
+
+def test_open_circuit_storm_burst_fails_fast_without_taking_capacity(
+    monkeypatch, tmp_path
+):
+    """Incident shape (d8fce7da recurrence #7): the 44-order injection
+    storm kept re-dispatching into a provider that was already dead, and
+    every doomed order occupied a delegate worker for its full stall
+    window — the capacity-starvation amplifier. Once the circuit is open,
+    a storm-sized burst of re-dispatches (live-session sends AND fresh
+    starts) must be refused up front in bounded wall-clock, with zero
+    turns reaching any client and nothing spawned."""
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    assert str(ds._SESSIONS[sid]["model"]) == "glm-4.6"
+    _open_circuit("pi", "glm-4.6")
+
+    burst_started = time.monotonic()
+    for i in range(44):  # the incident's order count
+        send = payload(
+            ds.delegate_session(
+                action="send",
+                session_id=sid,
+                message=f"storm order {i}",
+                parent_agent=parent,
+            )
+        )
+        assert "error" in send, i
+        assert "circuit open" in send["error"], i
+        fresh = payload(
+            ds.delegate_session(
+                action="start",
+                goal=f"storm order {i}",
+                parent_agent=parent,
+            )
+        )
+        assert "error" in fresh, i
+        assert "circuit open" in fresh["error"], i
+    elapsed = time.monotonic() - burst_started
+
+    # Refusals are ledger checks, not stall windows: 88 gated dispatches
+    # complete in wall-clock a single doomed turn would have burned ~900x
+    # over, and each error still names the remaining cooldown.
+    assert elapsed < 2.0
+    assert "retry after" in send["error"]
+    # Zero delegate capacity consumed: the live session never ran a turn,
+    # and no new client was spawned for any of the 44 fresh orders.
+    assert ds._SESSIONS[sid]["client"].messages == []
+    assert len(FakePiClient.instances) == 1
+    with ds._SESSION_LOCK:
+        assert ds._SESSIONS[sid]["status"] == "idle"

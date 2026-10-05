@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Callable
 
 from agent.delegate_errors import PROVIDER_FAILURE_CLASSES
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, hermes_home_key
 
 __all__ = [
     "CircuitOpen",
@@ -314,17 +314,52 @@ class DelegateHealthLedger:
             )
 
 
-_LEDGER = DelegateHealthLedger()
+# One ledger per Hermes home, NOT one per process. The conductor spool and
+# multiplex gateways drive every profile in one process; a process-wide
+# singleton would let profile A's provider outage gate profile B's dispatches
+# — worse, the first mutation under B's scope would lazily-persist A's open
+# entries into B's state file. Keying by ``hermes_home_key()`` rides the
+# profile-runtime scope bindings multiplex already provides, so the right
+# ledger is selected with no new state plumbing. Constructing a ledger does
+# no I/O (state files load lazily per mutation), so filling the registry is
+# as cheap as the old singleton.
+_LEDGERS: dict[str, DelegateHealthLedger] = {}
+_LEDGER_REGISTRY_LOCK = threading.Lock()
+
+
+def _ledger_for_home() -> DelegateHealthLedger:
+    """The ledger instance bound to the current Hermes home."""
+    try:
+        key = hermes_home_key()
+    except Exception:
+        key = ""  # fail-open: one shared ledger beats refusing health checks
+    with _LEDGER_REGISTRY_LOCK:
+        ledger = _LEDGERS.get(key)
+        if ledger is None:
+            ledger = DelegateHealthLedger()
+            _LEDGERS[key] = ledger
+        return ledger
 
 
 def get_delegate_health_ledger() -> DelegateHealthLedger:
-    """The process-wide ledger (delegate turns in one gateway share state)."""
-    return _LEDGER
+    """The provider-health ledger for the current profile home.
+
+    Sessions within one profile share breaker state by design — one
+    provider outage is that profile's outage — while profiles never share
+    it: the conductor spool and multiplex gateways serve every profile from
+    one process. Each ledger resolves its state file lazily per mutation,
+    so cooldowns also persist per home.
+    """
+    return _ledger_for_home()
 
 
 def reset_delegate_health_ledger() -> DelegateHealthLedger:
-    """Replace the process-wide ledger with a fresh one. Test seam — also
-    used to drop all breaker state at once if an operator force-recovers."""
-    global _LEDGER
-    _LEDGER = DelegateHealthLedger()
-    return _LEDGER
+    """Drop every per-home ledger and return a fresh one for this home.
+
+    Test isolation seam and the operator's force-recover switch. The fresh
+    ledger lazily reloads this home's own state file, so open circuits
+    survive a reset through the durable file while in-memory drift does not.
+    """
+    with _LEDGER_REGISTRY_LOCK:
+        _LEDGERS.clear()
+    return _ledger_for_home()

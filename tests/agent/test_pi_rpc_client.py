@@ -299,6 +299,25 @@ def test_streamed_provider_outage_line_classifies_rate_limit(tmp_path):
     assert err.retry_after == 1800.0
 
 
+def test_message_list_shrink_counts_as_turn_activity(tmp_path):
+    """A mid-turn compaction is progress, not silence. When the child
+    summarizes its context, the parent sees message updates whose reported
+    message count goes DOWN; that shrink event must refresh the activity
+    signal like any other turn event — otherwise an in-flight compaction
+    would be misread as a zero-activity provider death and open the
+    provider breaker on a perfectly healthy provider."""
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-compaction",
+        "        send({'type':'message_update','messageCount':5,'assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'long context accumulating'}})\n"
+        "        send({'type':'message_update','messageCount':2,'assistantMessageEvent':"
+        "{'type':'text_delta','delta':'[compact] context summarized'}})\n",
+    )
+    assert err.error_class == "agent_stall"  # streamed-then-wedged, not dead
+    assert err.zero_activity is False
+
+
 def test_stall_message_keeps_suffix_and_gains_timeout_prefix(tmp_path):
     err = _stall_after_ack(tmp_path, "fake-pi-prefix-suffix", "        pass\n")
     # Conductor's spool classifier keys on both markers: the new start-failure
