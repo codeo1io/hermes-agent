@@ -234,7 +234,12 @@ def test_rejected_background_child_stops_with_parent(
         assert not outcome.done(), "dispatch returned while its child still owned resources"
         assert child.close_count == 0
         child.allow_finish.set()
-        result = outcome.result(timeout=5)
+        # 30s not 5s: this bound spans child-runner completion, the executor
+        # future, the parent dispatch-thread unwinding and the registry write —
+        # several thread hops that exceed 5s on an oversubscribed CI runner
+        # (seen twice on 2026-10-05 full-suite runs; same headroom as
+        # release_occupier.wait(30) above).
+        result = outcome.result(timeout=30)
         if background_child is None:
             assert "SYNCHRONOUSLY" in result["note"]
             assert result["results"][0]["status"] == "interrupted"
