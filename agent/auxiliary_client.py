@@ -1115,15 +1115,19 @@ def _scoped_key_env(name: str) -> str:
     """Read a provider API key (or its paired base-URL) env var through the profile secret scope.
 
     In agent turns the scope's verdict is authoritative (a scoped miss must not borrow another
-    profile's key); unscoped startup/CLI paths fall back to os.environ.
+    profile's key); unscoped startup/CLI paths fall back to os.environ. A bound-scope FAILURE
+    propagates — a blanket suppress would silently borrow the launch profile's key.
     """
     if not name:
         return ""
-    with contextlib.suppress(Exception):
+    try:
         from agent.secret_scope import UnscopedSecretError, get_secret
-        with contextlib.suppress(UnscopedSecretError):
-            return (get_secret(name) or "").strip()
-    return (os.getenv(name) or "").strip()
+    except Exception:  # partial `hermes update` — degrade to the legacy env read
+        return (os.getenv(name) or "").strip()
+    try:
+        return (get_secret(name) or "").strip()
+    except UnscopedSecretError:
+        return (os.getenv(name) or "").strip()
 
 
 # Codex Responses → chat.completions adapter, so aux consumers need no changes.
