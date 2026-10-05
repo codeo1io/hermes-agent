@@ -19,7 +19,10 @@ def _stdout_queue(proc: subprocess.Popen) -> queue.Queue[dict]:
     return out
 
 
-def _read_json_line(out: queue.Queue[dict], timeout: float = 2.0) -> dict:
+def _read_json_line(out: queue.Queue[dict], timeout: float = 15.0) -> dict:
+    # 15s: the first line waits out a cold interpreter (tui_gateway.server
+    # import inside run_host measured ~1.6s on a quiet host; CI hosts can
+    # be several times slower), matching the repo's quiet-runner doctrine.
     try:
         return out.get(timeout=timeout)
     except queue.Empty as exc:
@@ -56,7 +59,7 @@ def test_compute_host_line_json_hello_and_shutdown():
         proc.stdin.write(json.dumps({"type": "shutdown", "request_id": "stop"}) + "\n")
         proc.stdin.flush()
         assert _read_json_line(out)["type"] == "shutdown.ack"
-        proc.wait(timeout=2)
+        proc.wait(timeout=15)
     finally:
         if proc.poll() is None:
             proc.kill()
