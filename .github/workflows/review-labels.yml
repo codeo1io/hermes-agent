@@ -50,7 +50,20 @@ permissions:
 jobs:
   check:
     name: Review label gate
-    if: inputs.ci_review || inputs.mcp_catalog || inputs.supply_chain
+    # Conductor CI validation PRs are opened by our own ephemeral CI
+    # validator against a throwaway head ref (never pushed to a real
+    # branch): there is no human review to wait for, and the PR is closed
+    # as soon as the validation run concludes. Both signals (head-ref
+    # prefix and PR title) are absent on push events, so this exemption
+    # cannot leak outside ephemeral validation PRs.
+    if: >-
+      ${{
+        (inputs.ci_review || inputs.mcp_catalog || inputs.supply_chain)
+        && !(
+          startsWith(github.head_ref, 'conductor/ci-')
+          && startsWith(github.event.pull_request.title, 'Conductor CI validation')
+        )
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
