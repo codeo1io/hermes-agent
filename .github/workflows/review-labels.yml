@@ -50,7 +50,25 @@ permissions:
 jobs:
   check:
     name: Review label gate
-    if: inputs.ci_review || inputs.mcp_catalog || inputs.supply_chain
+    # Conductor ephemeral validation PRs (hermes-conductor's
+    # github_ci_validate.py) are machine-created, machine-closed within the
+    # hour, and never merged: the ``ci-reviewed`` maintainer attestation
+    # cannot exist for them and would be meaningless — but their snapshots
+    # routinely carry CI plumbing (workflow retargets, guard fixes), so the
+    # gate would otherwise make those trees structurally unvalidatable. Exempt
+    # exactly the tool-owned shape — branch in the ``conductor/ci-``
+    # namespace AND the tool's "Conductor CI validation" title AND opened
+    # by the repository owner (the automation identity that composes these
+    # snapshots). The first two signals are author-controllable on their
+    # own; requiring the owner login closes the forgery hole while still
+    # failing the gate open for forks that cannot see either signal. Both
+    # signals are missing on push events, so the exemption can never fire
+    # there, and every human PR keeps the full gate.
+    if: >-
+      (inputs.ci_review || inputs.mcp_catalog || inputs.supply_chain) &&
+      !(startsWith(github.head_ref, 'conductor/ci-') &&
+        startsWith(github.event.pull_request.title, 'Conductor CI validation') &&
+        github.event.pull_request.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
