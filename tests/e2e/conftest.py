@@ -92,6 +92,15 @@ def _ensure_discord_mock():
 
 def _ensure_slack_mock():
     """Install mock slack modules so SlackAdapter can be imported."""
+    # The adapter imports ``aiohttp`` unconditionally (only its slack_bolt /
+    # slack_sdk imports are guarded), so collecting these tests without the
+    # messaging extra installed needs a stub or conftest import fails. A real
+    # install always wins, matching the guards below.
+    if "aiohttp" not in sys.modules:
+        try:
+            import aiohttp  # noqa: F401
+        except ImportError:
+            sys.modules["aiohttp"] = MagicMock()
     if "slack_bolt" in sys.modules and hasattr(sys.modules["slack_bolt"], "__file__"):
         return  # Real library installed
 
