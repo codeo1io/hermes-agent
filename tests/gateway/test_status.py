@@ -1289,6 +1289,18 @@ class TestReadProcessCmdlinePsFallback:
 
     def test_ps_fallback_when_proc_unavailable(self, monkeypatch):
         monkeypatch.setattr(status.Path, "read_bytes", lambda self: (_ for _ in ()).throw(FileNotFoundError))
+        # Force the psutil rung to miss regardless of the host pid table: on shared CI
+        # runners pid 873 can be a live daemon (seen: udisksd on ubuntu-24.04), which
+        # answers truthfully before the ps fallback is ever reached.
+        try:
+            import psutil
+        except ImportError:
+            pass  # production falls through to ps without psutil anyway
+        else:
+            monkeypatch.setattr(
+                psutil, "Process",
+                lambda pid: (_ for _ in ()).throw(psutil.NoSuchProcess(pid)),
+            )
         monkeypatch.setattr(
             status.subprocess, "run",
             lambda args, **kwargs: SimpleNamespace(returncode=0, stdout="/usr/libexec/bluetoothuserd\n"),
