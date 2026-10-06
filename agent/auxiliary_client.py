@@ -1115,13 +1115,15 @@ def _scoped_key_env(name: str) -> str:
     """Read a provider API key (or its paired base-URL) env var through the profile secret scope.
 
     In agent turns the scope's verdict is authoritative (a scoped miss must not borrow another
-    profile's key); only the unscoped default-profile path (``UnscopedSecretError``) reads
-    ``os.environ`` -- any other scope failure propagates instead of borrowing the ambient env.
+    profile's key); unscoped startup/CLI paths fall back to os.environ. A bound-scope FAILURE
+    propagates — a blanket suppress would silently borrow the launch profile's key.
     """
     if not name:
         return ""
-    from agent.secret_scope import UnscopedSecretError, get_secret
-
+    try:
+        from agent.secret_scope import UnscopedSecretError, get_secret
+    except Exception:  # partial `hermes update` — degrade to the legacy env read
+        return (os.getenv(name) or "").strip()
     try:
         return (get_secret(name) or "").strip()
     except UnscopedSecretError:
@@ -3344,17 +3346,21 @@ def _is_structured_output_rejection(exc: Exception) -> bool:
         return True
     if "response_format" in err_lower and "unavailable" in err_lower:
         return True
-    # Gemini native names its own generationConfig keys, never ours: "Function calling with a response
-    # mime type: 'application/json' is unsupported" (pre-Gemini-3 + tools via a proxy), or an
-    # "Unknown name"/"Invalid value" 400 on response_schema / response_json_schema for a schema the
-    # surface cannot express. Same remedy: one retry without the format.
-    if _contains_any(err_lower, ("response mime type", "response_schema", "response_json_schema")):
-        return True
     # Gateways that validate the request body with a strict pydantic model reject the
     # OBJECT-form json_schema by shape ("str type expected" on response_format.json_schema,
     # 422) rather than by naming the feature. The field is what they refuse; the retry
     # without it is the same remedy, so treat the shape error as a rejection too.
     if "response_format" in err_lower and "json_schema" in err_lower:
+        return True
+    # Gemini native generationConfig 400s reject the structured-output wire in Gemini's own
+    # vocabulary: INVALID_ARGUMENT naming the response mime type or the response_schema /
+    # response_json_schema fields at 'generation_config'. The retry without the field is the
+    # same remedy as the OpenAI-wire rejections above.
+    if "gemini" in err_lower and "invalid_argument" in err_lower and (
+        "response_schema" in err_lower
+        or "response_json_schema" in err_lower
+        or "response mime type" in err_lower
+    ):
         return True
     return _is_unsupported_parameter_error(exc, "response_format") or _is_unsupported_parameter_error(exc, "output_config")
 
