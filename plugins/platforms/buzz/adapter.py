@@ -985,7 +985,11 @@ class BuzzAdapter(BasePlatformAdapter):
         self._membership_since = int(time.time())
         self._ws_task = asyncio.create_task(self._websocket_loop())
         try:
-            await asyncio.wait_for(self._ws_ready.wait(), timeout=_WS_AUTH_TIMEOUT + 5)
+            # asyncio.timeout() rather than wait_for(): a stop-cancel landing at the same instant
+            # _ws_ready completes is swallowed by 3.11 wait_for (cancel-eat class, #16645); the
+            # timeout context propagates it so teardown proceeds immediately.
+            async with asyncio.timeout(_WS_AUTH_TIMEOUT + 5):
+                await self._ws_ready.wait()
             return True
         except (asyncio.TimeoutError, TimeoutError):
             logger.warning("Buzz: WebSocket did not authenticate in time")
@@ -995,7 +999,12 @@ class BuzzAdapter(BasePlatformAdapter):
 
     async def _authenticate_websocket(self, websocket) -> None:
         """NIP-42: await the AUTH challenge, answer with a signed kind-22242 event (+ optional NIP-OA tag), await OK."""
-        message = json.loads(await asyncio.wait_for(websocket.recv(), timeout=_WS_AUTH_TIMEOUT))
+        # asyncio.timeout() rather than wait_for(): same cancel-eat class as _start_websocket — a
+        # stop-cancel landing as the AUTH challenge arrives must propagate out of the handshake,
+        # not be eaten while the handshake continues to the OK exchange.
+        async with asyncio.timeout(_WS_AUTH_TIMEOUT):
+            challenge = await websocket.recv()
+        message = json.loads(challenge)
         if not isinstance(message, list) or len(message) < 2 or message[0] != "AUTH":
             raise ConnectionError("Buzz relay did not send a NIP-42 AUTH challenge")
         # BUZZ_AUTH_TAG is per-identity: a scoped profile without one fails closed to "" rather than borrowing

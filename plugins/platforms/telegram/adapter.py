@@ -2212,7 +2212,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 # No get_me() ⇒ not a live polling client (torn down / test double): exit, don't spin.
                 if not callable(getattr(bot, "get_me", None)):
                     return
-                await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
+                # asyncio.timeout() rather than wait_for(): 3.11 wait_for swallows a stop-cancel
+                # that lands as get_me() completes (cancel-eat class, #16645), leaving the loop
+                # spinning through teardown; the timeout context propagates it to the
+                # CancelledError exit below.
+                async with asyncio.timeout(PROBE_TIMEOUT):
+                    await bot.get_me()
                 # get_me() refreshes PTB's cached bot user: adopt a BotFather rename before routing on it.
                 self._bot_identity_checked_at = time.monotonic()
                 self._note_bot_username(getattr(bot, "username", None))
@@ -2289,7 +2294,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if not callable(get_webhook_info):
             return
         try:
-            info = await asyncio.wait_for(get_webhook_info(), probe_timeout)  # type: ignore[arg-type]
+            # asyncio.timeout() rather than wait_for(): same cancel-eat class as the get_me()
+            # probe above — a stop-cancel delivered while the webhook probe resolves must
+            # propagate to the loop's CancelledError exit, not be swallowed in this helper.
+            async with asyncio.timeout(probe_timeout):
+                info = await get_webhook_info()  # type: ignore[arg-type]
         except (asyncio.TimeoutError, OSError):
             return  # connectivity symptom for the get_me() path, not a stuck-queue signal
         pending = int(getattr(info, "pending_update_count", 0) or 0)

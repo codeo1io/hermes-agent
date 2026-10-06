@@ -16,6 +16,7 @@ reconnect ladder and hands the adapter to the supervisor for a rebuild
 steady-state wedges are caught without any Bot API call.
 """
 import asyncio
+import contextlib
 import time as _time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -227,3 +228,49 @@ async def test_heartbeat_detects_wedged_long_poll_with_empty_queue():
     )
     await task
     rec.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stop_cancel_lands_when_the_probe_completes_concurrently():
+    """3.11 cancel-eat class (#16645): a stop-cancel arriving at the same instant a get_me()
+    probe completes must terminate the loop instead of being swallowed by ``wait_for``.
+    Pre-fix, the loop keeps cycling through teardown (a probe-every-few-ms busy spin) — the
+    very residue the comment above warns about; the probe count is the deterministic witness."""
+    adapter = _make_adapter(stalled_seconds=1)
+    holder = {}
+    probes = []
+
+    async def cancelling_get_me():
+        probes.append(True)
+        if len(probes) == 1:
+            holder["loop"].cancel()  # stop-cancel lands exactly as the first probe completes
+        return MagicMock(username="bot")
+
+    adapter._app.bot.get_me = cancelling_get_me
+    real_sleep = asyncio.sleep
+
+    async def paced_sleep(delay, *args, **kwargs):
+        # A real (small) yield point: post-eat cycles park here instead of spinning, so a
+        # manual cancel can always be delivered and the test can never wedge the runner.
+        await real_sleep(0.01)
+
+    with patch("asyncio.sleep", new=paced_sleep):
+        loop_task = asyncio.ensure_future(adapter._polling_heartbeat_loop())
+        holder["loop"] = loop_task
+        try:
+            deadline = _time.monotonic() + 5.0
+            while not loop_task.done() and _time.monotonic() < deadline:
+                await real_sleep(0.02)
+        finally:
+            if not loop_task.done():
+                loop_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(loop_task, timeout=2.0)
+
+    # The loop exited (CancelledError path) within one step — it did not keep probing.
+    assert loop_task.done(), "heartbeat loop never exited after the stop-cancel"
+    assert len(probes) == 1, (
+        f"stop-cancel was eaten by wait_for: the loop kept cycling ({len(probes)} probes) "
+        "through teardown instead of honouring the stop"
+    )
+    assert adapter._polling_error_task is None, "a stop-cancel must not be misread as probe failure"

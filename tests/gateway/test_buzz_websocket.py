@@ -7,6 +7,7 @@ lifecycle as wired into BuzzAdapter.
 """
 
 import asyncio
+import contextlib
 import json
 import time
 
@@ -795,3 +796,56 @@ async def test_ws_discovery_task_cancelled_when_connection_exits(monkeypatch):
 
     assert started, "discovery task was never started with the connection"
     assert all(t.done() for t in started), "discovery task outlived its connection"
+
+
+# ── stop-cancel propagation through the handshake waits (3.11 cancel-eat class, #16645) ─────
+
+
+@pytest.mark.asyncio
+async def test_start_websocket_propagates_stop_cancel_that_lands_as_auth_completes(monkeypatch):
+    """A stop-cancel arriving at the same instant the auth handshake completes must propagate
+    out of ``_start_websocket``. 3.11 ``wait_for`` swallows it and reports a successful start
+    (the pre-fix behaviour this test was red on), leaving a cancelled-but-running adapter."""
+    adapter = _make_adapter()
+    holder = {}
+
+    async def fake_ws_loop(self=None):
+        holder["caller"].cancel()  # stop-cancel lands exactly as auth completes
+        adapter._ws_ready.set()
+        await asyncio.Event().wait()  # park the (fake) loop; the test cleans it up
+
+    monkeypatch.setattr(BuzzAdapter, "_websocket_loop", fake_ws_loop)
+    holder["caller"] = asyncio.create_task(adapter._start_websocket())
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(holder["caller"], 5.0)
+    finally:
+        ws_task = adapter._ws_task
+        if ws_task is not None and not ws_task.done():
+            ws_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ws_task
+
+
+@pytest.mark.asyncio
+async def test_websocket_auth_propagates_stop_cancel_that_lands_as_the_challenge_arrives():
+    """A stop-cancel arriving with the AUTH challenge must propagate out of the handshake.
+    3.11 ``wait_for`` swallows it and the handshake continues to a clean OK exchange (the
+    pre-fix behaviour this test was red on) instead of honouring the stop."""
+    adapter = _make_adapter()
+    holder = {}
+
+    class CancelThenChallengeWs(_FakeWebSocket):
+        async def recv(self):
+            if self.sent:
+                return json.dumps(["OK", self.sent[0][1]["id"], True, "authenticated"])
+            holder["auth"].cancel()  # stop-cancel lands exactly as the challenge arrives
+            return json.dumps(["AUTH", "challenge-stop"])
+
+        async def send(self, raw):
+            self.sent.append(json.loads(raw))
+            await asyncio.sleep(0.05)  # a real await point: delivery for the pending cancel
+
+    holder["auth"] = asyncio.create_task(adapter._authenticate_websocket(CancelThenChallengeWs()))
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(holder["auth"], 5.0)

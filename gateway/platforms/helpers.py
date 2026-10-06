@@ -90,16 +90,48 @@ def carry_inbound_dedup(caches: Optional[dict], adapter: Any) -> None:
 _to_thread = asyncio.to_thread
 
 
-async def cancel_task(task: Optional[asyncio.Task]) -> None:
-    """Cancel *task* and wait for it to unwind. ``None``/finished tasks are no-ops; awaiting the
-    current task would deadlock, so a self-cancel only requests cancellation. Exceptions the task
-    dies with are swallowed: at teardown nobody is left to handle them."""
+# How long cancel_task waits for a cancelled task to unwind before orphaning it. A task that
+# swallows CancelledError (the 3.11 cancel-eat class, #16645) would otherwise stall gateway
+# teardown forever; 5s still covers slow-but-honest close/flush unwinds.
+_CANCEL_REAP_TIMEOUT = 5.0
+
+
+def _reap_orphaned_task_outcome(task: asyncio.Task) -> None:
+    """Consume an orphaned task's eventual outcome so its death exception is logged instead of
+    surfacing later as an unretrieved-exception warning on the loop."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.info("cancel_task: orphaned task %r finally died with %r", task, exc)
+
+
+async def cancel_task(task: Optional[asyncio.Task], *, timeout: Optional[float] = None) -> None:
+    """Cancel *task* and wait for it to unwind, bounded by *timeout* seconds (default
+    ``_CANCEL_REAP_TIMEOUT``, read at call time so tests can retune the seam). ``None``/finished
+    tasks are no-ops; awaiting the current task would deadlock, so a self-cancel only requests
+    cancellation. Exceptions the task dies with are swallowed: at teardown nobody is left to
+    handle them. A task that ignores its cancellation must not stall the caller: past the bound
+    it is orphaned — left running and cancelled — with a warning, and its outcome is logged when
+    it eventually dies."""
     if task is None or task.done():
         return
     task.cancel()
-    if task is not asyncio.current_task():
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+    if task is asyncio.current_task():
+        return
+    bound = _CANCEL_REAP_TIMEOUT if timeout is None else timeout
+    try:
+        done, pending = await asyncio.wait({task}, timeout=bound)
+    except (asyncio.CancelledError, Exception):
+        # The caller itself was cancelled mid-reap: stop waiting; the task keeps its cancellation.
+        return
+    if pending:
+        logger.warning(
+            "cancel_task: %r still running %.1fs after cancellation; orphaning it so teardown proceeds", task, bound)
+        task.add_done_callback(_reap_orphaned_task_outcome)
+        return
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 def bounded_put(store: MutableMapping[str, Any], key: str, value: Any, cap: int) -> None:
