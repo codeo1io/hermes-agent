@@ -71,22 +71,14 @@ logger = logging.getLogger(__name__)
 LedgerKey = tuple[str, str]
 
 
-def _default_state_path() -> Path:
-    """``cache/delegate-provider-health.json`` under the effective home.
+def _state_path_for_home(home: str | Path) -> Path:
+    """Health-state file for a concrete home (already resolved)."""
+    return Path(home) / "cache" / _STATE_FILENAME
 
-    Resolved lazily at each save/load so a turn running under a bound
-    profile scope addresses that profile's file (never hardcoded
-    ``~/.hermes``). It lives beside, not inside, ``cache/delegate-sessions/``
-    so session-metadata pruning can never delete breaker state.
-    """
-    try:
-        return Path(get_hermes_home()) / "cache" / _STATE_FILENAME
-    except Exception:  # pragma: no cover - resilience, never fail dispatch
-        return (
-            Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
-            / "cache"
-            / _STATE_FILENAME
-        )
+
+def _default_state_path() -> Path:
+    """Health-state file under the effective (contextvar/env) home."""
+    return _state_path_for_home(get_hermes_home())
 
 
 def _decode_state_entry(raw: object, now: float, drift: float) -> dict | None:
@@ -328,15 +320,32 @@ _LEDGER_REGISTRY_LOCK = threading.Lock()
 
 
 def _ledger_for_home() -> DelegateHealthLedger:
-    """The ledger instance bound to the current Hermes home."""
+    """Registry-scoped ledger for the effective home.
+
+    Each profile home gets its OWN ledger INSTANCE — a circuit open for
+    (backend, model) under profile B never trips dispatches from profile A.
+    The instance also binds its state FILE to the home it was constructed
+    under: the turn/observer threads do not inherit the home-override
+    contextvar, so a ledger pinned at dispatch time must persist to the
+    dispatching profile's file regardless of what ``get_hermes_home()``
+    resolves to at save time in the worker.
+    """
+    home: str | None
     try:
+        home = get_hermes_home()
         key = hermes_home_key()
-    except Exception:
-        key = ""  # fail-open: one shared ledger beats refusing health checks
+    except Exception:  # pragma: no cover - resilience, never fail dispatch
+        home = None
+        key = ""
     with _LEDGER_REGISTRY_LOCK:
         ledger = _LEDGERS.get(key)
         if ledger is None:
-            ledger = DelegateHealthLedger()
+            if home is None:
+                ledger = DelegateHealthLedger()
+            else:
+                ledger = DelegateHealthLedger(
+                    state_path=lambda home=home: _state_path_for_home(home)
+                )
             _LEDGERS[key] = ledger
         return ledger
 
