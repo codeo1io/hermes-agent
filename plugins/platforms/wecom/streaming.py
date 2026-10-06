@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+import task_retention
 
 logger = logging.getLogger("plugins.platforms.wecom.adapter")
 
@@ -207,7 +208,8 @@ class WeComStreamMixin:
         turn.keepalive_handle = None
         if not (turn.finalized or turn.expired):
             try:
-                asyncio.ensure_future(self._keepalive_send(turn, turn_id))
+                # rm-089: retain — an unretained keepalive resend is collectable mid-flight.
+                task_retention.retain_background_task(asyncio.ensure_future(self._keepalive_send(turn, turn_id)))
             except RuntimeError:
                 pass
 

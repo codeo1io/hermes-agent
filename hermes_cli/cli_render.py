@@ -16,6 +16,7 @@ import textwrap
 import threading
 import time
 from contextlib import contextmanager, suppress
+import task_retention
 from hermes_cli.banner import format_banner_version_label
 from rich.console import Console
 from rich.text import Text as _RichText
@@ -817,7 +818,8 @@ def _cprint(text: str):
                 import inspect as _inspect
                 coro = run_in_terminal(lambda: _paint_held(seq, _schedule, app) or paint_now())
                 if coro is not None and (_inspect.isawaitable(coro) or _inspect.iscoroutine(coro)):
-                    _asyncio.ensure_future(coro)
+                    # rm-089: retain — an unretained repaint is collectable mid-flight.
+                    task_retention.retain_background_task(_asyncio.ensure_future(coro))
                 return
             # What run_in_terminal does, but now: its erase and print would run a loop pass
             # later, when a resize may have landed after the check above (#95375).

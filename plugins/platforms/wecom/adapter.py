@@ -32,6 +32,7 @@ from gateway.platforms.access_policy_mixin import OwnAccessPolicyMixin
 from gateway.platforms.base import gateway_trust_env, BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from utils import env_float
+import task_retention
 
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret, send_error
 from plugins.platforms.wecom.send_queue import ChatSendQueueMixin
@@ -627,7 +628,9 @@ class WeComAdapter(WeComStreamMixin, WeComMediaMixin, ChatSendQueueMixin, OwnAcc
     def _send_failure(self, error: str, subscription_lost: bool) -> SendResult:
         """Failed SendResult; on 846609 schedule the stale-req_id purge so later sends recover."""
         if subscription_lost:
-            asyncio.ensure_future(self._force_reconnect_on_stale_subscription(STREAM_NOT_SUBSCRIBED_ERRCODE))
+            # rm-089: retain — an unretained forced reconnect is collectable mid-flight.
+            task_retention.retain_background_task(asyncio.ensure_future(
+                self._force_reconnect_on_stale_subscription(STREAM_NOT_SUBSCRIBED_ERRCODE)))
         return SendResult(success=False, error=error)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:

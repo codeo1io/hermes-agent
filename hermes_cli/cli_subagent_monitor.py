@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import time
 
+import task_retention
 from prompt_toolkit.utils import get_cwidth
 
 from hermes_cli import cli_process_dock as procs
@@ -423,7 +424,8 @@ def open_monitor(cli):
             monitor.opening = False
             cli._invalidate()
 
-    asyncio.get_running_loop().create_task(run())
+    # rm-089: retain — an unretained monitor run is collectable mid-flight.
+    task_retention.retain_background_task(asyncio.get_running_loop().create_task(run()))
 
 
 def toggle_dock(cli):

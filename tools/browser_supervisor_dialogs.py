@@ -17,6 +17,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
+import task_retention
 from urllib.parse import parse_qs, urlparse
 
 # Logger-name parity with the origin module (records must look unchanged).
@@ -212,7 +213,8 @@ class DialogSupervisionMixin:
         if auto is not None:
             with self._state_lock:
                 self._archive_dialog_locked(dialog, "auto_policy")
-            asyncio.create_task(self._respond_quiet(dialog, accept=auto[0], prompt_text=auto[1]))
+            # rm-089: retain — unretained auto-responds are collectable mid-flight.
+            task_retention.retain_background_task(asyncio.create_task(self._respond_quiet(dialog, accept=auto[0], prompt_text=auto[1])))
             return
         with self._state_lock:
             self._pending_dialogs[dialog.id] = dialog

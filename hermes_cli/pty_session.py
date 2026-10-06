@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Callable, Dict, Optional, Tuple
+import task_retention
 
 WS_CLOSE_PROCESS_EXITED = 4410
 WS_CLOSE_SUPERSEDED = 4409
@@ -228,7 +229,8 @@ class PtySessionRegistry:
             raise RegistryFull()
         oldest = min(idle, key=lambda s: s.last_detached_at or 0.0)
         self._sessions.pop(oldest.key, None)
-        asyncio.create_task(oldest.close())
+        # rm-089: retain — an unretained close is collectable mid-flight.
+        task_retention.retain_background_task(asyncio.create_task(oldest.close()))
 
     async def close_all(self) -> None:
         for key in list(self._sessions):

@@ -611,7 +611,8 @@ class _IncomingHandler(dingtalk_stream.ChatbotHandler if DINGTALK_STREAM_AVAILAB
             msg_id, conversation_id = getattr(chatbot_msg, "message_id", None) or "", getattr(chatbot_msg, "conversation_id", None) or ""
             if msg_id and conversation_id:
                 self._adapter._spawn_bg(self._adapter._send_emotion(msg_id, conversation_id, "🤔Thinking", recall=False))
-            asyncio.create_task(self._safe_on_message(chatbot_msg))  # surfaces exceptions in logs instead of losing them
+            # rm-089: retained via the adapter's own bg set (surfaces exceptions in logs instead of losing them).
+            self._adapter._spawn_bg(self._safe_on_message(chatbot_msg))
         except Exception:
             logger.exception("[%s] Error preparing incoming message", self._adapter.name)
             return AckMessage.STATUS_SYSTEM_EXCEPTION, "error"

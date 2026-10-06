@@ -26,6 +26,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import task_retention
 
 # _resolve_request_profile result for a /p/<profile>/ prefix this gateway does not serve (-> 404);
 # distinct from None (no prefix / multiplexing off -> default profile).
@@ -161,7 +162,8 @@ def _browser_controller_ws_sender(ws, loop, *, wait_timeout: float = 10.0):
         except RuntimeError:
             on_loop = False
         if on_loop:
-            loop.create_task(ws.send_json(frame))
+            # rm-089: retain — an unretained fire-and-forget send is collectable mid-flight.
+            task_retention.retain_background_task(loop.create_task(ws.send_json(frame)))
             return
         future = asyncio.run_coroutine_threadsafe(ws.send_json(frame), loop)
         try:

@@ -2088,7 +2088,8 @@ class ConnectionManager:
     def schedule_reconnect(self) -> None:
         """Schedule a reconnect only if running and not already reconnecting."""
         if self._adapter._running and not self._reconnecting:
-            asyncio.create_task(self._reconnect_with_backoff())
+            # rm-089: retain — an unretained reconnect is collectable mid-flight.
+            self._adapter._track_task(asyncio.create_task(self._reconnect_with_backoff()))
 
     async def _reconnect_with_backoff(self) -> bool:
         if self._reconnecting:

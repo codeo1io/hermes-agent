@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 from typing import Any
+import task_retention
 
 from tui_gateway import server
 from agent.message_sanitization import _sanitize_surrogates
@@ -133,7 +134,8 @@ class WSTransport:
             self._pending_tokens.append(line)
             batch, self._pending_tokens = self._pending_tokens, []
             if on_loop:
-                self._loop.create_task(self._safe_send_many(batch))
+                # rm-089: retain — unretained sends are collectable mid-flight.
+                task_retention.retain_background_task(self._loop.create_task(self._safe_send_many(batch)))
                 return True
             fut = safe_schedule_threadsafe(self._safe_send_many(batch), self._loop)
             if fut is None:
@@ -165,7 +167,8 @@ class WSTransport:
             self._token_flush_armed = False
             batch, self._pending_tokens = self._pending_tokens, []
             if batch and not self._closed:
-                self._loop.create_task(self._safe_send_many(batch))
+                # rm-089: retain (see send-side above).
+                task_retention.retain_background_task(self._loop.create_task(self._safe_send_many(batch)))
 
     @property
     def closed(self) -> bool:
@@ -201,7 +204,7 @@ class WSTransport:
                     self._closed = True
                     _log.warning("ws send deadline exceeded (socket stalled, loop responsive) peer=%s deadline=%ss — closing",
                                  self._peer, _WS_SEND_DEADLINE_S)
-                    self._loop.create_task(self._close_stalled_socket())
+                    task_retention.retain_background_task(self._loop.create_task(self._close_stalled_socket()))
                     return
                 except UnicodeEncodeError as exc:
                     # A single illegal UTF-8 frame (lone surrogate) must not tear down the socket.

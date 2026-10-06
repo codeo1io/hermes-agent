@@ -13,6 +13,7 @@ import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import task_retention
 
 logger = logging.getLogger(__name__)
 
@@ -599,7 +600,8 @@ async def handle_drive_comment_event(client: Any, data: Any, *, self_open_id: st
     logger.info("[Feishu-Comment] Access granted: user=%s policy=%s rule=%s", from_open_id, rule.policy, rule.match_source)
     reaction_kwargs = dict(file_token=file_token, file_type=file_type, reply_id=reply_id, reaction_type="OK")
     if reply_id:
-        asyncio.ensure_future(update_comment_reaction(client, "add", **reaction_kwargs))
+        # rm-089: retain — an unretained reaction update is collectable mid-flight.
+        task_retention.retain_background_task(asyncio.ensure_future(update_comment_reaction(client, "add", **reaction_kwargs)))
     logger.info("[Feishu-Comment] [Step 2/5] Parallel fetch: doc meta + comment batch_query")
     doc_meta, comment_detail = await asyncio.gather(asyncio.ensure_future(query_document_meta(client, file_token, file_type)),
                                                     asyncio.ensure_future(batch_query_comment(client, file_token, file_type, comment_id)))

@@ -19,6 +19,7 @@ from gateway.platforms._shared import (
 )
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 from hermes_constants import (find_node_executable, get_hermes_dir, with_hermes_node_path)
+import task_retention
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -724,7 +725,8 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                             event = await self._build_message_event(msg_data)
                             if event:
                                 # Fire-and-forget: a slow bridge /read must not delay dispatch.
-                                asyncio.create_task(self._send_read_receipt(msg_data))
+                                # rm-089: retained — unretained receipts are collectable mid-flight.
+                                task_retention.retain_background_task(asyncio.create_task(self._send_read_receipt(msg_data)))
                                 if event.message_type == MessageType.TEXT:
                                     self._enqueue_text_event(event)
                                 else:

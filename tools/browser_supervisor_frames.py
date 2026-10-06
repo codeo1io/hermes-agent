@@ -12,6 +12,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import task_retention
 
 # Logger-name parity with the origin module (records must look unchanged).
 logger = logging.getLogger("tools.browser_supervisor")
@@ -108,7 +109,8 @@ class FrameTrackingMixin:
                 )
         # Enable child domains off-loop: awaiting the replies here would deadlock
         # because only the reader can resolve those Futures.
-        asyncio.create_task(self._enable_child_domains(sid))
+        # rm-089: retain — an unretained enable is collectable mid-flight.
+        task_retention.retain_background_task(asyncio.create_task(self._enable_child_domains(sid)))
 
     async def _enable_child_domains(self, sid: str) -> None:
         """Enable Page+Runtime (+nested setAutoAttach) and the dialog bridge on a child session."""

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -914,6 +915,9 @@ class TestWindowsHealStageSwap:
         def fake_urlopen(url, timeout=0):
             if str(url).endswith(".zip"):
                 return _FakeUrlResponse(zip_bytes)
+            if str(url).endswith("SHASUMS256.txt"):
+                digest = hashlib.sha256(zip_bytes).hexdigest()
+                return _FakeUrlResponse(f"{digest}  {zip_name}\n".encode())
             return _FakeUrlResponse(index_html)
 
         monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -1196,3 +1200,79 @@ class TestProjectVenvDirOutOfTree:
         assert hermes_constants.project_venv_dir(other) is None
         (checkout / ".venv").mkdir()
         assert hermes_constants.project_venv_dir(checkout) == checkout / ".venv"
+
+
+class TestWindowsNodeZipDigest:
+    """rm-098: the staged Node zip must match the release directory's published
+    SHASUMS256.txt digest before anything is extracted or staged. Driven at the
+    staging seam so the digest logic runs on every host (the full heal pipeline
+    stays behind the windows_only marker in TestWindowsHealStageSwap)."""
+
+    def _stub_urls(self, monkeypatch, zip_name, zip_bytes, shasums_body):
+        import urllib.request
+
+        index_html = f'<a href="./{zip_name}">{zip_name}</a>'.encode()
+
+        def fake_urlopen(url, timeout=0):
+            if str(url).endswith(".zip"):
+                return _FakeUrlResponse(zip_bytes)
+            if str(url).endswith("SHASUMS256.txt"):
+                return _FakeUrlResponse(shasums_body)
+            return _FakeUrlResponse(index_html)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    def test_matching_digest_stages_normally(self, tmp_path, monkeypatch):
+        zip_name, zip_bytes = _make_node_zip(hermes_constants._HERMES_NODE_TARGET_MAJOR)
+        digest = hashlib.sha256(zip_bytes).hexdigest()
+        self._stub_urls(
+            monkeypatch, zip_name, zip_bytes, f"{digest}  {zip_name}\n".encode()
+        )
+
+        staged = hermes_constants._stage_windows_node_zip(tmp_path, "x64")
+
+        assert staged is not None and staged.is_dir()
+        assert (staged / "node.exe").exists()
+
+    def test_tampered_zip_fails_closed(self, tmp_path, monkeypatch):
+        zip_name, zip_bytes = _make_node_zip(hermes_constants._HERMES_NODE_TARGET_MAJOR)
+        wrong = hashlib.sha256(b"attacker-controlled bytes").hexdigest()
+        self._stub_urls(
+            monkeypatch, zip_name, zip_bytes, f"{wrong}  {zip_name}\n".encode()
+        )
+
+        staged = hermes_constants._stage_windows_node_zip(tmp_path, "x64")
+
+        assert staged is None
+        # Fail closed: nothing was extracted or left staged.
+        assert list(tmp_path.glob("node.new-*")) == []
+
+    def test_missing_shasums_entry_fails_closed(self, tmp_path, monkeypatch):
+        zip_name, zip_bytes = _make_node_zip(hermes_constants._HERMES_NODE_TARGET_MAJOR)
+        # A SHASUMS file that never mentions our artifact must also refuse staging.
+        self._stub_urls(
+            monkeypatch, zip_name, zip_bytes, b"deadbeef  some-other-artifact.tar.gz\n"
+        )
+
+        staged = hermes_constants._stage_windows_node_zip(tmp_path, "x64")
+
+        assert staged is None
+        assert list(tmp_path.glob("node.new-*")) == []
+
+    def test_shasums_fetch_failure_fails_closed(self, tmp_path, monkeypatch):
+        import urllib.request
+
+        zip_name, zip_bytes = _make_node_zip(hermes_constants._HERMES_NODE_TARGET_MAJOR)
+        index_html = f'<a href="./{zip_name}">{zip_name}</a>'.encode()
+
+        def fake_urlopen(url, timeout=0):
+            if str(url).endswith(".zip"):
+                return _FakeUrlResponse(zip_bytes)
+            if str(url).endswith("SHASUMS256.txt"):
+                raise OSError("release index compromised / unreachable")
+            return _FakeUrlResponse(index_html)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+        assert hermes_constants._stage_windows_node_zip(tmp_path, "x64") is None
+        assert list(tmp_path.glob("node.new-*")) == []

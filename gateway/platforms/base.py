@@ -2711,7 +2711,10 @@ class BasePlatformAdapter(ABC):
                 logger.debug("[%s] Ephemeral delete failed for %s/%s: %s", self.name, chat_id, message_id, e)
         coro = _run_delete()
         try:
-            asyncio.create_task(coro)
+            # rm-089: retain — an unretained delete is collectable mid-flight.
+            task = asyncio.create_task(coro)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         except RuntimeError:
             # No running loop (unit tests): close the coroutine to avoid a never-awaited warning.
             coro.close()

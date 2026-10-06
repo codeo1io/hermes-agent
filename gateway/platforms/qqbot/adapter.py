@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+import task_retention
 from urllib.parse import urlparse
 
 try:
@@ -493,10 +494,11 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
     @staticmethod
     def _create_task(coro):
-        """Schedule a coroutine; returns None (no error) when no loop is running
+        """Schedule a coroutine and retain it (unretained tasks are collectable
+        mid-flight, rm-089); returns None (no error) when no loop is running
         (tests call _dispatch_payload synchronously)."""
         try:
-            return asyncio.get_running_loop().create_task(coro)
+            return task_retention.retain_background_task(asyncio.get_running_loop().create_task(coro))
         except RuntimeError:
             return None
 
@@ -527,7 +529,8 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             elif t == "RESUMED":
                 logger.info("[%s] Session resumed", self._log_tag)
             elif t in self._INBOUND_HANDLERS:
-                asyncio.create_task(self._on_message(t, d))
+                # rm-089: retained by _create_task (dispatch tasks must not be collectable mid-flight).
+                self._create_task(self._on_message(t, d))
             elif t == "INTERACTION_CREATE":
                 self._create_task(self._on_interaction(d))
             else:

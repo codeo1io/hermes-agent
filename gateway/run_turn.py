@@ -34,6 +34,7 @@ from gateway.session_transcript import TranscriptReadError
 from gateway.turn_context import TurnContext
 from gateway.turn_lease import DEFAULT_LEASE_WAIT, TurnLeaseTimeoutError
 from hermes_constants import get_hermes_home_override
+import task_retention
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from utils import base_url_hostname
@@ -1673,7 +1674,8 @@ class GatewayTurnMixin:
             watchers = process_registry.pending_watchers
             process_registry.pending_watchers = []
             for i, watcher in enumerate(watchers):
-                asyncio.create_task(self._run_process_watcher(watcher))
+                # rm-089: retain — unretained watcher tasks are collectable mid-flight.
+                task_retention.retain_background_task(asyncio.create_task(self._run_process_watcher(watcher)))
                 if i % 100 == 99:
                     await asyncio.sleep(0)
         except Exception as e:

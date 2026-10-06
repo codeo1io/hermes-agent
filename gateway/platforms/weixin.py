@@ -36,6 +36,7 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.event import MessageEvent, MessageType
 from hermes_constants import get_hermes_home
+import task_retention
 from utils import atomic_json_write
 from gateway.platforms._shared import extra_or_secret as _extra_or_env, get_scoped_secret as _wx_secret
 
@@ -826,7 +827,8 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
                 # Dispatch before persisting: the off-loop write is an await, and a disconnect that
                 # cancels it must not leave the advanced cursor on disk with this batch undelivered.
                 for message in response.get("msgs") or []:
-                    asyncio.create_task(self._process_message_safe(message))
+                    # rm-089: retain — an unretained dispatch task is collectable mid-flight.
+                    task_retention.retain_background_task(asyncio.create_task(self._process_message_safe(message)))
                 # atomic_json_write fsyncs + renames: persist off the loop, and only when the cursor
                 # moved (an empty long-poll echoes the same buffer back every cycle).
                 if response.get("get_updates_buf") and str(response["get_updates_buf"]) != sync_buf:
@@ -888,7 +890,9 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
         if context_token:
             await self._token_store.set(self._account_id, sender_id, context_token)
         if self._poll_session and self._token and not self._typing_cache.get(sender_id):
-            asyncio.create_task(self._fetch_typing_ticket(self._poll_session, sender_id, context_token or None, "getConfig failed"))
+            # rm-089: retain the ticket fetch or a collection can drop it mid-request.
+            task_retention.retain_background_task(asyncio.create_task(
+                self._fetch_typing_ticket(self._poll_session, sender_id, context_token or None, "getConfig failed")))
         media_paths, media_types = [], []  # type: List[str], List[str]
         for item in item_list:
             ref_item = (item.get("ref_msg") or {}).get("message_item")

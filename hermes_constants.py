@@ -6,6 +6,7 @@ Import-safe, stdlib-only — importable from anywhere without circular-import ri
 import contextlib
 import os
 import re
+import hashlib
 import shutil
 import stat
 import sys
@@ -597,6 +598,28 @@ def _fetch_url(url: str, timeout: int) -> bytes | None:
         return None
 
 
+def _verify_node_zip_sha256(index_url: str, zip_name: str, zip_bytes: bytes) -> bool:
+    """rm-098: verify the zip against the release directory's SHASUMS256.txt.
+
+    The same nodejs.org dist directory publishes a digest for every artifact it serves;
+    a zip that does not match its published sha256 (compromised mirror, truncated or
+    tampered download) must never be extracted. Fail closed: no SHASUMS, no entry, no
+    match — refuse to stage.
+    """
+    shasums = _fetch_url(f"{index_url}SHASUMS256.txt", 60)
+    if shasums is None:
+        return False
+    expected: str | None = None
+    for line in shasums.decode("utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].removeprefix("./") == zip_name:
+            expected = parts[0].lower()
+            break
+    if expected is None:
+        return False
+    return hashlib.sha256(zip_bytes).hexdigest() == expected
+
+
 def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
     """Download the target-major portable Node zip into a sibling ``node.new-*`` dir.
 
@@ -617,6 +640,8 @@ def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
     zip_name = match.group(0)
     zip_bytes = _fetch_url(f"{index_url}{zip_name}", 300)
     if zip_bytes is None:
+        return None
+    if not _verify_node_zip_sha256(index_url, zip_name, zip_bytes):
         return None
     staged = home / f"node.new-{uuid.uuid4().hex[:8]}"
     try:

@@ -12,6 +12,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
+import task_retention
 
 import aiohttp
 
@@ -1395,7 +1396,8 @@ class SlackAdapter(BasePlatformAdapter):
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._restart_socket_mode("socket task exited"))
+        # rm-089: retain — an unretained restart is collectable mid-flight.
+        task_retention.retain_background_task(loop.create_task(self._restart_socket_mode("socket task exited")))
 
     def _describe_slack_api_error(
         self, response: Any, *, file_obj: Optional[Dict[str, Any]] = None) -> Optional[str]:

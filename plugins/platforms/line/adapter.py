@@ -33,6 +33,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import task_retention
 from urllib.parse import quote as _urlquote
 
 from gateway.platforms._shared import (
@@ -556,7 +557,8 @@ class LineAdapter(BasePlatformAdapter):
         else:
             text = f"[unsupported message type: {msg_type}]"
         if chat_type == "dm" and self._client:  # best-effort typing indicator (DM only)
-            asyncio.create_task(self._client.loading(chat_id))
+            # rm-089: retain — an unretained loading indicator is collectable mid-flight.
+            task_retention.retain_background_task(asyncio.create_task(self._client.loading(chat_id)))
         source_obj = self.build_source(
             chat_id=chat_id, chat_type=chat_type, user_id=user_id, user_name=user_id, chat_name=chat_id,
             message_id=message_id)

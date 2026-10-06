@@ -617,3 +617,55 @@ def test_rollback_preserves_nested_git_file_pointer(backup_env):
     assert "v1" in (skills / "alpha" / "SKILL.md").read_text(encoding="utf-8")
     assert git_ptr.is_file()
     assert git_ptr.read_text(encoding="utf-8").startswith("gitdir:")
+
+
+# ---------------------------------------------------------------------------
+# rm-094: rollback must refuse link/device members, not just path escapes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("member_type,linkname", [
+    (tarfile.SYMTYPE, "../../outside-target"),
+    (tarfile.LNKTYPE, "/etc/passwd"),
+    (tarfile.FIFOTYPE, ""),
+    (tarfile.CHRTYPE, ""),
+], ids=["symlink", "hardlink", "fifo", "device"])
+def test_rollback_rejects_link_and_device_members(backup_env, member_type, linkname):
+    """A compromised snapshot must not plant links (or device/fifo nodes) during
+    restore — the same bar _extract_zip_safely sets for update zips."""
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "alpha", body="current copy")
+    cb.snapshot_skills(reason="legit")
+
+    rows = cb.list_backups()
+    if rows:  # only when a legit snapshot exists to hijack; else craft one from scratch
+        snap_dir = Path(rows[0]["path"])
+        mal = snap_dir / "skills.tar.gz"
+        mal.unlink()
+    else:  # pragma: no cover — snapshot_skills always succeeds in this env
+        pytest.skip("no snapshot to hijack")
+        return
+    with tarfile.open(mal, "w:gz") as tf:
+        info = tarfile.TarInfo("planted")
+        info.type = member_type
+        info.linkname = linkname
+        tf.addfile(info)
+
+    ok, msg, _ = cb.rollback()
+    assert not ok
+    assert "refusing" in msg or "unsafe" in msg
+    # Fail closed before extraction: the live tree is untouched and nothing was planted.
+    assert not (skills / "planted").exists() and not (skills / "planted").is_symlink()
+    assert "current copy" in (skills / "alpha" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_rollback_still_restores_clean_snapshot_with_filter(backup_env):
+    """The hardened extract path must not break restoring a normal snapshot."""
+    cb = backup_env["cb"]
+    skills = backup_env["skills"]
+    _write_skill(skills, "alpha", body="v1")
+    cb.snapshot_skills(reason="clean")
+    _write_skill(skills, "alpha", body="v2")
+    ok, msg, _ = cb.rollback()
+    assert ok, f"rollback failed: {msg}"
+    assert "v1" in (skills / "alpha" / "SKILL.md").read_text(encoding="utf-8")

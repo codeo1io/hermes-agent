@@ -44,6 +44,7 @@ from html import escape as _html_escape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+import task_retention
 
 from agent.secret_scope import get_secret
 from gateway.platforms._shared import (
@@ -2594,7 +2595,8 @@ class MatrixAdapter(BasePlatformAdapter):
                 await self.send_read_receipt(room_id, event_id)
             except Exception as exc:  # pragma: no cover — defensive
                 logger.debug("Matrix: background read receipt failed: %s", exc)
-        asyncio.ensure_future(_send())
+        # rm-089: retain — an unretained receipt is collectable mid-flight.
+        task_retention.retain_background_task(asyncio.ensure_future(_send()))
 
     async def send_read_receipt(self, room_id: str, event_id: str) -> bool:
         if not self._client:
