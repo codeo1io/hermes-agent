@@ -1641,9 +1641,13 @@ def test_successful_probe_turn_closes_the_circuit(monkeypatch, tmp_path):
     import agent.delegate_health as dh
 
     clock = {"t": 1000.0}
-    monkeypatch.setattr(
-        dh, "_LEDGER", dh.DelegateHealthLedger(now=lambda: clock["t"])
-    )
+    # Patch the accessor seam the gate reads (both the tool's import and
+    # the module's own) — NOT the ledger class: the autouse fixture's
+    # reset eagerly caches a real-clock ledger for this test's home before
+    # this patch runs, so a class patch would never take effect.
+    fake = dh.DelegateHealthLedger(now=lambda: clock["t"])
+    monkeypatch.setattr(dh, "get_delegate_health_ledger", lambda: fake)
+    monkeypatch.setattr(ds, "get_delegate_health_ledger", lambda: fake)
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))
     sid = started["session_id"]
@@ -2147,6 +2151,40 @@ def test_confirmed_unopenable_native_id_mints_recovery_with_lineage(monkeypatch)
     row = next(r for r in listing["sessions"] if r["session_id"] == sid)
     assert row["recovery_of_native_id"] == bound
     assert row["recovered_at"] == resumed["recovered_at"]
+
+
+def test_clients_whose_bootstrap_start_failed_are_all_closed(monkeypatch):
+    """A bootstrap ``start()`` that fails by handshake timeout can leave
+    the child process alive, and a leaked wedged child holds delegate
+    capacity for its full window. EVERY client whose start raised must be
+    closed on its own failure path — the original open, the same-id retry,
+    and the -recovery- mint — while the client that ended up bound stays
+    open. (Independent-review finding 5 asserted the original was leaked;
+    the close exists — this pins it so it cannot regress.)"""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    bound = started["native_session_id"]
+    _drop_session(sid)
+
+    # Path 1: first open of the bound id fails, same-id retry succeeds.
+    monkeypatch.setattr(ds, "PiRPCClient", _flaky_start_client({bound}))
+    payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    original, retry = FakePiClient.instances[1], FakePiClient.instances[2]
+    assert original.is_closed is True  # failed original is NOT leaked
+    assert retry.is_closed is False  # the client that got bound stays open
+    _drop_session(sid)
+
+    # Path 2: bound id confirmed unopenable -> -recovery- mint. The second
+    # original open and the same-id retry BOTH failed -> both closed.
+    monkeypatch.setattr(
+        ds, "PiRPCClient", _flaky_start_client(always_fail_ids={bound})
+    )
+    payload(ds.delegate_session(action="resume", session_id=sid, parent_agent=parent))
+    orig2, retry2, minted = FakePiClient.instances[3], FakePiClient.instances[4], FakePiClient.instances[5]
+    assert orig2.is_closed is True
+    assert retry2.is_closed is True
+    assert minted.is_closed is False  # the minted binding stays open
 
 
 def test_recovery_lineage_survives_restart_and_keeps_chain_root(monkeypatch):
