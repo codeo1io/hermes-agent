@@ -1,6 +1,8 @@
 """Tests for the BlueBubbles iMessage gateway adapter."""
 import asyncio
 import json
+import os
+import time
 from unittest.mock import AsyncMock
 
 import httpx
@@ -45,6 +47,40 @@ class TestBlueBubblesConfigLoading:
         assert bc.extra["webhook_port"] == 9999
         assert bc.extra["require_mention"] is True
         assert bc.extra["mention_patterns"] == ["(?i)^amos\\b"]
+
+
+class TestTempGuidUtcEpoch:
+    """``_temp_guid`` must carry the true UTC epoch under any local timezone.
+
+    Regression for the naive ``datetime.utcnow().timestamp()`` bug:
+    ``.timestamp()`` on a naive datetime interprets it as LOCAL time, so the
+    temp GUID's epoch was shifted by the host's UTC offset on any non-UTC
+    host (proven red under ``TZ=Pacific/Kiritimati`` = UTC+14, exactly 14h
+    off the call window).
+    """
+
+    @pytest.mark.linux_only
+    def test_temp_guid_carries_true_utc_epoch_under_any_local_tz(self):
+        from gateway.platforms.bluebubbles import _temp_guid
+
+        original_tz = os.environ.get("TZ")
+        try:
+            for tz in ("Pacific/Kiritimati", "America/Anchorage", "UTC"):
+                os.environ["TZ"] = tz
+                time.tzset()
+                before = time.time()
+                stamp = float(_temp_guid().removeprefix("temp-"))
+                after = time.time()
+                assert before <= stamp <= after, (
+                    f"tempGuid epoch {stamp} outside call window "
+                    f"[{before}, {after}] under TZ={tz}"
+                )
+        finally:
+            if original_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = original_tz
+            time.tzset()
 
 
 class TestBlueBubblesHelpers:

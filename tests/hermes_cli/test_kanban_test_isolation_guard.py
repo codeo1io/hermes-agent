@@ -3,10 +3,14 @@
 Two defects collaborated to write dispatcher-test fixture rows (``owner`` /
 ``child`` / ``a0``–``a4`` / ``b0``–``b2``) into the LIVE ``~/.hermes/kanban.db``:
 
-1. ``hermes_constants.get_default_hermes_root()`` collapsed a sandboxed
+1. ``hermes_constants.get_default_hermes_root()`` collapses a sandboxed
    ``HERMES_HOME`` parked under the native home (pytest ``--basetemp
-   ~/.hermes/tmp/...``) back to the PRODUCTION root, so every kanban path
-   resolved to the live board.
+   ~/.hermes/tmp/...``) back to the PRODUCTION root — a standing property of
+   that resolver (see ``tests/test_basetemp_isolation.py``), so the merged
+   tree defends at two other layers instead: the suite conftest relocates
+   the pytest basetemp OUTSIDE the operator's native home so the topology
+   cannot arise, and the choke-point guard below refuses production board
+   paths even when it does.
 2. The conftest ``_kanban_write_guard`` only patches modules already in
    ``sys.modules`` at fixture time — the FIRST test in a file that lazily
    imports ``hermes_cli.kanban_db`` inside its body wrote before any patch
@@ -26,16 +30,22 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# get_default_hermes_root: sandbox-under-root no longer collapses
+# get_default_hermes_root: a sandbox outside the native home resolves to
+# itself (the collapse only applies to paths UNDER the native home, and the
+# conftest basetemp relocation keeps pytest sandboxes out from under it).
 # ---------------------------------------------------------------------------
 
 
 def test_default_root_keeps_sandboxed_home_under_native_home(monkeypatch, tmp_path):
     from hermes_constants import get_default_hermes_root
 
-    # tmp_path here may itself live under the real ~/.hermes (conductor
-    # delegate TMPDIR): the sandbox is NOT a profile home, so it must be
-    # treated as the root itself instead of collapsing to the native home.
+    # tmp_path cannot sit inside the native home in this suite: conftest's
+    # ``_relocate_basetemp_outside_operator_home`` pins the basetemp outside
+    # the operator's ``~/.hermes`` (upstream #111101). So a sandboxed
+    # ``HERMES_HOME`` here must resolve to the sandbox itself, never to the
+    # production root — this is the tripwire that goes red if that relocation
+    # ever stops holding on a host whose basetemp would land under ~/.hermes
+    # (conductor delegate TMPDIR topologies included).
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "sandbox"))
     monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
     root = get_default_hermes_root()
