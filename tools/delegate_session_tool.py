@@ -97,9 +97,15 @@ def _session_store_root() -> Path:
     return root / "cache" / "delegate-sessions"
 
 
-def _metadata_path(session_id: str) -> Path:
+def _metadata_path(session_id: str, root: Path | None = None) -> Path:
+    """Metadata file for ``session_id``, optionally under a pinned ``root``.
+
+    The turn/observer threads pass the store root pinned at dispatch time —
+    they do not inherit the home-override contextvar, so call-time resolution
+    would write cross-profile under multiplex.
+    """
     digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()
-    return _session_store_root() / f"{digest}.json"
+    return (root or _session_store_root()) / f"{digest}.json"
 
 
 def _client_last_activity_at(client: Any) -> Optional[float]:
@@ -196,7 +202,7 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
     session_id = str(record.get("session_id") or "").strip()
     if not session_id:
         return
-    path = _metadata_path(session_id)
+    path = _metadata_path(session_id, root=record.get("_scope_store_root"))
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -204,10 +210,13 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        # Build the snapshot under the lock so turn-thread and observer
-        # persists serialize on one consistent view of the record.
+        # Build the snapshot under the lock and stamp a monotonic persist
+        # sequence onto the record in the same critical section: snapshot and
+        # sequence are inseparable, so a later persist that snapshotted a
+        # newer view always carries a higher seq.
         with _SESSION_LOCK:
             snapshot = _metadata_snapshot(record)
+            record["_persist_seq"] = seq = record.get("_persist_seq", 0) + 1
         tmp.write_text(
             json.dumps(snapshot, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -216,7 +225,18 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
             tmp.chmod(0o600)
         except OSError:
             pass
-        tmp.replace(path)
+        # Claim the file for this snapshot under the lock: if a newer
+        # persist has already snapshotted (turn-terminal overtook a stalled
+        # observer), drop the stale tmp instead of replacing the durable
+        # file — a "running" snapshot must never overwrite a terminal one.
+        with _SESSION_LOCK:
+            if record.get("_persist_seq") != seq:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                return
+            tmp.replace(path)
         _prune_durable_metadata(path.parent)
         # Advance the in-turn refresh watermark (in-memory only) so the
         # observer's write cap stays exact across observer and transition
@@ -899,16 +919,21 @@ def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
     return error_class, retry_after
 
 
-def _circuit_open_error(backend: str, model: str) -> Optional[str]:
+def _circuit_open_error(backend: str, model: str, ledger=None) -> Optional[str]:
     """Dispatch-time fail-fast guard (A2 breaker): ``None`` lets the turn
     through; a message refuses it while the (backend, model) provider circuit
     is open. Retrying a confirmed-dead provider multiplies wall-clock damage
     (the A4 storm re-entered the same outage for 30-76 minutes per attempt).
     Fail-open: any internal error lets the dispatch through — the breaker
     must never become a new way to fail closed.
+
+    ``ledger`` pins the dispatching profile's registry: the turn thread does
+    not inherit the home-override contextvar, so worker calls pass the ledger
+    captured at dispatch time; parent-side gates may omit it and resolve at
+    call time.
     """
     try:
-        circuit = get_delegate_health_ledger().check((backend, model))
+        circuit = (ledger or get_delegate_health_ledger()).check((backend, model))
     except Exception:
         logger.debug("delegate provider gate failed open", exc_info=True)
         return None
@@ -923,18 +948,22 @@ def _circuit_open_error(backend: str, model: str) -> Optional[str]:
     )
 
 
-def _ledger_record_success(key: tuple[str, str]) -> None:
+def _ledger_record_success(key: tuple[str, str], ledger=None) -> None:
+    # ``ledger`` pins the dispatching profile's registry for turn-thread calls
+    # (plain threads do not inherit the home-override contextvar).
     try:
-        get_delegate_health_ledger().record_success(key)
+        (ledger or get_delegate_health_ledger()).record_success(key)
     except Exception:
         logger.debug("delegate health record_success failed (fail-open)", exc_info=True)
 
 
-def _ledger_record_failure(key: tuple[str, str], error_class: str) -> None:
+def _ledger_record_failure(key: tuple[str, str], error_class: str, ledger=None) -> None:
+    # ``ledger`` pins the dispatching profile's registry for turn-thread calls
+    # (plain threads do not inherit the home-override contextvar).
     if error_class not in PROVIDER_FAILURE_CLASSES:
         return
     try:
-        get_delegate_health_ledger().record_failure(key, error_class)
+        (ledger or get_delegate_health_ledger()).record_failure(key, error_class)
     except Exception:
         logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
 
@@ -1016,7 +1045,7 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         # A healthy turn closes any open provider circuit for this
         # (backend, model) pair — providers recover, and a stale open
         # circuit would fail-fast future turns against a working provider.
-        _ledger_record_success(ledger_key)
+        _ledger_record_success(ledger_key, ledger=record.get("_scope_ledger"))
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         error_class, retry_after = _classify_turn_exception(exc)
@@ -1048,7 +1077,9 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         # (backend, model) pair; everything else (agent_stall, transport
         # noise, tool bugs) does NOT — a wedged delegate must not shadow a
         # healthy provider on the same key.
-        _ledger_record_failure(ledger_key, error_class)
+        _ledger_record_failure(
+            ledger_key, error_class, ledger=record.get("_scope_ledger")
+        )
     finally:
         # Both exit paths have left "running" (idle/error, or "closed" keeps
         # its own terminal state), and the transition already notified the
@@ -1061,6 +1092,15 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
+    # Pin the dispatching profile's scope onto the record BEFORE the thread
+    # hop: plain threading.Thread does not inherit contextvars, so the turn
+    # and observer threads would otherwise resolve the launch/default home
+    # (``get_hermes_home()`` and the per-home ledger registry) and write
+    # ledger + durable metadata cross-profile under multiplex. Every worker
+    # side-effect that touches profile state reads these pins instead of
+    # re-resolving.
+    record["_scope_ledger"] = get_delegate_health_ledger()
+    record["_scope_store_root"] = _session_store_root()
     thread = threading.Thread(
         target=_run_turn,
         args=(record, message, timeout),
