@@ -48,7 +48,14 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     def transcript() -> str:
         return tmux("capture-pane", "-p", "-J", "-t", "p", "-S", "-", "-E", "-")
 
-    def wait_for(needle: str, timeout: float = 60.0) -> None:
+    def wait_for(needle: str, timeout: float = 300.0) -> None:
+        # The reply itself is an ~11 s scripted stream, but on CI the CLI boots
+        # under the e2e lane's parallel file workers: one observed run took
+        # ~131 s from launch to consuming the typed input (banner painted long
+        # before the REPL read it), so a 60 s turn budget assumed a
+        # near-exclusive runner (flake policy: timing tests must not assume a
+        # quiet runner). 300 s waits for the same needle; it does not weaken
+        # the once-in-scrollback invariant asserted below.
         end = time.monotonic() + timeout
         while needle not in transcript():
             assert time.monotonic() < end, f"{needle!r} never appeared:\n{transcript()[-3000:]}"
@@ -77,7 +84,12 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
                         "-y", "24", "-c", str(tmp_path / "work"), *argv], env=env, check=True, timeout=30)
         try:
             tmux("set", "-g", "window-size", "manual")
-            wait_for("Welcome to Hermes", timeout=120)
+            wait_for("Welcome to Hermes", timeout=300)
+            # The banner paints long before the REPL consumes input; wait for
+            # the live prompt line so send-keys land on a reader, not in the
+            # pty buffer (observed: keystrokes buffered ~131 s on a contended
+            # CI runner, eating the turn budget).
+            wait_for("❯")
             time.sleep(2.0)
 
             ask(1)
