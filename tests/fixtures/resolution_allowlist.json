@@ -690,6 +690,21 @@
     "kind": "bare_which"
   },
   {
+    "path": "agent/opencode_client.py",
+    "symbol": "_opencode_command",
+    "kind": "bare_which"
+  },
+  {
+    "path": "hermes_cli/auth.py",
+    "symbol": "resolve_external_process_provider_credentials",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/delegate_session_tool.py",
+    "symbol": "check_delegate_session_requirements",
+    "kind": "bare_which"
+  },
+  {
     "path": "agent/anthropic_adapter.py",
     "symbol": "<module>",
     "kind": "known_path_table"
