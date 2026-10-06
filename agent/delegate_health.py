@@ -288,14 +288,23 @@ class DelegateHealthLedger:
         """`None` = dispatch may proceed; `CircuitOpen` = refuse/defer.
 
         While the cooldown has elapsed, exactly one half-open probe is
-        granted; a second check before that probe resolves is still refused.
+        granted; a second check before that probe resolves is still
+        refused. The probe window anchors at the GRANT (a circuit dormant
+        far past its cooldown still hands out exactly one probe, not one
+        per stale anchor), and a probe that nothing ever resolves (turn
+        thread killed by a BaseException, bootstrap dying before any turn
+        ran, crash between grant and resolution) is not allowed to hold
+        the key fail-closed forever: one full cooldown past the grant, it
+        counts as lost — the window re-arms and a fresh probe is granted,
+        so a dead probe costs one cooldown, never the process lifetime.
         """
         with self._lock:
             self._ensure_loaded_locked()
             entry = self._entries.get(key)
             if entry is None or entry["opened_at"] is None:
                 return None
-            elapsed = self._now() - entry["opened_at"]
+            now = self._now()
+            elapsed = now - entry["opened_at"]
             if elapsed < entry["cooldown"]:
                 return CircuitOpen(
                     retry_after_s=entry["cooldown"] - elapsed,
@@ -303,7 +312,22 @@ class DelegateHealthLedger:
                     last_error_class=entry["last_error_class"],
                 )
             if not entry["probing"]:
+                # Anchor the probe window at the grant (elapsed := exactly
+                # one cooldown): without this, a circuit dormant far past
+                # its cooldown kept its months-old anchor and the very
+                # next check counted the just-granted probe as already
+                # lost, handing a second dispatch the same window
+                # back-to-back.
                 entry["probing"] = True
+                entry["opened_at"] = now - entry["cooldown"]
+                self._persist_locked()
+                return None
+            if elapsed >= 2 * entry["cooldown"]:
+                # Lost probe (see docstring): re-arm the window anchored at
+                # the grant and hand the next caller a fresh probe —
+                # cadence stays one probe per cooldown, bounded, instead
+                # of one forever.
+                entry["opened_at"] = now - entry["cooldown"]
                 self._persist_locked()
                 return None
             # Probe already in flight: stay closed to it until it resolves.
@@ -314,17 +338,33 @@ class DelegateHealthLedger:
             )
 
 
-_LEDGER = DelegateHealthLedger()
+_LEDGERS: dict[str, DelegateHealthLedger] = {}
+_LEDGERS_LOCK = threading.Lock()
 
 
 def get_delegate_health_ledger() -> DelegateHealthLedger:
-    """The process-wide ledger (delegate turns in one gateway share state)."""
-    return _LEDGER
+    """The ledger for the EFFECTIVE Hermes home.
+
+    Delegate turns in one gateway share their home's breaker state; a
+    multiplex gateway serving several profiles keeps one ledger PER HOME
+    (keyed by its state-file path, pinned at construction so load and
+    save can never diverge), so a circuit opened under one profile never
+    gates another profile's dispatches and never persists into another
+    profile's cache file — an unbound process-wide singleton was the
+    classic silent cross-profile state leak."""
+    path = _default_state_path()
+    with _LEDGERS_LOCK:
+        ledger = _LEDGERS.get(str(path))
+        if ledger is None:
+            ledger = DelegateHealthLedger(state_path=path)
+            _LEDGERS[str(path)] = ledger
+        return ledger
 
 
 def reset_delegate_health_ledger() -> DelegateHealthLedger:
-    """Replace the process-wide ledger with a fresh one. Test seam — also
-    used to drop all breaker state at once if an operator force-recovers."""
-    global _LEDGER
-    _LEDGER = DelegateHealthLedger()
-    return _LEDGER
+    """Drop every cached ledger and return a fresh one for the effective
+    home. Test seam — also used to drop all breaker state at once if an
+    operator force-recovers."""
+    with _LEDGERS_LOCK:
+        _LEDGERS.clear()
+    return get_delegate_health_ledger()

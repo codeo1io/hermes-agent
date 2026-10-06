@@ -86,9 +86,10 @@ def _session_store_root() -> Path:
     return root / "cache" / "delegate-sessions"
 
 
-def _metadata_path(session_id: str) -> Path:
+def _metadata_path(session_id: str, store_root: "Path | None" = None) -> Path:
     digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()
-    return _session_store_root() / f"{digest}.json"
+    root = store_root if store_root is not None else _session_store_root()
+    return root / f"{digest}.json"
 
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
@@ -142,15 +143,6 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "recovery_of_native_id": record.get("recovery_of_native_id") or None,
         "recovery_reason": _bounded(record.get("recovery_reason"), 400) or None,
         "recovered_at": record.get("recovered_at") or None,
-        # Durable forward-progression evidence (additive, version-compatible):
-        # how far the session got and what it last said, so a replacement
-        # supervisor restart-continues instead of guessing. Stamped only by
-        # _bank_durable_progress on terminal turn outcomes.
-        "turns_completed": int(record.get("turns_completed") or 0),
-        "last_line": _bounded(record.get("last_line"), 400) or None,
-        "last_progress_at": record.get("last_progress_at"),
-        "last_turn_duration_s": record.get("last_turn_duration_s"),
-        "last_turn_outcome": record.get("last_turn_outcome") or None,
     }
 
 
@@ -183,12 +175,12 @@ def _prune_durable_metadata(root: Path) -> None:
             )
 
 
-def _persist_metadata(record: Dict[str, Any]) -> None:
+def _persist_metadata(record: Dict[str, Any], store_root: "Path | None" = None) -> None:
     """Persist enough metadata to reopen the native Pi session after restart."""
     session_id = str(record.get("session_id") or "").strip()
     if not session_id:
         return
-    path = _metadata_path(session_id)
+    path = _metadata_path(session_id, store_root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -384,53 +376,6 @@ def _message_text(value: Any) -> str:
                 if text:
                     return text
     return ""
-
-
-def _last_line_of(text: Any) -> Optional[str]:
-    """Last non-empty line of a turn's final text, or None."""
-    if not isinstance(text, str):
-        return None
-    for line in reversed(text.splitlines()):
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return None
-
-
-def _bank_durable_progress(
-    record: Dict[str, Any], outcome: str, result: Optional[Dict[str, Any]] = None
-) -> None:
-    """Stamp durable forward-progression evidence for one terminal turn.
-
-    Called ONLY from ``_run_turn``'s terminal blocks (anti-whitewash
-    invariant): ``last_progress_at`` moves exactly when durable content
-    changes — never on dispatch, status transitions, persistence re-writes,
-    or reads. A failed turn is durable evidence of activity, so the stamp
-    advances with an ``error`` outcome without touching
-    ``turns_completed``/``last_line``. Caller must hold ``_SESSION_CONDITION``.
-    """
-    record["last_turn_outcome"] = outcome
-    record["last_progress_at"] = time.time()
-    if result is None:
-        return
-    record["turns_completed"] = int(record.get("turns_completed") or 0) + 1
-    duration = result.get("duration_s") if isinstance(result, dict) else None
-    record["last_turn_duration_s"] = (
-        float(duration) if isinstance(duration, (int, float)) else None
-    )
-    record["last_line"] = _bounded(_last_line_of(result.get("text")), 400) or None
-
-
-def _restore_durable_progress(record: Dict[str, Any], meta: Dict[str, Any]) -> None:
-    """Carry persisted progression evidence into a reopened session record.
-
-    Without this, resume would rewrite the durable file with zeroed counters
-    and erase exactly the restart-survival evidence this module guarantees.
-    """
-    record["turns_completed"] = int(meta.get("turns_completed") or 0)
-    for key in ("last_line", "last_progress_at", "last_turn_duration_s"):
-        record[key] = meta.get(key)
-    record["last_turn_outcome"] = meta.get("last_turn_outcome") or None
 
 
 def _parent_context_excerpt(parent_agent: Any, maximum: int = 24_000) -> str:
@@ -953,23 +898,29 @@ def _circuit_open_error(backend: str, model: str) -> Optional[str]:
     )
 
 
-def _ledger_record_success(key: tuple[str, str]) -> None:
+def _ledger_record_success(key: tuple[str, str], ledger=None) -> None:
     try:
-        get_delegate_health_ledger().record_success(key)
+        (ledger if ledger is not None else get_delegate_health_ledger()).record_success(key)
     except Exception:
         logger.debug("delegate health record_success failed (fail-open)", exc_info=True)
 
 
-def _ledger_record_failure(key: tuple[str, str], error_class: str) -> None:
+def _ledger_record_failure(key: tuple[str, str], error_class: str, ledger=None) -> None:
     if error_class not in PROVIDER_FAILURE_CLASSES:
         return
     try:
-        get_delegate_health_ledger().record_failure(key, error_class)
+        (ledger if ledger is not None else get_delegate_health_ledger()).record_failure(key, error_class)
     except Exception:
         logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
 
 
-def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
+def _run_turn(
+    record: Dict[str, Any],
+    message: str,
+    timeout: float,
+    ledger=None,
+    store_root: "Path | None" = None,
+) -> None:
     client = record["client"]
     ledger_key = (
         str(record.get("backend") or "pi"),
@@ -999,11 +950,11 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 _transition_status_locked(record, "idle")
             else:
                 record["updated_at"] = time.time()
-        _persist_metadata(record)
+        _persist_metadata(record, store_root)
         # A healthy turn closes any open provider circuit for this
         # (backend, model) pair — providers recover, and a stale open
         # circuit would fail-fast future turns against a working provider.
-        _ledger_record_success(ledger_key)
+        _ledger_record_success(ledger_key, ledger)
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         error_class, retry_after = _classify_turn_exception(exc)
@@ -1027,18 +978,26 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 _transition_status_locked(record, "error")
             else:
                 record["updated_at"] = time.time()
-        _persist_metadata(record)
+        _persist_metadata(record, store_root)
         # Provider-class failures feed the A2 breaker for this exact
         # (backend, model) pair; everything else (agent_stall, transport
         # noise, tool bugs) does NOT — a wedged delegate must not shadow a
         # healthy provider on the same key.
-        _ledger_record_failure(ledger_key, error_class)
+        _ledger_record_failure(ledger_key, error_class, ledger)
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
+    # Capture profile-scoped state in the CALLER: the plain Thread spawned
+    # below does not inherit the set_hermes_home_override ContextVar, so
+    # home-resolved state re-resolved inside the worker (health ledger,
+    # session store root) lands on the LAUNCH home while the gate above
+    # resolved the PROFILE home — a cross-profile write-side leak under a
+    # multiplex gateway. Resolve once here; the worker threads it through.
+    ledger = get_delegate_health_ledger()
+    store_root = _session_store_root()
     thread = threading.Thread(
         target=_run_turn,
-        args=(record, message, timeout),
+        args=(record, message, timeout, ledger, store_root),
         name=f"delegate-{record['session_id'][:8]}",
         # Keep the interpreter alive until the active delegated turn reaches a
         # terminal state.  A daemon thread can be torn down as soon as the

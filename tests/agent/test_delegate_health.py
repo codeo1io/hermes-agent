@@ -117,6 +117,71 @@ def test_half_open_grants_exactly_one_probe_after_cooldown():
     assert ledger.check(KEY) is None
 
 
+def test_dormant_circuit_still_grants_exactly_one_probe():
+    """The probe window is anchored at the GRANT, not at the trip.
+
+    A circuit left dormant long past its cooldown must hand out exactly one
+    probe — never treat the just-granted probe as already lost on the very
+    next check (which would loop grant→rearm→grant and re-open the provider
+    under breaker protection).
+    """
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S * 3)  # dormant: far past the cooldown
+    assert ledger.check(KEY) is None  # the single probe
+    state = ledger.check(KEY)
+    assert isinstance(state, CircuitOpen)
+    assert state.retry_after_s == pytest.approx(INITIAL_COOLDOWN_S)
+
+
+def test_lost_probe_regrants_after_one_extra_cooldown():
+    """A probe that is never resolved (turn thread died before banking an
+    outcome) is re-granted one extra cooldown after the grant — a lost probe
+    must not wedge the circuit closed forever."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # probe granted
+    clock.advance(INITIAL_COOLDOWN_S)  # grant + one full extra cooldown
+    assert ledger.check(KEY) is None  # lost probe: fresh one granted
+    state = ledger.check(KEY)
+    assert isinstance(state, CircuitOpen)
+    assert state.retry_after_s == pytest.approx(INITIAL_COOLDOWN_S)
+
+
+def test_ledger_is_cached_per_hermes_home(tmp_path, monkeypatch):
+    """Multiplex profile isolation: the cached ledger is keyed by the
+    EFFECTIVE Hermes home, so a circuit opened under profile A never
+    gates profile B's dispatches and never persists into B's cache file.
+    A process-wide singleton was the unbound-module-global cross-profile
+    state leak (independent-review finding)."""
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    reset_delegate_health_ledger()
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    ledger_a = get_delegate_health_ledger()
+    assert get_delegate_health_ledger() is ledger_a  # same home => cached
+    for _ in range(FAILURE_THRESHOLD):
+        ledger_a.record_failure(KEY, "rate_limit")
+    assert isinstance(ledger_a.check(KEY), CircuitOpen)
+    state_a = home_a / "cache" / "delegate-provider-health.json"
+    assert state_a.exists()
+
+    monkeypatch.setenv("HERMES_HOME", str(home_b))
+    ledger_b = get_delegate_health_ledger()
+    assert ledger_b is not ledger_a  # per-home cache, not one singleton
+    assert ledger_b.check(KEY) is None  # A's open circuit does not gate B
+    ledger_b.record_failure(OTHER_KEY, "rate_limit")
+    state_b = home_b / "cache" / "delegate-provider-health.json"
+    assert state_b.exists()
+    # And B's write did not land in A's file (no state bleed).
+    assert "claude-opus-4" not in state_a.read_text(encoding="utf-8")
+    # Reset drops every cached home and re-caches for the current one.
+    reset_delegate_health_ledger()
+    assert get_delegate_health_ledger() is not ledger_a
+    assert get_delegate_health_ledger() is not ledger_b
+
+
 def test_failed_probe_doubles_cooldown_up_to_cap():
     ledger, clock = make_ledger()
     open_ledger(ledger, clock)

@@ -1838,9 +1838,12 @@ def test_successful_probe_turn_closes_the_circuit(monkeypatch, tmp_path):
     import agent.delegate_health as dh
 
     clock = {"t": 1000.0}
-    monkeypatch.setattr(
-        dh, "_LEDGER", dh.DelegateHealthLedger(now=lambda: clock["t"])
-    )
+    # One shared fake for gate, dispatch capture and banking: the accessor
+    # seam must return the SAME instance every call (a fresh-per-call
+    # lambda would lazily reload the circuit from the state file, where
+    # age rebasing under the fake clock makes it look just-opened).
+    fake = dh.DelegateHealthLedger(now=lambda: clock["t"])
+    monkeypatch.setattr(ds, "get_delegate_health_ledger", lambda: fake)
     parent = Parent()
     started = payload(ds.delegate_session(action="start", parent_agent=parent))
     sid = started["session_id"]
