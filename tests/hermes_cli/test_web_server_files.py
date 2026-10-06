@@ -458,3 +458,31 @@ def test_git_branch_decodes_utf8_under_a_gbk_default_codec(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: "gbk")
 
     assert _rt_files._fs_git_branch(str(tmp_path)) == branch
+
+
+def test_vault_and_browser_profile_subtrees_blocked_on_read(forced_files_client):
+    """Write-side parity for the two remaining credential trees: ``agent.file_safety
+    _WRITE_DENIED_SECRET_DIRS`` denies vault/ and browser-profile/ (vault: key + ciphertext
+    side by side; browser-profile: the agent browser's cookie DBs), but the dashboard read
+    side only denied mcp-tokens/pairing — /api/files could serve vault.key and the cookie
+    store the write guard refuses to touch."""
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+
+    vault_key = root / "vault" / "vault.key"
+    vault_key.parent.mkdir(parents=True, exist_ok=True)
+    vault_key.write_text("MASTER-KEY-MATERIAL\n")
+    vault_enc = root / "vault" / "vault.json.enc"
+    vault_enc.write_text("CIPHERTEXT\n")
+    cookies = root / "browser-profile" / "Default" / "Cookies"
+    cookies.parent.mkdir(parents=True, exist_ok=True)
+    cookies.write_bytes(b"sqlite-cookie-db")
+
+    root_names = [e["name"] for e in client.get("/api/files", params={"path": str(root)}).json()["entries"]]
+    assert "vault" not in root_names
+    assert "browser-profile" not in root_names
+
+    for p in (vault_key, vault_enc, cookies):
+        assert client.get("/api/files/read", params={"path": str(p)}).status_code == 403, str(p)
+        assert client.get("/api/files/download", params={"path": str(p)}).status_code == 403, str(p)
+        assert client.get("/api/files/stream", params={"path": str(p)}).status_code == 403, str(p)

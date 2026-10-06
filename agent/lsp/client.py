@@ -156,6 +156,9 @@ class LSPClient:
         self._stderr_tail: List[str] = []
         self._exit_code: Optional[int] = None
         self._reader_task: Optional[asyncio.Task] = None
+        # Retain in-flight request-dispatch tasks: the loop only weakly references tasks, so an
+        # unreferenced dispatch can be garbage-collected mid-await before its response is sent.
+        self._dispatch_tasks: set = set()
         self._cleanup_lock = asyncio.Lock()
         self._next_id: int = 0
         self._pending: Dict[int, asyncio.Future] = {}
@@ -303,7 +306,9 @@ class LSPClient:
         if kind == "response":
             self._dispatch_response(key, msg)
         elif kind == "request":
-            asyncio.create_task(self._dispatch_request(key, msg))
+            task = asyncio.create_task(self._dispatch_request(key, msg))
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_tasks.discard)
         elif kind == "notification":
             self._dispatch_notification(key, msg)
         else:

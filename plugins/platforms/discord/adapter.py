@@ -1029,6 +1029,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
+        # Retain fire-and-forget tasks (gateway-exit notify et al.): the loop only weakly
+        # references tasks, so an unreferenced one can be GC'd before it runs.
+        self._background_tasks: set = set()
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         # Gate env snapshot captured in connect() inside the owning profile's scope; None until then.
@@ -1215,7 +1218,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                     "[%s] Failed to notify gateway supervisor about Discord task exit: %s",
                     self.name, notify_exc, exc_info=True,
                 )
-        asyncio.create_task(_notify())
+        notify_task = asyncio.create_task(_notify())
+        self._background_tasks.add(notify_task)
+        notify_task.add_done_callback(self._background_tasks.discard)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Discord and start receiving events."""

@@ -2,6 +2,7 @@
 inbound webhooks (text, media attachments, typing indicators, read receipts)."""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -38,6 +39,10 @@ _BLUEBUBBLES_AUDIO_EXT_OVERRIDES = {
     "audio/x-caf": ".mp3", "audio/mp4": ".m4a",
     "audio/aac": ".m4a",  # historical mapping (shared table says .aac)
 }
+
+# Attachment download cap — mirrors gateway/platforms/signal.py's 100 MB guard so a hostile or
+# looping BlueBubbles server cannot balloon gateway memory with an unbounded attachment body.
+BLUEBUBBLES_MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -479,7 +484,20 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             resp = await self.client.get(self._api_url(f"/api/v1/attachment/{quote(att_guid, safe='')}/download"),
                                          timeout=60, follow_redirects=True)
             resp.raise_for_status()
+            declared = resp.headers.get("Content-Length", "")
+            if declared.isdigit() and int(declared) > BLUEBUBBLES_MAX_ATTACHMENT_SIZE:
+                logger.warning(
+                    "[bluebubbles] skipping attachment %s: declared size %s exceeds cap",
+                    _redact(att_guid), declared,
+                )
+                return None
             data = resp.content
+            if len(data) > BLUEBUBBLES_MAX_ATTACHMENT_SIZE:
+                logger.warning(
+                    "[bluebubbles] skipping attachment %s: %d bytes exceeds cap",
+                    _redact(att_guid), len(data),
+                )
+                return None
             mime = (att_meta.get("mimeType") or "").lower()
             if mime.startswith("image/"):
                 return await cache_image_from_bytes_async(data, _closed_ext(mime, _BLUEBUBBLES_IMAGE_EXT_OVERRIDES, ".jpg"))
@@ -562,7 +580,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     async def _handle_webhook(self, request):
         from aiohttp import web
 
-        if self._webhook_token(request) != self.password:
+        if not hmac.compare_digest(str(self._webhook_token(request)), str(self.password)):
             return web.json_response({"error": "unauthorized"}, status=401)
         try:
             payload = self._parse_webhook_body(await request.read())
