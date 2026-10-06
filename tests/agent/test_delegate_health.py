@@ -134,6 +134,43 @@ def test_failed_probe_doubles_cooldown_up_to_cap():
     assert state.retry_after_s == pytest.approx(MAX_COOLDOWN_S)
 
 
+def test_non_provider_probe_death_costs_one_cooldown_not_a_wedge():
+    """Review regression (fail-closed wedge): a probe turn that dies with a
+    non-provider class (e.g. agent_stall) DID consume the granted half-open
+    probe, so it must resolve it as inconclusive and re-arm the window from
+    now — the key refuses for one more cooldown and then grants a fresh
+    probe. It may never leave the circuit fail-closed forever on a probe
+    nobody will answer."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # the single probe is granted
+    ledger.record_failure(KEY, "agent_stall")  # probe turn dies non-provider
+    state = ledger.check(KEY)
+    # Inconclusive: window re-armed from the resolution, cooldown unchanged,
+    # streak preserved for the next provider-class failure.
+    assert isinstance(state, CircuitOpen)
+    assert state.retry_after_s == pytest.approx(INITIAL_COOLDOWN_S)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # fresh probe — the circuit is not wedged
+
+
+def test_unanswered_lost_probe_regrants_after_one_cooldown():
+    """Review regression: a probe whose turn never reports back (thread
+    killed by a BaseException, bootstrap death before any turn ran, crash
+    between grant and resolution) is declared lost one full cooldown past
+    its grant and re-armed — a dead probe costs one cooldown, never the
+    process lifetime."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # probe granted; nobody ever resolves it
+    clock.advance(INITIAL_COOLDOWN_S / 2)
+    assert isinstance(ledger.check(KEY), CircuitOpen)  # still in flight
+    clock.advance(INITIAL_COOLDOWN_S)  # one full cooldown past the grant
+    assert ledger.check(KEY) is None  # declared lost; fresh probe granted
+
+
 def test_success_closes_and_resets_the_streak():
     ledger, clock = make_ledger()
     ledger.record_failure(KEY, "rate_limit")

@@ -240,9 +240,13 @@ class DelegateHealthLedger:
             logger.debug("delegate health state persist failed", exc_info=True)
 
     def record_failure(self, key: LedgerKey, error_class: str) -> None:
-        """Count a failure. Non-provider classes are ignored entirely: they
-        carry no information about the upstream provider."""
+        """Count a failure. Non-provider classes carry no information about
+        the upstream provider: they neither count toward nor escalate the
+        breaker — but the turn they ended DID consume a half-open probe, so
+        they resolve it as inconclusive instead of leaving the key
+        fail-closed forever on a probe nobody will ever answer."""
         if error_class not in PROVIDER_FAILURE_CLASSES:
+            self.resolve_probe_inconclusive(key)
             return
         now = self._now()
         with self._lock:
@@ -277,6 +281,22 @@ class DelegateHealthLedger:
                 entry["opened_at"] = now
             self._persist_locked()
 
+    def resolve_probe_inconclusive(self, key: LedgerKey) -> None:
+        """Resolve an in-flight half-open probe that died without a provider
+        signal (operator stop, transport death, client-start failure,
+        thread-start failure). Re-arm the window from now — the next dispatch
+        after one cooldown gets a fresh probe — and never touch the streak or
+        cooldown: an inconclusive probe says nothing about the provider.
+        This is the seam that keeps the breaker from becoming a new way to
+        fail closed."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(key)
+            if entry is not None and entry.get("probing"):
+                entry["probing"] = False
+                entry["opened_at"] = self._now()
+                self._persist_locked()
+
     def record_success(self, key: LedgerKey) -> None:
         """Any success closes the circuit fully (resets the streak)."""
         with self._lock:
@@ -295,7 +315,8 @@ class DelegateHealthLedger:
             entry = self._entries.get(key)
             if entry is None or entry["opened_at"] is None:
                 return None
-            elapsed = self._now() - entry["opened_at"]
+            now = self._now()
+            elapsed = now - entry["opened_at"]
             if elapsed < entry["cooldown"]:
                 return CircuitOpen(
                     retry_after_s=entry["cooldown"] - elapsed,
@@ -303,7 +324,23 @@ class DelegateHealthLedger:
                     last_error_class=entry["last_error_class"],
                 )
             if not entry["probing"]:
+                # Anchor the probe window at the GRANT: without this, a
+                # circuit dormant far past its cooldown keeps its stale
+                # ``opened_at`` and the very next check counts the
+                # just-granted probe as already lost, handing a second
+                # dispatch the same window back-to-back.
                 entry["probing"] = True
+                entry["opened_at"] = now - entry["cooldown"]
+                self._persist_locked()
+                return None
+            if elapsed >= 2 * entry["cooldown"]:
+                # Lost probe (thread killed by a BaseException, bootstrap
+                # death before any turn ran, crash between grant and
+                # resolution): one full cooldown past the grant it counts
+                # as lost — re-arm anchored at the grant and hand the next
+                # caller a fresh probe, so a dead probe costs one cooldown,
+                # never the process lifetime.
+                entry["opened_at"] = now - entry["cooldown"]
                 self._persist_locked()
                 return None
             # Probe already in flight: stay closed to it until it resolves.

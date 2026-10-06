@@ -1965,3 +1965,111 @@ def test_open_circuit_storm_burst_fails_fast_without_taking_capacity(
     assert len(FakePiClient.instances) == 1
     with ds._SESSION_LOCK:
         assert ds._SESSIONS[sid]["status"] == "idle"
+
+
+# ── Review-fix regressions: probe resolution + persist serialization ────────
+# Independent review (attempt e8924bb4, findings 1-2): a granted half-open
+# probe that died without a provider signal (tool-level client-start
+# failure) used to leave the key fail-closed forever, and the observer's
+# refresh persist could overwrite the turn's terminal persist with a stale
+# mid-turn snapshot. These pin the fixed contracts end-to-end.
+
+
+def test_client_start_failure_resolves_granted_probe(monkeypatch):
+    """The A2 gate grants exactly one half-open probe per cooldown; when
+    that granted dispatch dies before any provider signal (client bootstrap
+    failure at the tool boundary), the early-error path must resolve the
+    probe inconclusive so the key re-arms for the next cooldown instead of
+    refusing every dispatch forever."""
+    import agent.delegate_health as dh
+    from agent.delegate_health import CircuitOpen
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        dh,
+        "_LEDGERS",
+        {dh.hermes_home_key(): dh.DelegateHealthLedger(now=lambda: clock["t"])},
+    )
+
+    class StartFailingPi(FakePiClient):
+        def start(self, *, timeout=30.0):
+            raise RuntimeError("bootstrap handshake wedged")
+
+    monkeypatch.setattr(ds, "PiRPCClient", StartFailingPi)
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+
+    ledger = dh._LEDGERS[dh.hermes_home_key()]
+    key = ("pi", "glm-4.6")
+    for _ in range(3):
+        ledger.record_failure(key, "rate_limit")  # opened_at == 1000
+
+    clock["t"] = 1000.0 + 901.0  # cooldown elapsed: the gate grants the probe
+    failed = payload(
+        ds.delegate_session(action="start", goal="probe turn", parent_agent=Parent())
+    )
+    assert "error" in failed
+    assert "Could not start pi delegate session" in failed["error"]
+
+    state = ledger.check(key)
+    assert isinstance(state, CircuitOpen)
+    # Re-armed from the resolution moment (not still holding the probe):
+    assert state.retry_after_s == pytest.approx(900.0)
+    clock["t"] += 901.0
+    assert ledger.check(key) is None  # fresh probe granted — not wedged closed
+
+
+def test_stalled_observer_persist_cannot_overwrite_terminal_state(monkeypatch):
+    """The observer's refresh persist and the turn's terminal persist are
+    serialized end-to-end (snapshot -> tmp write -> atomic replace under one
+    IO lock): a stalled observer write that completes after the turn ended
+    can no longer leave the durable file claiming ``running`` forever — an
+    outside reader (the incident supervisor shape) always sees the terminal
+    state once the turn thread exits."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.01)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.01)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        entered = threading.Event()
+        gate = threading.Event()
+        real_json = ds.json
+        stalled: list[bool] = []
+
+        class StallingJson:
+            # Stand-in for IO jitter mid-write: the observer's FIRST
+            # serialization stalls until the test releases it, after the
+            # turn has already reached its terminal state.
+            def dumps(self, obj, **kwargs):
+                if (
+                    threading.current_thread().name.endswith("-obs")
+                    and not stalled
+                ):
+                    stalled.append(True)
+                    entered.set()
+                    assert gate.wait(timeout=10.0)
+                return real_json.dumps(obj, **kwargs)
+
+        monkeypatch.setattr(ds, "json", StallingJson())
+        client.last_turn_activity_at = client.last_turn_activity_at + 1.0
+
+        assert entered.wait(timeout=10.0), "observer never entered its persist"
+        # The turn ends while the observer's write is stalled mid-flight.
+        client.release_turn.set()
+        wait_for_status(parent, sid, "idle", timeout=10.0)
+
+        gate.set()  # the stale (running) snapshot write now completes
+        record = ds._SESSIONS[sid]
+        record["thread"].join(timeout=10.0)
+        assert not record["thread"].is_alive()
+
+        meta = json.loads(ds._metadata_path(sid).read_text())
+        assert meta["status"] == "idle", (
+            "durable metadata regressed to a stale mid-turn snapshot: "
+            f"{meta['status']!r} while the live record is {record['status']!r}"
+        )
+        assert meta["status"] == record["status"]
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
