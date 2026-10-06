@@ -115,9 +115,37 @@ def _ensure_slack_mock():
         sys.modules.setdefault(name, mod)
 
 
+def _ensure_aiohttp_mock():
+    """Install a mock aiohttp module so the Slack adapter can be imported.
+
+    ``aiohttp`` ships in the ``[messaging]``/``[slack]`` extras, not in core
+    deps, so a core-only environment cannot even collect the e2e suite: the
+    adapter imports it at module top level. The adapter looks ``aiohttp`` up
+    via its module globals precisely so tests can stub it
+    (``_is_transient_transport_error`` guards every attribute with
+    ``isinstance(..., type)``), and the real library always wins when it is
+    installed — the stub only lands when no real aiohttp is importable.
+    """
+    if "aiohttp" in sys.modules and hasattr(sys.modules["aiohttp"], "__file__"):
+        return  # Real library already imported
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("aiohttp") is not None:
+            return  # Real library installed (not yet imported)
+    except (ImportError, ValueError):
+        pass
+    aiohttp_mod = MagicMock()
+    aiohttp_mod.ClientConnectionError = type("ClientConnectionError", (Exception,), {})
+    aiohttp_mod.ClientSSLError = type("ClientSSLError", (Exception,), {})
+    aiohttp_mod.ServerFingerprintMismatch = type("ServerFingerprintMismatch", (Exception,), {})
+    sys.modules.setdefault("aiohttp", aiohttp_mod)
+
+
 _ensure_telegram_mock()
 _ensure_discord_mock()
 _ensure_slack_mock()
+_ensure_aiohttp_mock()
 
 import discord  # noqa: E402 — mocked above
 from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
