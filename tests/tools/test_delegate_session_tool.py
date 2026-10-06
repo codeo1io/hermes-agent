@@ -1972,3 +1972,170 @@ def test_open_circuit_storm_burst_fails_fast_without_taking_capacity(
     assert len(FakePiClient.instances) == 1
     with ds._SESSION_LOCK:
         assert ds._SESSIONS[sid]["status"] == "idle"
+
+
+def test_turn_evidence_lands_in_dispatching_profile_home(monkeypatch, tmp_path):
+    """F1 regression (A→B→A multiplex): worker threads do not inherit the
+    home-override contextvar, so the durable evidence a turn produces —
+    session metadata and the provider-health ledger update — must be pinned
+    to the DISPATCHING profile at dispatch time. Without the pins the turn
+    thread resolves the launch/default home and writes cross-profile, and a
+    provider failure in profile B poisons the default profile's breaker."""
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+    class RateLimitedClient(FakePiClient):
+        """Fails with a provider-class error (classifies as 'rate_limit') so
+        the turn records a provider failure in the health ledger."""
+
+        def run_session_prompt(self, *args, **kwargs):
+            raise Exception("429 Too Many Requests: rate limit exceeded")
+
+    default_home = tmp_path / "default-home"
+    home_b = tmp_path / "profile-b"
+    home_c = tmp_path / "profile-c"
+    for home in (default_home, home_b, home_c):
+        home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    reset_delegate_health_ledger()
+    # Re-bind the store root to the LIVE home so a pinned root discriminates
+    # profiles (the autouse fixture otherwise pins one shared tmp store).
+    monkeypatch.setattr(
+        ds,
+        "_session_store_root",
+        lambda: get_hermes_home() / "cache" / "delegate-sessions",
+    )
+
+    class NoStartThread:
+        """Capture the dispatch without running it — the worker body is
+        driven synchronously below with the contextvar unset, which is
+        exactly the view a plain threading.Thread gets."""
+
+        def __init__(self, *, target, args, name, daemon):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(ds.threading, "Thread", NoStartThread)
+
+    def durable_session_ids(home):
+        store = home / "cache" / "delegate-sessions"
+        return {
+            json.loads(p.read_text())["session_id"] for p in store.glob("*.json")
+        }
+
+    # Dispatch under profile B with a provider that fails rate-limited: the
+    # pins are captured in the parent (override active), then the worker
+    # body runs with NO override — the exact environment of a real thread.
+    token_b = set_hermes_home_override(home_b)
+    try:
+        parent_b = Parent("parent-b")
+        started_b = payload(
+            ds.delegate_session(
+                action="start", parent_agent=parent_b, goal="fail fast"
+            )
+        )
+        sid_b = started_b["session_id"]
+        record_b = ds._SESSIONS[sid_b]
+        record_b["client"] = RateLimitedClient()
+    finally:
+        reset_hermes_home_override(token_b)
+    ds._run_turn(record_b, "fail fast", 30.0)
+
+    assert record_b["_scope_store_root"] == home_b / "cache" / "delegate-sessions"
+    assert sid_b in durable_session_ids(home_b)
+    assert (home_b / "cache" / "delegate-provider-health.json").exists()
+
+    # The worker had NO contextvar; the ledger pin is what routed the
+    # failure to B's registry — prove the identity both ways.
+    token = set_hermes_home_override(home_b)
+    try:
+        ledger_b = ds.get_delegate_health_ledger()
+    finally:
+        reset_hermes_home_override(token)
+    assert record_b["_scope_ledger"] is ledger_b
+    assert ds.get_delegate_health_ledger() is not ledger_b
+
+    # A→B→A: a healthy turn under profile C pins C's scope too; the
+    # launch/default home never receives anything from either worker.
+    token_c = set_hermes_home_override(home_c)
+    try:
+        parent_c = Parent("parent-c")
+        started_c = payload(
+            ds.delegate_session(
+                action="start", parent_agent=parent_c, goal="healthy work"
+            )
+        )
+        sid_c = started_c["session_id"]
+        record_c = ds._SESSIONS[sid_c]
+        record_c["client"] = FakePiClient()
+    finally:
+        reset_hermes_home_override(token_c)
+    ds._run_turn(record_c, "healthy work", 30.0)
+
+    assert record_c["_scope_store_root"] == home_c / "cache" / "delegate-sessions"
+    assert sid_c in durable_session_ids(home_c)
+    assert sid_c not in durable_session_ids(home_b)
+
+    assert not durable_session_ids(default_home)
+    assert not (default_home / "cache" / "delegate-provider-health.json").exists()
+
+
+def test_stale_persist_cannot_overwrite_terminal_evidence(monkeypatch):
+    """F3 regression: an observer persist that snapshots the record as
+    'running' but is descheduled before its write must never overwrite the
+    terminal evidence a later persist installed. The write is dropped on a
+    sequence mismatch, so a crashed delegate's durable status stays the
+    last-writer-ordered terminal truth, not a resurrected 'running'."""
+    record = {
+        "session_id": "stale-persist-probe",
+        "parent_session_id": "p",
+        "backend": "pi",
+        "model": "glm-4.6",
+        "status": "running",
+        "created_at": time.time(),
+        "last_turn_activity_at": time.time(),
+    }
+
+    real_snapshot = ds._metadata_snapshot
+    observer_snapshotted = threading.Event()
+    release_observer = threading.Event()
+
+    def gated_snapshot(rec):
+        snapshot = real_snapshot(rec)
+        if snapshot.get("status") == "running" and not observer_snapshotted.is_set():
+            observer_snapshotted.set()
+            # Hold the observer between its snapshot and its write while the
+            # terminal evidence is persisted by the session thread.
+            release_observer.wait(10)
+        return snapshot
+
+    monkeypatch.setattr(ds, "_metadata_snapshot", gated_snapshot)
+
+    observer = threading.Thread(target=ds._persist_metadata, args=(record,))
+    observer.start()
+    assert observer_snapshotted.wait(10)
+
+    record["status"] = "idle"
+    record["outcome"] = "completed"
+    ds._persist_metadata(record)
+
+    path = ds._metadata_path("stale-persist-probe")
+    assert json.loads(path.read_text())["status"] == "idle"
+
+    release_observer.set()
+    observer.join(10)
+    after = json.loads(path.read_text())
+    assert after["status"] == "idle", (
+        "a stale observer persist must be dropped, not overwrite the "
+        f"terminal evidence (got {after['status']!r})"
+    )
