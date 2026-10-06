@@ -378,6 +378,7 @@ def test_tui_gateway_model_switch_routing(tmp_path: Path, request: pytest.Fixtur
             done = gw.turn(sid, f"turn {i}")
             if i == 0:
                 gw.seen_or_wait(gw.event("session.title", sid), timeout=120)  # first-turn aux call settles
+                fleet.wait_quiet()  # let its POST land before the session's host moves (TOCTOU)
             log = fleet.since(marks)
             payload = (done.get("params") or {}).get("payload") or {}
             ctx = f"leg {i} ({leg.value!r} -> {leg.host}): {done.get('params', {}).get('type')} {str(payload)[:300]}\n{describe(log)}"
