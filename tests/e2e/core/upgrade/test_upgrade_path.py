@@ -47,6 +47,7 @@ import functools
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -115,10 +116,50 @@ def _refs() -> _Refs:
         return _Refs(head, "", "")
 
 
+def _release_series(tag: str) -> str | None:
+    """``v2026.9.24`` -> ``2026.9``; None for anything that is not a dated release tag."""
+    match = re.fullmatch(r"v(\d{4})\.(\d{1,2})\.\d+", tag)
+    return f"{match.group(1)}.{int(match.group(2))}" if match else None
+
+
+def _stale_base_reason() -> str | None:
+    """Why the resolved N-1 cannot exercise this checkout's upgrade, or None when it can.
+
+    The lane exists to prove THIS tree updates cleanly. When the checkout's tags are absent
+    (a fork whose origin does not carry the release tags of the branch it tests — the very first
+    e2e-upgrade run after the 2026-10-04 re-parent fetched none of ``v2026.9.*`` and silently
+    parked main at ``v2026.8.18``, six weeks stale), every leg upgrades a tree that predates the
+    refactor under test and dies on shapes fixed releases ago, burning ~11 runner-minutes per
+    attempt on failures that say nothing about HEAD. Same shape, softer signal, when an explicit
+    ``HERMES_E2E_UPGRADE_BASE`` names a base from another release *series*: that escape hatch
+    exists to replay a specific historical upgrade, not to cross series blind.
+    """
+    refs = _refs()
+    if not refs.base_tag:
+        return None  # already reported by _upgrade_prerequisites as "no release tag"
+    base_series = _release_series(refs.base_tag)
+    head_series = _release_series(_git("describe", "--tags", "--abbrev=0", "HEAD", cwd=H.WORKTREE))
+    explicit = os.environ.get("HERMES_E2E_UPGRADE_BASE")
+    if explicit:
+        if head_series and base_series and head_series != base_series:
+            return (f"HERMES_E2E_UPGRADE_BASE={refs.base_tag} is a {base_series} release while HEAD "
+                    f"describes to {head_series}; the override is for replaying an upgrade within "
+                    "one release series, not for crossing series blind")
+        return None
+    if base_series is None or head_series is None or base_series != head_series:
+        return (f"N-1 resolved to {refs.base_tag or 'no tag'} ({base_series}) while HEAD describes to "
+                f"another series ({head_series}); the checkout's own release tags are missing from "
+                "this clone — fetch them (git fetch --tags origin) before burning the lane")
+    return None
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _upgrade_prerequisites() -> None:
     if not _refs().base_tag:
         pytest.skip("no release tag reachable before HEAD (fetch tags)")
+    stale = _stale_base_reason()
+    if stale:
+        pytest.fail(stale)
     if _real_uv() is None:
         pytest.skip("uv required to build the N-1 venv")
 
