@@ -718,3 +718,25 @@ class TestLightpandaSessionLifecycle:
         dead_owner.write_text(json.dumps({"owner_pid": 2**22 + 7}), encoding="utf-8")
         assert browser_lightpanda.reap_orphaned_lightpanda() == 0
         assert not bad.exists() and not dead_owner.exists()
+
+    def test_browser_env_falls_closed_to_a_scrubbed_env(self, monkeypatch):
+        """The lightpanda fallback env must never be the credential-bearing parent.
+
+        When the browser_tool env builder is unavailable the CDP spawn still needs
+        SOME env; copying os.environ would hand the engine process every gateway
+        token this gateway holds. The fallback fails closed through the same
+        scrubber the builder uses.
+        """
+        import tools.browser_tool as bt
+        from tools import browser_lightpanda
+
+        def _builder_unavailable():
+            raise RuntimeError("builder unavailable")
+
+        monkeypatch.setattr(bt, "_build_browser_env", _builder_unavailable)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tgram-secret-value")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-provider-secret-value")
+        env = browser_lightpanda._browser_env()
+        assert "TELEGRAM_BOT_TOKEN" not in env, "the fallback must not carry gateway tokens"
+        assert "OPENAI_API_KEY" not in env, "the fallback must not carry provider keys"
+        assert env is not os.environ
