@@ -940,7 +940,8 @@ class PhotonAdapter(BasePlatformAdapter):
     async def _start_sidecar(self) -> None:
         await self._ensure_sidecar_deps()
         await self._reap_stale_sidecar()
-        env = os.environ.copy()
+        from tools.environments.local import hermes_subprocess_env
+        env = hermes_subprocess_env()  # the sidecar needs no Hermes credentials: PHOTON_* keys are added below
         env.update({
             "PHOTON_PROJECT_ID": self._project_id, "PHOTON_PROJECT_SECRET": self._project_secret,
             "PHOTON_SIDECAR_PORT": str(self._sidecar_port), "PHOTON_SIDECAR_BIND": self._sidecar_bind,
