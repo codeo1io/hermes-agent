@@ -187,9 +187,6 @@ class Chamber:
             raise AssertionError(f"{name} did not exit within {deadline}s\n{self.stderr(name)}") from None
         finally:
             proc._stderr_file.close()  # type: ignore[attr-defined]
-        # The reaped pid holds nothing anymore; drop the monitor's settle-race
-        # rows for it (see forget_deleted_hits_for_pid).
-        self.forget_deleted_hits_for_pid(proc.pid)
         return rc
 
     def stop(self, name: str, *, deadline: float = 60.0) -> int:
@@ -248,19 +245,6 @@ class Chamber:
     def deleted_hits_snapshot(self) -> list[tuple[str, int, str]]:
         with self._lock:
             return sorted(set(self.deleted_hits))
-
-    def forget_deleted_hits_for_pid(self, pid: int) -> None:
-        """Drop deleted-sidecar hits recorded for *pid*.
-
-        The fd monitor samples every 20 ms; between SIGTERM delivery and full
-        process teardown a dying process still lists its (already-deleted)
-        sidecar fds in /proc/<pid>/fd, so the monitor can record a hit for a
-        process that exited cleanly milliseconds later (observed on loaded
-        4-vCPU CI runners). A reaped pid holds nothing: drop its rows so the
-        settle race cannot poison every later episode of a shared chamber.
-        """
-        with self._lock:
-            self.deleted_hits = [row for row in self.deleted_hits if row[1] != pid]
 
     # -- reports -------------------------------------------------------------------------------------
     def events(self, name: str) -> list[dict]:
