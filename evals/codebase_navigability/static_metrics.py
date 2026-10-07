@@ -2,7 +2,7 @@
 
 First-party Python only (excludes tests/, node_modules, apps/, website, build, .venv, skills md).
 """
-import ast, collections, io, json, os, shutil, subprocess, sys, time, tokenize
+import ast, collections, io, json, os, shutil, subprocess, sys, tempfile, time, tokenize
 
 TREE, LABEL = sys.argv[1], sys.argv[2]
 SKIP = {".git", "node_modules", "apps", "website", "build", ".venv", "venv", "MagicMock", "__pycache__", ".worktrees", "dist", "evals", "skills", "optional-skills", "docs"}
@@ -127,7 +127,6 @@ def analyse(files):
 def radon(files):
     """radon cc + mi over the file list (JSON), aggregated."""
     R = shutil.which("radon") or os.path.join(os.path.dirname(sys.executable), "radon")
-    import tempfile
     out = {}
     lst = "\n".join(files)
     # radon can't take a list file; run per-directory roots instead
@@ -151,7 +150,10 @@ def radon(files):
 src_files = sorted(py_files(TREE, False)); test_files = sorted(py_files(TREE, True))
 res = {"label": LABEL, "tree": TREE, "source": analyse(src_files), "tests": analyse(test_files)}
 res["source"].update({"radon_" + k: v for k, v in radon(src_files).items()})
-OUT = os.environ.get("NAV_OUT", "."); os.makedirs(OUT, exist_ok=True)
-json.dump(res, open(os.path.join(OUT, f"{LABEL}.static.json"), "w", encoding="utf-8"), indent=1, default=str)
+OUT = os.environ.get("NAV_OUT") or os.path.join(tempfile.gettempdir(), "hermes-static-metrics")  # never default into the tree under test: it dirties `git status`
+os.makedirs(OUT, exist_ok=True)
+out_path = os.path.join(OUT, f"{LABEL}.static.json")
+json.dump(res, open(out_path, "w", encoding="utf-8"), indent=1, default=str)
 s = res["source"]; t = res["tests"]
 print(f"{LABEL}: src files={s['files']} lines={s['lines']} code={s['code']} funcs={s['functions']} >300={s['funcs_gt_300']} files>2k={s['files_gt_2000']} >5k={s['files_gt_5000']} cycles={s['import_cycles']} cc_avg={s.get('radon_cc_avg')} mi_avg={s.get('radon_mi_avg')} | tests files={t['files']} lines={t['lines']}")
+print(f"json -> {out_path}")

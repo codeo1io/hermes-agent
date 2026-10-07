@@ -314,14 +314,17 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
                          _plugin_terminal_env_strip_keys(), lambda p: p)
 
 
-def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:
+def hermes_subprocess_env(
+    *, inherit_credentials: bool = False, base_env: dict[str, str] | None = None
+) -> dict[str, str]:
     """Sanitized env for the **non-terminal** spawn surface (browser, ACP/CLI executors,
     computer-use driver, TUI Node host). Tier 1 (``_ALWAYS_STRIP_KEYS``, plugin keys,
     force-prefixed hints, dynamic internal secrets) is always removed; Tier 2 (the
     provider/tool blocklist) unless ``inherit_credentials`` — pass that **only** for
     children that legitimately need LLM credentials (user-blessed claude/codex/gemini
-    CLI, TUI Node host). Terminal/execute_code use ``_sanitize_subprocess_env``."""
-    env = _scrub_credentials(os.environ.copy(), inherit_credentials=inherit_credentials)
+    CLI, TUI Node host). ``base_env`` lets an already curated environment use the same
+    policy. Terminal/execute_code use ``_sanitize_subprocess_env``."""
+    env = _scrub_credentials(dict(base_env) if base_env is not None else os.environ.copy(), inherit_credentials=inherit_credentials)
     env.setdefault("PYTHONUTF8", "1")  # Windows UTF-8 safety for spawned processes
     return _finalize_child_env(env)
 
