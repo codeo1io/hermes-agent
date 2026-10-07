@@ -230,3 +230,12 @@ fd9498122e5135106ce388f8106a5912a6f76a2c:tests/agent/test_mid_turn_compaction_tu
 a28890a4c829e06ad65ff84ece8d0079d05a0fbe:tests/agent/test_transform_llm_output_persistence.py:generic-api-key:48
 2598247ff55ecef33c094e84cde6d1ca0b5a55b6:tests/tools/test_process_registry.py:generic-api-key:2082
 0ff5fa93a964eb26e351d4752b2d6413bc7a6291:tests/tools/test_process_registry.py:generic-api-key:2082
+# 2026-10-07 fleet-unblock (run 118ad746f6e6 full_tests, attempt f79ba6b5,
+# supervisor-authorized TRANSIENT edit via delegate session; restored after
+# validation): stranded salvage branch conductor/run-a8d584606572 (failed run
+# a8d584606572, tip cc51f878) introduced the same test-key-1234567890 synthetic
+# fixture pattern; the all-refs private-leak-sentinel scan sees it on every PR
+# and fleet-blocks CI (PRs #464, #465). Same triage as the 2026-09-24 and
+# 2026-10-04 blocks; permanent triage belongs to the cc51 lineage's landing.
+cc51f8785e336aa6bae1035a12f466794ab60d9f:tests/agent/test_concurrent_transform_once.py:generic-api-key:63
+cc51f8785e336aa6bae1035a12f466794ab60d9f:tests/agent/test_concurrent_transform_once.py:generic-api-key:***
