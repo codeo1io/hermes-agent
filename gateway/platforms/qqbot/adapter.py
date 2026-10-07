@@ -1138,18 +1138,29 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             return None
 
         silk_path = src_path.rsplit(".", 1)[0] + ".silk"
+
+        def _attempt(path: str) -> Optional[int]:
+            """copy2 + SILK decode + wav check: disk/CPU-bound, runs in a worker thread."""
+            import shutil
+
+            if path == silk_path and path != src_path:
+                # pilk keys on the extension; a non-.silk source must be copied to
+                # the .silk sibling first. When src is already .silk the paths
+                # coincide — copying would raise SameFileError, so pilk runs as-is.
+                shutil.copy2(src_path, silk_path)
+            pilk.silk_to_wav(path, wav_path, rate=16000)
+            if self._wav_ok(wav_path):
+                return Path(wav_path).stat().st_size
+            return None
+
         try:
             for path, label, how in ((src_path, "", "direct"), (silk_path, " (as .silk)", ".silk")):
                 try:
-                    if path == silk_path:
-                        import shutil
-
-                        shutil.copy2(src_path, silk_path)
-                    pilk.silk_to_wav(path, wav_path, rate=16000)
-                    if self._wav_ok(wav_path):
+                    size = await asyncio.to_thread(_attempt, path)
+                    if size is not None:
                         logger.debug(
                             "[%s] pilk converted %s%s to wav (%d bytes)",
-                            self._log_tag, Path(src_path).name, label, Path(wav_path).stat().st_size)
+                            self._log_tag, Path(src_path).name, label, size)
                         return wav_path
                 except Exception as exc:
                     logger.debug("[%s] pilk %s conversion failed: %s", self._log_tag, how, exc)
@@ -1237,13 +1248,19 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
         base_url, api_key, model = stt_cfg["base_url"], stt_cfg["api_key"], stt_cfg["model"]
         try:
-            with open(wav_path, "rb") as f:
-                resp = await self._http_client.post(
-                    f"{base_url}/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files={"file": (Path(wav_path).name, f, "audio/wav")},
-                    data={"model": model},
-                    timeout=stt_cfg["timeout"])
+            def _read_wav() -> bytes:
+                # httpx builds the multipart body eagerly on the calling thread, so
+                # the wav read must happen off-loop or the event loop pays it.
+                with open(wav_path, "rb") as f:
+                    return f.read()
+
+            audio = await asyncio.to_thread(_read_wav)
+            resp = await self._http_client.post(
+                f"{base_url}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (Path(wav_path).name, audio, "audio/wav")},
+                data={"model": model},
+                timeout=stt_cfg["timeout"])
             resp.raise_for_status()
             result = resp.json()
             # Zhipu/GLM: {"choices": [{"message": {"content": ...}}]}; OpenAI/Whisper: {"text": ...}

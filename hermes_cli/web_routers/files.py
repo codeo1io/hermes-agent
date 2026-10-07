@@ -281,6 +281,11 @@ def _decode_data_url(data_url: str) -> tuple[bytes, str]:
     mime_type = header[5:].split(";", 1)[0] or "application/octet-stream"
     if ";base64" not in header:
         raise HTTPException(status_code=400, detail="Upload payload must be base64 encoded")
+    # Reject on the ENCODED length first: b64decode of an oversized payload would
+    # allocate ~3/4 of len(encoded) bytes before the post-decode cap below runs.
+    max_encoded = 4 * ((_MANAGED_FILE_MAX_BYTES + 2) // 3)
+    if len(encoded) > max_encoded:
+        raise HTTPException(status_code=413, detail="File is too large")
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):

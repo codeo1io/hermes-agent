@@ -14,7 +14,6 @@ exclude-newer-span = "P14D"
 [options.exclude-newer-package]
 elevenlabs = false
 setuptools = false
-dingtalk-stream = false
 modal = false
 pyyaml = false
 maturin = false
@@ -91,7 +90,6 @@ nemo-relay = false
 requests = false
 httplib2 = false
 httpx = false
-mcp-types = false
 pyasn1 = false
 snowballstemmer = false
 concurrent-log-handler = false
@@ -110,10 +108,10 @@ python-telegram-bot = false
 psutil = false
 radon = false
 jinja2 = false
-sounddevice = false
 hindsight-client = false
-httpcore2 = false
+sounddevice = false
 alibabacloud-dingtalk = false
+dingtalk-stream = false
 
 [manifest]
 overrides = [

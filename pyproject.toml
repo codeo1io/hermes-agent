@@ -453,10 +453,12 @@ override-dependencies = [
   "cryptography>=50,<51",
 ]
 exclude-newer = "14 days"
-# h2: temporary exclude-newer exception for the CVE-2026-71554 (GHSA-6hr6-w5qg-qmwg,
-# request-smuggling) fix in 4.4.1, published 2026-08-03. Remove after 2026-08-17.
-# aiohttp, cryptography: same shape — the advisory fixes are newer than the
-# 14-day window, so the resolver cannot see them without an exception.
+# 2026-10-07: removed the temporary h2 exception (CVE-2026-71554 / GHSA-6hr6-w5qg-qmwg
+# request-smuggling, fixed in 4.4.1 published 2026-08-03) — the fix has aged past the
+# 14-day window, so the quarantine covers it again. The aiohttp/cryptography rows stay
+# for the exact-pin rationale, not the (equally aged) advisory one: cryptography==50.0.0
+# (core) and aiohttp==3.14.3 (six extras) must stay whitelisted while the cutoff is
+# relative — see test_packaging_metadata.
 #
 # defusedxml, python-olm, unpaddedbase64: the OPPOSITE shape (#80387, #79434,
 # #78227 family). These are ancient, effectively frozen releases (2021-2023)
@@ -536,11 +538,9 @@ google-auth-httplib2 = false
 google-auth-oauthlib = false
 google-cloud-pubsub = false
 h2 = false
-# httpcore2/mcp-types: temporary exceptions for the 2026-09-19 security floor
-# (httpx2 2.13.0 needs httpcore2 2.13.0; mcp 2.2.0 pins mcp-types==2.2.0 — both
-# published 2026-09-14, inside the 14-day cutoff). Same shape as the h2 entry
-# above: remove once the releases age past the cutoff.
-httpcore2 = false
+# 2026-10-07: removed the temporary httpcore2/mcp-types exceptions (2026-09-19
+# security floor; httpx2 2.13.0 needs httpcore2 2.13.0, mcp 2.2.0 pins
+# mcp-types==2.2.0 — both published 2026-09-14, now aged past the 14-day cutoff).
 hindsight-client = false
 honcho-ai = false
 httplib2 = false
@@ -553,7 +553,6 @@ markdown = false
 maturin = false
 mautrix = false
 mcp = false
-mcp-types = false
 mem0ai = false
 microsoft-teams-apps = false
 mistralai = false

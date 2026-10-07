@@ -826,6 +826,16 @@ def _linux_terminal_commands(command: str) -> list:
 
 
 @router.post("/api/profiles/{name}/open-terminal")
+def _spawn_linux_terminal(command: str) -> None:
+    """Probe for a terminal emulator and spawn it (blocking `which` calls + Popen)."""
+    for executable, popen_args in _linux_terminal_commands(command):
+        if subprocess.call(["which", executable], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) == 0:
+            subprocess.Popen(popen_args)
+            return
+    raise HTTPException(status_code=400, detail="No supported terminal emulator found")
+
+
 async def open_profile_terminal_endpoint(name: str):
     with _profile_errors("POST /api/profiles/%s/open-terminal failed", name):
         command = _profile_setup_command(name)
@@ -837,13 +847,8 @@ async def open_profile_terminal_endpoint(name: str):
             subprocess.Popen(["osascript", "-e",
                               f'tell application "Terminal"\nactivate\ndo script "{escaped}"\nend tell'])
         else:
-            for executable, popen_args in _linux_terminal_commands(command):
-                if subprocess.call(["which", executable], stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL) == 0:
-                    subprocess.Popen(popen_args)
-                    break
-            else:
-                raise HTTPException(status_code=400, detail="No supported terminal emulator found")
+            # `which` probing + Popen block; keep them off the event loop.
+            await run_in_threadpool(_spawn_linux_terminal, command)
     return {"ok": True, "command": command}
 
 

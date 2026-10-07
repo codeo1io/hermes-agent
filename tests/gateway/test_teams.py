@@ -1140,3 +1140,76 @@ class TestTeamsRequireMention:
         adapter = self._make_adapter(**extra)
         assert adapter._require_mention is expected
         assert adapter._extra.get("require_mention") == yaml_value  # extras stay readable on the instance
+
+
+# ---------------------------------------------------------------------------
+# Local-media encoding must run off the event loop
+# ---------------------------------------------------------------------------
+
+
+class TestMediaAttachmentEncodeOffLoop:
+    """_send_media_attachment base64-encodes whole local files: disk I/O plus
+    CPU-bound encode, which must run in a worker thread, never on the loop."""
+
+    def test_local_attachment_base64_encodes_off_the_event_loop(self, monkeypatch, tmp_path):
+        import asyncio
+        import base64 as base64_mod
+
+        adapter = TeamsAdapter(_make_config(client_id="id", client_secret="s", tenant_id="t"))
+        adapter._app = MagicMock()
+
+        sent = []
+
+        async def _capture(chat_id, activity, fallback):
+            sent.append(activity)
+            return SimpleNamespace(id="m1")
+
+        monkeypatch.setattr(adapter, "_send_via_conv_ref", _capture)
+        monkeypatch.setattr(adapter, "_remember_sent", lambda result: None)
+
+        api_mod = sys.modules["microsoft_teams.api"]
+
+        class _Attachment:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class _Activity:
+            def __init__(self):
+                self.attachments = []
+
+            def add_attachments(self, *attachments):
+                self.attachments.extend(attachments)
+                return self
+
+            def add_text(self, text):
+                self.text = text
+                return self
+
+        monkeypatch.setattr(api_mod, "Attachment", _Attachment, raising=False)
+        monkeypatch.setattr(api_mod, "MessageActivityInput", _Activity, raising=False)
+
+        seen = {}
+        real_encode = base64_mod.b64encode
+
+        def _probe_encode(data):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                seen["off_loop"] = True
+            else:
+                seen["on_loop"] = True
+            return real_encode(data)
+
+        monkeypatch.setattr(base64_mod, "b64encode", _probe_encode)
+
+        payload = tmp_path / "capture.png"
+        payload.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 31)
+
+        result = asyncio.run(adapter.send_image("chat-1", str(payload)))
+
+        assert result.success is True
+        assert seen == {"off_loop": True}  # the encode never ran on the event loop
+        attachment = sent[0].attachments[0]
+        assert attachment.kwargs["content_url"] == (
+            "data:image/png;base64," + real_encode(payload.read_bytes()).decode()
+        )

@@ -10,6 +10,7 @@ Requires the ``teams`` extra (auto-installed by the gateway on first start, or
 from __future__ import annotations
 
 import asyncio
+import base64
 # microsoft-teams-apps calls ``load_dotenv(find_dotenv(usecwd=True))`` at ``microsoft_teams.apps.app``
 # import time. Importing it during plugin discovery / ``TeamsSummaryWriter`` imports would pollute process
 # ``os.environ`` from a cwd-discovered ``.env`` (#62935). Detect presence via find_spec only; bind symbols
@@ -66,6 +67,12 @@ from gateway.platforms._shared import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _encode_attachment_payload(path: str) -> str:
+    """Read + base64-encode a local media file (disk I/O + CPU-bound): run off-loop."""
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
 
 _DEFAULT_PORT = 3978
 _MAX_BODY_BYTES = 1_048_576  # Bot Framework activities are JSON well under 1 MiB
@@ -731,7 +738,6 @@ class TeamsAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Teams app not initialized")
         try:
-            import base64
             import mimetypes
             from microsoft_teams.api import Attachment, MessageActivityInput
 
@@ -741,8 +747,8 @@ class TeamsAdapter(BasePlatformAdapter):
             else:
                 path = source.removeprefix("file://")
                 mime_type = mimetypes.guess_type(path)[0] or default_mime
-                with open(path, "rb") as f:
-                    content_url = f"data:{mime_type};base64,{base64.b64encode(f.read()).decode()}"
+                encoded = await asyncio.to_thread(_encode_attachment_payload, path)
+                content_url = f"data:{mime_type};base64,{encoded}"
             activity = MessageActivityInput().add_attachments(Attachment(content_type=mime_type, content_url=content_url))
             if caption:
                 activity = activity.add_text(caption)

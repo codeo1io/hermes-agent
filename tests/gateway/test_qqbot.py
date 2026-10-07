@@ -1253,3 +1253,93 @@ class TestReadEventsClosedWsGuard:
         with pytest.raises(RuntimeError):
             asyncio.run(adapter._read_events())
 
+
+# ---------------------------------------------------------------------------
+# Audio pipeline blocking work must run off the event loop
+# ---------------------------------------------------------------------------
+
+
+class TestAudioPipelineOffLoop:
+    """SILK conversion (copy2 + pilk decode) and the STT wav read are disk/CPU-bound;
+    they run in worker threads, never on the gateway's event loop."""
+
+    def _make_adapter(self, **extra):
+        from gateway.platforms.qqbot import QQAdapter
+
+        return QQAdapter(_make_config(app_id="a", client_secret="b", **extra))
+
+    def test_silk_conversion_runs_off_the_event_loop(self, tmp_path):
+        import sys as sys_mod
+        import types as types_mod
+
+        adapter = self._make_adapter()
+        seen = {}
+
+        def _fake_silk_to_wav(path, wav_path, rate=16000):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                seen.setdefault("off_loop", []).append(path)
+            else:
+                seen.setdefault("on_loop", []).append(path)
+            with open(wav_path, "wb") as f:
+                f.write(b"\0" * 64)  # >44 bytes so _wav_ok() accepts it
+
+        fake_pilk = types_mod.ModuleType("pilk")
+        fake_pilk.silk_to_wav = _fake_silk_to_wav
+
+        src = tmp_path / "voice.silk"
+        src.write_bytes(b"#!SILK_V9\n" + b"\x00" * 32)
+        wav = str(tmp_path / "voice.wav")
+
+        with mock.patch.dict(sys_mod.modules, {"pilk": fake_pilk}):
+            result = asyncio.run(adapter._convert_silk_to_wav(str(src), wav))
+
+        assert result == wav
+        assert seen.get("off_loop") == [str(src)]  # conversion ran off the loop
+        assert "on_loop" not in seen
+        assert os.path.getsize(wav) == 64
+
+    def test_stt_wav_read_runs_off_the_event_loop(self, tmp_path):
+        import builtins
+
+        adapter = self._make_adapter(
+            stt={"apiKey": "sk", "baseUrl": "https://stt.example", "provider": "zai", "timeout": 5})
+        wav_bytes = b"RIFF" + b"a" * 99
+        wav = tmp_path / "voice.wav"
+        wav.write_bytes(wav_bytes)
+
+        seen = {}
+        real_open = builtins.open
+
+        def _probe_open(file, mode="r", *args, **kwargs):
+            if str(file).endswith(".wav"):
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    seen["off_loop"] = True
+                else:
+                    seen["on_loop"] = True
+            return real_open(file, mode, *args, **kwargs)
+
+        posted = {}
+
+        class _FakeHTTP:
+            async def post(self, url, **kwargs):
+                posted.update(kwargs)
+                posted["url"] = url
+                return httpx.Response(200, json={"text": "hello"},
+                                      request=httpx.Request("POST", url))
+
+        adapter._http_client = _FakeHTTP()
+
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("builtins.open", _probe_open):
+            text = asyncio.run(adapter._call_stt(str(wav)))
+
+        assert text == "hello"
+        assert seen == {"off_loop": True}  # the wav read never ran on the loop
+        name, data, content_type = posted["files"]["file"]
+        assert name == "voice.wav" and content_type == "audio/wav"
+        assert data == wav_bytes
+
