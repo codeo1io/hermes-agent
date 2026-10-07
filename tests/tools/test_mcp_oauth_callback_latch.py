@@ -4,8 +4,11 @@ A browser follows the ``/callback`` redirect with queryless fetches (``/favicon.
 samples the result only every 500 ms. A handler that wrote every GET into the result lost the stored code
 between two polls, so the user saw "Authorization Successful" while ``hermes mcp login`` timed out. These
 tests drive the production entry (``_make_callback_waiter`` → ``_start_callback_server`` → handler) with a
-browser stand-in that sends its requests back-to-back, well inside one poll interval.
+browser stand-in that sends its requests back-to-back; the waiter's result poll is held open until
+every stand-in request has been answered, so the listener cannot be torn down between the requests
+on a loaded runner (see ``_drive_waiter``).
 """
+
 import asyncio
 import io
 import socket
@@ -25,7 +28,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _get(port: int, path: str, _retries: int = 20) -> int:
+def _get(port: int, path: str, _retries: int = 60) -> int:
     for attempt in range(_retries):
         conn = HTTPConnection("127.0.0.1", port, timeout=5)
         try:
@@ -33,9 +36,11 @@ def _get(port: int, path: str, _retries: int = 20) -> int:
             resp = conn.getresponse()
             resp.read()
             return resp.status
-        except ConnectionResetError:
+        except (ConnectionResetError, ConnectionRefusedError):
             # The listener socket can accept (kernel backlog) a hair before the
-            # server thread is ready and reset the first request; retry briefly.
+            # server thread is ready and reset or refuse the first request; retry
+            # briefly. Bounds are generous: on a loaded CI runner the waiter
+            # thread may not reach bind() for seconds after the test starts.
             if attempt == _retries - 1:
                 raise
             threading.Event().wait(0.05)
@@ -45,7 +50,7 @@ def _get(port: int, path: str, _retries: int = 20) -> int:
 
 
 def _wait_listening(port: int) -> None:
-    for _ in range(200):
+    for _ in range(500):
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                 return
@@ -91,7 +96,9 @@ def _drive_waiter(monkeypatch, paths: list[str]):
         statuses = [_get(port, p) for p in paths]
     finally:
         requests_sent.set()
-    thread.join(timeout=15)
+    # 30s covers the harness ceilings above (bind wait + per-request connect retries) on a loaded
+    # runner; the waiter itself finishes one poll (~0.5 s) after requests_sent is set.
+    thread.join(timeout=30)
     assert not thread.is_alive(), "waiter did not finish"
     assert "exc" not in out, f"waiter raised {type(out.get('exc')).__name__}"
     return statuses, out["result"]
@@ -99,17 +106,26 @@ def _drive_waiter(monkeypatch, paths: list[str]):
 
 def test_favicon_right_after_callback_does_not_clobber_the_code(monkeypatch):
     statuses, result = _drive_waiter(
-        monkeypatch, ["/callback?code=synthetic&state=s1&iss=https://as.example", "/favicon.ico"])
+        monkeypatch,
+        ["/callback?code=synthetic&state=s1&iss=https://as.example", "/favicon.ico"],
+    )
     assert statuses == [200, 404]
-    assert (result.code, result.state, result.iss) == ("synthetic", "s1", "https://as.example")
+    assert (result.code, result.state, result.iss) == (
+        "synthetic",
+        "s1",
+        "https://as.example",
+    )
 
 
 def test_first_terminal_callback_wins_over_later_ones(monkeypatch):
-    statuses, result = _drive_waiter(monkeypatch, [
-        "/favicon.ico",
-        "/callback?code=first&state=s1",
-        "/callback?code=second&state=s2",
-        "/callback?error=access_denied&state=s1",
-    ])
+    statuses, result = _drive_waiter(
+        monkeypatch,
+        [
+            "/favicon.ico",
+            "/callback?code=first&state=s1",
+            "/callback?code=second&state=s2",
+            "/callback?error=access_denied&state=s1",
+        ],
+    )
     assert statuses == [404, 200, 200, 200]
     assert (result.code, result.state) == ("first", "s1")
