@@ -138,7 +138,7 @@ def _cmd_install(*, realtime: bool, assume_yes: bool) -> int:
             print("  skipped (you can run it manually later)")
             return
         print(f"  $ {' '.join(cmd)}")
-        # noqa: subprocess-stdin — sudo/brew may prompt on the tty; user explicitly confirmed above
+        # subprocess-stdin is deliberate here — sudo/brew may prompt on the tty; user explicitly confirmed above
         if subprocess.run(cmd, check=False).returncode != 0:
             print(fail_msg)
 

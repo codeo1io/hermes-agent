@@ -17,7 +17,12 @@ import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PACKAGES = ("agent", "tools", "hermes_cli", "gateway", "tui_gateway", "cron", "acp_adapter", "plugins", "providers")
+PACKAGES = (
+    "agent", "tools", "hermes_cli", "gateway", "tui_gateway", "cron", "acp_adapter",
+    "plugins", "providers", "hermes_platform",
+)
+# Root package directories that never ship: the test tree and the offline benchmarks.
+_NON_SHIPPED_ROOT_PACKAGES = frozenset({"tests", "evals"})
 
 
 def _root_py_modules() -> set[str]:
@@ -60,6 +65,26 @@ def test_pyproject_has_no_static_py_modules_list():
     assert "py-modules" not in cfg["tool"]["setuptools"], (
         "root modules are derived in setup.py::_root_py_modules(); a static py-modules list drifts "
         "from the tree and breaks installed wheels. Do not add it back."
+    )
+
+
+def test_every_root_package_directory_is_declared_for_shipping():
+    """``packages.find`` only ships what it is told: a root package directory missing
+    from the include list silently vanishes from wheels (``hermes_platform`` sat in
+    exactly that gap — importable from the repo, ``ModuleNotFoundError`` from an
+    install). The include list and the tree must agree in both directions."""
+    cfg = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    include = cfg["tool"]["setuptools"]["packages"]["find"]["include"]
+    declared = {name.split(".*")[0].rstrip(".") for name in include}
+    root_dirs = {p.name for p in REPO_ROOT.iterdir() if p.is_dir() and (p / "__init__.py").is_file()}
+    missing = root_dirs - _NON_SHIPPED_ROOT_PACKAGES - declared
+    assert not missing, (
+        f"root package directories absent from packages.find include: {sorted(missing)} — "
+        "they would vanish from installed wheels"
+    )
+    assert declared <= root_dirs, (
+        f"include names top-level package directories that do not exist: "
+        f"{sorted(declared - root_dirs)}"
     )
 
 
