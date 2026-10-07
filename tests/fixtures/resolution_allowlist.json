@@ -1,6 +1,11 @@
 [
   {
     "path": "agent/anthropic_adapter.py",
+    "symbol": "<module>",
+    "kind": "known_path_table"
+  },
+  {
+    "path": "agent/anthropic_adapter.py",
     "symbol": "_claude_code_candidates",
     "kind": "bare_which"
   },
@@ -32,6 +37,11 @@
   {
     "path": "agent/lsp/servers.py",
     "symbol": "_which",
+    "kind": "bare_which"
+  },
+  {
+    "path": "agent/opencode_client.py",
+    "symbol": "_opencode_command",
     "kind": "bare_which"
   },
   {
@@ -120,6 +130,11 @@
     "kind": "bare_which"
   },
   {
+    "path": "hermes_cli/_early_recovery.py",
+    "symbol": "_find_uv_binary",
+    "kind": "known_path_table"
+  },
+  {
     "path": "hermes_cli/_subprocess_compat.py",
     "symbol": "resolve_node_command",
     "kind": "bare_which"
@@ -127,6 +142,11 @@
   {
     "path": "hermes_cli/auth.py",
     "symbol": "_external_process_spec",
+    "kind": "bare_which"
+  },
+  {
+    "path": "hermes_cli/auth.py",
+    "symbol": "resolve_external_process_provider_credentials",
     "kind": "bare_which"
   },
   {
@@ -195,11 +215,6 @@
     "kind": "bare_which"
   },
   {
-    "path": "hermes_cli/gateway_setup_wizard.py",
-    "symbol": "_setup_signal",
-    "kind": "bare_which"
-  },
-  {
     "path": "hermes_cli/gateway.py",
     "symbol": "_windows_process_listing",
     "kind": "bare_which"
@@ -222,6 +237,11 @@
   {
     "path": "hermes_cli/gateway_service_unit.py",
     "symbol": "_append_node_dir_for_service",
+    "kind": "bare_which"
+  },
+  {
+    "path": "hermes_cli/gateway_setup_wizard.py",
+    "symbol": "_setup_signal",
     "kind": "bare_which"
   },
   {
@@ -445,6 +465,31 @@
     "kind": "bare_which"
   },
   {
+    "path": "tools/bot_desktop/browser.py",
+    "symbol": "_system_executable",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/bot_desktop/install.py",
+    "symbol": "_run",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/bot_desktop/runtime.py",
+    "symbol": "installable",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/bot_desktop/runtime.py",
+    "symbol": "missing_binaries",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/bot_desktop/runtime.py",
+    "symbol": "package_manager",
+    "kind": "bare_which"
+  },
+  {
     "path": "tools/bot_relay.py",
     "symbol": "_hermes_cli",
     "kind": "bare_which"
@@ -501,7 +546,17 @@
   },
   {
     "path": "tools/computer_use/cua_backend_driver.py",
+    "symbol": "_candidate_cua_driver_commands",
+    "kind": "known_path_table"
+  },
+  {
+    "path": "tools/computer_use/cua_backend_driver.py",
     "symbol": "resolve_cua_driver_cmd",
+    "kind": "bare_which"
+  },
+  {
+    "path": "tools/delegate_session_tool.py",
+    "symbol": "check_delegate_session_requirements",
     "kind": "bare_which"
   },
   {
@@ -687,61 +742,6 @@
   {
     "path": "tui_gateway/methods_prompt.py",
     "symbol": "_",
-    "kind": "bare_which"
-  },
-  {
-    "path": "agent/opencode_client.py",
-    "symbol": "_opencode_command",
-    "kind": "bare_which"
-  },
-  {
-    "path": "hermes_cli/auth.py",
-    "symbol": "resolve_external_process_provider_credentials",
-    "kind": "bare_which"
-  },
-  {
-    "path": "tools/delegate_session_tool.py",
-    "symbol": "check_delegate_session_requirements",
-    "kind": "bare_which"
-  },
-  {
-    "path": "agent/anthropic_adapter.py",
-    "symbol": "<module>",
-    "kind": "known_path_table"
-  },
-  {
-    "path": "hermes_cli/_early_recovery.py",
-    "symbol": "_find_uv_binary",
-    "kind": "known_path_table"
-  },
-  {
-    "path": "tools/computer_use/cua_backend_driver.py",
-    "symbol": "_candidate_cua_driver_commands",
-    "kind": "known_path_table"
-  },
-  {
-    "path": "tools/bot_desktop/browser.py",
-    "symbol": "_system_executable",
-    "kind": "bare_which"
-  },
-  {
-    "path": "tools/bot_desktop/install.py",
-    "symbol": "_run",
-    "kind": "bare_which"
-  },
-  {
-    "path": "tools/bot_desktop/runtime.py",
-    "symbol": "missing_binaries",
-    "kind": "bare_which"
-  },
-  {
-    "path": "tools/bot_desktop/runtime.py",
-    "symbol": "package_manager",
-    "kind": "bare_which"
-  },
-  {
-    "path": "tools/bot_desktop/runtime.py",
-    "symbol": "installable",
     "kind": "bare_which"
   }
 ]
