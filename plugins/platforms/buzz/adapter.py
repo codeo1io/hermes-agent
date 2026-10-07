@@ -168,6 +168,22 @@ def _consume_ws_read_task(task: asyncio.Task) -> None:
             task.exception()
 
 
+def _honour_pending_cancel() -> None:
+    """Re-deliver a stop-cancel that an eating await dropped.
+
+    A cancel that lands while ``asyncio.wait_for``/``wait`` is resuming with an
+    already-done inner awaitable is swallowed (CPython 3.11 semantics: the result is
+    returned, the cancellation is never raised), so a stopped adapter's WebSocket
+    loops could reconnect forever as zombies while the gateway believed the platform
+    had stopped. ``Task.cancelling()`` still counts the eaten request; convert it back
+    into the cancellation it should have been.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        task.uncancel()
+        raise asyncio.CancelledError
+
+
 def _effective_port(parsed) -> Optional[int]:
     try:
         if parsed.port is not None:
@@ -392,7 +408,9 @@ async def _exec_buzz(
     input_text: Optional[str] = None, timeout: float = _CLI_TIMEOUT,
 ) -> Tuple[int, str, str]:
     """Run the buzz CLI (argv, never a shell) -> ``(rc, stdout, stderr)``. Key travels via env only."""
-    env = os.environ.copy()
+    from tools.environments.local import hermes_subprocess_env
+    env = hermes_subprocess_env()  # a third-party CLI: its own key only, never Hermes' credentials
+    env["HOME"] = env["HERMES_REAL_HOME"]  # its own config and credentials file live under the user's HOME
     env["BUZZ_RELAY_URL"] = relay_url
     env["BUZZ_PRIVATE_KEY"] = private_key
     env.pop("BUZZ_AUTH_TAG", None)
@@ -1015,6 +1033,7 @@ class BuzzAdapter(BasePlatformAdapter):
         event = _nostr_auth.build_auth_event(private_key=self._private_key, challenge=str(message[1]), relay_url=self._websocket_url(), auth_tag_json=auth_tag)
         await websocket.send(json.dumps(["AUTH", event], separators=(",", ":")))
         while True:
+            _honour_pending_cancel()  # the auth wait_for can eat the outer cancel while recv() resolves
             response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=_WS_AUTH_TIMEOUT))
             if not isinstance(response, list) or not response:
                 continue
@@ -1088,6 +1107,7 @@ class BuzzAdapter(BasePlatformAdapter):
 
         interval = max(self.poll_interval * _DM_DISCOVERY_EVERY, _MIN_POLL_INTERVAL)
         while True:
+            _honour_pending_cancel()
             await asyncio.sleep(interval)
             try:
                 await self._rediscover_and_subscribe(websocket, subscriptions)
@@ -1102,6 +1122,7 @@ class BuzzAdapter(BasePlatformAdapter):
         backoff = 1.0
         reconnecting = False
         while True:
+            _honour_pending_cancel()
             try:
                 async with websockets.connect(
                     self._websocket_url(), open_timeout=_WS_AUTH_TIMEOUT, close_timeout=5,
@@ -1146,6 +1167,7 @@ class BuzzAdapter(BasePlatformAdapter):
         """Read frames until the relay closes; a close or an idle read raises ConnectionError to reconnect."""
         frame_iter = websocket.__aiter__()
         while True:
+            _honour_pending_cancel()
             read_task = asyncio.ensure_future(frame_iter.__anext__())
             try:
                 done, _ = await asyncio.wait(
@@ -1210,6 +1232,7 @@ class BuzzAdapter(BasePlatformAdapter):
     async def _poll_loop(self) -> None:
         """Poll every watched channel for new events until cancelled."""
         while True:
+            _honour_pending_cancel()  # _poll_channel/_discover_dms wait_for calls can eat the outer cancel
             await asyncio.sleep(self.poll_interval)
             self._poll_count += 1
             try:
