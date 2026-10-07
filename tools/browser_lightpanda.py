@@ -136,7 +136,8 @@ def _browser_env() -> dict:
         return _build_browser_env()
     except Exception as e:
         logger.debug("credential-scrubbed browser env unavailable: %s", e)
-        return os.environ.copy()
+        from tools.environments.local import hermes_subprocess_env
+        return hermes_subprocess_env()  # fail closed: a scrubbed env, never the credential-bearing parent
 
 
 def _cdp_ready(url: str, timeout: float = 0.2) -> bool:
