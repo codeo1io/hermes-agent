@@ -539,3 +539,107 @@ def test_usage_tokens_captured_from_message_update(fake_pi):
         "assistantMessageEvent": {"type": "text_delta", "delta": "hi"},
     })
     assert (client._prompt_tokens, client._completion_tokens) == (20, 9)
+
+
+# -- stall evidence (2026-10-02 provider storm) ------------------------------
+
+
+def _stalling_pi(tmp_path, name, post_ack):
+    """Fake pi that acks the prompt, runs ``post_ack`` (python lines), then
+    goes silent without ever settling. It stays alive until terminated or
+    closed so stall-evidence assertions observe a real OS process."""
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + post_ack
+        + "        time.sleep(30)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://stall-test",
+        persistent_session=True,
+    )
+
+
+def test_stall_exception_carries_zero_activity_evidence(tmp_path):
+    """A provider that produces nothing after prompt-ack — the 2026-10-02
+    storm shape — must stay distinguishable from a delegate that streamed and
+    then went silent: the stall exception carries that split as evidence."""
+    from agent.pi_rpc_client import DelegateTurnStalled
+
+    client = _stalling_pi(tmp_path, "fake-pi-silent", "")
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+    finally:
+        client.close()
+    exc = excinfo.value
+    # Legacy catch surface and byte-identical message stay intact.
+    assert isinstance(exc, TimeoutError)
+    assert str(exc) == "pi session turn stalled after 0s without observable progress"
+    assert exc.had_unsolicited_activity is False
+    assert exc.captured_tail == ""
+
+
+def test_stall_exception_carries_activity_and_tail_evidence(tmp_path):
+    from agent.pi_rpc_client import DelegateTurnStalled
+
+    post_ack = (
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'partial reasoning before silence'}})\n"
+    )
+    client = _stalling_pi(tmp_path, "fake-pi-then-silent", post_ack)
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+    finally:
+        client.close()
+    exc = excinfo.value
+    assert exc.had_unsolicited_activity is True
+    assert "partial reasoning before silence" in exc.captured_tail
+
+
+def test_stalled_turn_terminates_the_native_process(tmp_path):
+    """Zombie-capacity rider: a turn declared stalled must not leave the
+    native process holding its spawn slot (threads + fork + ENOSPC budget)
+    for the rest of the session."""
+    with pytest.raises(TimeoutError):
+        client = _stalling_pi(tmp_path, "fake-pi-zombie", "")
+        client.run_session_prompt("go", timeout_seconds=0.08)
+    proc = client._proc
+    assert proc is not None
+    deadline = time.monotonic() + 2.0
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert proc.poll() is not None, "stalled pi process must be terminated"
+    client.close()
+
+
+def test_stall_captured_tail_is_bounded_and_keeps_the_end(tmp_path):
+    from agent.pi_rpc_client import DelegateTurnStalled
+
+    post_ack = (
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'text_delta','delta':'" + "y" * 5000 + " TAIL-END'}})\n"
+    )
+    client = _stalling_pi(tmp_path, "fake-pi-verbose", post_ack)
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+    finally:
+        client.close()
+    exc = excinfo.value
+    assert len(exc.captured_tail) <= 2000
+    assert exc.captured_tail.endswith("TAIL-END")
+    assert exc.captured_tail.startswith("...")

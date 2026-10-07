@@ -115,9 +115,21 @@ def _ensure_slack_mock():
         sys.modules.setdefault(name, mod)
 
 
+# The Slack adapter imports ``aiohttp`` at module scope unconditionally (at runtime it is
+# optional — the adapter resolves it via ``globals()`` precisely so tests may stub or remove it),
+# but aiohttp ships only in extras ([messaging]/[slack]). Stub it when absent so the adapter
+# stays importable in a core-only venv.
+def _ensure_aiohttp_stub():
+    try:
+        import aiohttp  # noqa: F401
+    except ImportError:
+        sys.modules["aiohttp"] = MagicMock()
+
+
 _ensure_telegram_mock()
 _ensure_discord_mock()
 _ensure_slack_mock()
+_ensure_aiohttp_stub()
 
 import discord  # noqa: E402 — mocked above
 from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
