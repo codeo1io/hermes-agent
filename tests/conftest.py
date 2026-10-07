@@ -1374,11 +1374,14 @@ _OS_MARKS = {
 def _relocate_basetemp_outside_operator_home(config) -> None:
     """Move pytest's basetemp out of the operator's platform-native Hermes home.
 
-    Every per-test sandbox is ``<basetemp>/.../hermes_test``. ``get_default_hermes_root()``
-    prefers the platform-native home whenever ``HERMES_HOME`` sits *under* it, so a basetemp
-    inside ``~/.hermes`` (or ``%LOCALAPPDATA%\\hermes``, where ``TEMP`` commonly lives on
-    Windows) turns the sandbox back into the live install and ``get_profile_dir("default")``
-    writes fixtures over the operator's config.yaml / .env / MEMORY.md (#111101).
+    Every per-test sandbox is ``<basetemp>/.../hermes_test``. Since the 2026-09-17 wave fix
+    ``get_default_hermes_root()`` no longer collapses a non-profile ``HERMES_HOME`` under the
+    native home onto the native root, but relocation stays load-bearing defense-in-depth:
+    ``<root>/profiles/<name>`` homes still resolve to the native root, a basetemp inside
+    ``~/.hermes`` (or ``%LOCALAPPDATA%\\hermes``, where ``TEMP`` commonly lives on Windows)
+    still litters the live install with scratch dirs, and a checkout whose resolver regressed
+    (wave 9) must not get a second chance at ``get_profile_dir("default")`` writing fixtures
+    over the operator's config.yaml / .env / MEMORY.md (#111101).
     """
     from hermes_constants import _get_platform_default_hermes_home
 

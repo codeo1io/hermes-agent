@@ -31,15 +31,27 @@ import pytest
 
 
 def test_default_root_keeps_sandboxed_home_under_native_home(monkeypatch, tmp_path):
-    from hermes_constants import get_default_hermes_root
+    import hermes_constants
 
-    # tmp_path here may itself live under the real ~/.hermes (conductor
-    # delegate TMPDIR): the sandbox is NOT a profile home, so it must be
-    # treated as the root itself instead of collapsing to the native home.
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "sandbox"))
+    # Build the fleet topology explicitly: on conductor delegates TMPDIR sits
+    # under the operator's ~/.hermes, so HERMES_HOME itself lands under the
+    # native home (pytest --basetemp ~/.hermes/tmp/... behaves the same). The
+    # sandbox is NOT a profile home, so it must be treated as the root itself
+    # instead of collapsing to the native home — the collapse is what made
+    # every kanban path resolve to the PRODUCTION board (2026-09-17 wave).
+    # conftest relocates basetemp outside the native home, so the under-native
+    # case must be constructed here, not left to where tmp_path happens to sit.
+    native = tmp_path / "native-home"
+    sandbox = native / "tmp" / "delegate-x"
+    sandbox.mkdir(parents=True)
+    monkeypatch.setattr(
+        hermes_constants, "_get_platform_default_hermes_home", lambda: native
+    )
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None)
+    monkeypatch.setenv("HERMES_HOME", str(sandbox))
     monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
-    root = get_default_hermes_root()
-    assert root == Path(tmp_path / "sandbox")
+    root = hermes_constants.get_default_hermes_root()
+    assert root == sandbox
 
 
 def test_default_root_profile_home_still_maps_to_parent(monkeypatch, tmp_path):
