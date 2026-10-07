@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import shutil
 import threading
 import time
@@ -23,6 +24,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from agent.delegate_errors import classify_delegate_failure
+from agent.delegate_health import get_delegate_health_ledger
+from agent.delegate_start_budget import (
+    BOOTSTRAP_TOTAL_CAP,
+    bootstrap_stage_budgets,
+    respawn_pause,
+)
 from agent.opencode_client import OpenCodeClient
 from agent.pi_rpc_client import PiRPCClient, pending_question_for_owner
 from agent.runtime_cwd import resolve_agent_cwd
@@ -32,11 +40,44 @@ logger = logging.getLogger(__name__)
 
 _SESSION_LOCK = threading.RLock()
 _SESSION_CONDITION = threading.Condition(_SESSION_LOCK)
+# Serializes metadata snapshot→write→replace (and prune) ACROSS threads
+# (R-fold). The observer's pre-transition snapshot used to race the terminal
+# persist: snapshot was built under _SESSION_LOCK but write+replace were
+# not, so a stalled IO in the observer could replace() the durable file
+# AFTER the terminal write and leave a finished session at
+# status="running" — the exact false "process died" signature the durable
+# file exists to prevent. One process-wide IO lock (metadata writes are
+# small and rare) makes the last COMPLETE persist win, and the terminal
+# persist always follows its own status transition, so the file can never
+# regress past a terminal state. Composes with #431's per-record
+# _persist_seq claim below.
+_PERSIST_IO_LOCK = threading.Lock()
 _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
 
 _KNOWN_BACKENDS = ("pi", "opencode")
+
+# Jitter source for the pre-respawn pause. Module attribute (not a closure
+# local) so tests can inject a seeded random.Random and pin the pauses.
+_RESPAWN_RNG = random.Random()
+
+# Durable metadata schema version. v4 (2026-10, finding
+# cognitive-continuity.autonomy-recovery-workers-fail-closed-loop) added
+# outcome evidence fields; loading stays tolerant — older files load
+# unchanged and unknown fields from newer files pass through.
+_METADATA_VERSION = 4
+
+# In-turn durable refresh cadence: while a delegated turn is running, an
+# observer thread polls the client's activity signal every _OBSERVER_POLL_S
+# and persists at most once per _ACTIVITY_REFRESH_MIN_S of observed activity
+# advance, so a long healthy turn stays visible to outside readers of the
+# durable file (finding cognitive-continuity.prevention.d8fce7da: during the
+# incident, a healthy 30-90 min turn was indistinguishable from a wedged
+# one because the durable file kept the pre-turn snapshot). Module-level
+# constants (no env vars); tests inject tighter values via monkeypatch.
+_OBSERVER_POLL_S = 5.0
+_ACTIVITY_REFRESH_MIN_S = 30.0
 
 # Owners without a conversation id fall back to a process-local handle. Such
 # handles are meaningless in a later process, so they must never authorize
@@ -78,14 +119,28 @@ def _session_store_root() -> Path:
     return root / "cache" / "delegate-sessions"
 
 
-def _metadata_path(session_id: str) -> Path:
+def _metadata_path(session_id: str, root: Path | None = None) -> Path:
+    """Metadata file for ``session_id``, optionally under a pinned ``root``.
+
+    The turn/observer threads pass the store root pinned at dispatch time —
+    they do not inherit the home-override contextvar, so call-time resolution
+    would write cross-profile under multiplex.
+    """
     digest = hashlib.sha256(session_id.encode("utf-8", errors="replace")).hexdigest()
-    return _session_store_root() / f"{digest}.json"
+    return (root or _session_store_root()) / f"{digest}.json"
+
+
+def _client_last_activity_at(client: Any) -> Optional[float]:
+    """Wall-clock in-turn activity timestamp from the live client, if any."""
+    value = getattr(client, "last_turn_activity_at", None)
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+    client = record.get("client")
+    activity = getattr(client, "last_turn_activity_at", None)
     return {
-        "version": 3,
+        "version": _METADATA_VERSION,
         "backend": record.get("backend") or "pi",
         "session_id": record.get("session_id"),
         "native_session_id": record.get("native_session_id")
@@ -97,6 +152,41 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # v4: outcome evidence — a stalled/circuit-broken session must survive
+        # restart with its failure class, not just prose, so the supervisor
+        # that resumes it (or the operator reading the file) can tell a dead
+        # provider from a wedged agent without replaying logs. The field set
+        # is the union of the two v4 schemas that grew in parallel campaigns
+        # under one version number: failure prose (``error``, bounded) and
+        # the provider key (``pi_model``) the streak was counted on, so
+        # either campaign's files reconcile without a version bump.
+        "status": record.get("status") or "idle",
+        "error": _bounded(record.get("error"), 2000) or None,
+        "error_class": record.get("error_class") or "",
+        "retry_after": record.get("retry_after"),
+        "last_turn_activity_at": float(activity) if activity else 0.0,
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "pi_model": str(record.get("model") or ""),
+        # v4 turn-liveness evidence: when the last dispatched turn started,
+        # and what a stall-time liveness triage found if one ran. Strictly
+        # additive — older v4 files simply lack them.
+        "turn_started_at": record.get("turn_started_at"),
+        "last_turn_triage": record.get("last_turn_triage") or None,
+        # v4 recovery lineage: which native session this handle was
+        # ORIGINALLY bound to, when a -recovery- mint replaced it. The root
+        # is set once; reason/time name the latest mint.
+        "recovery_of_native_id": record.get("recovery_of_native_id") or None,
+        "recovery_reason": _bounded(record.get("recovery_reason"), 400) or None,
+        "recovered_at": record.get("recovered_at") or None,
+        # Durable forward-progression evidence (additive, version-compatible):
+        # how far the session got and what it last said, so a replacement
+        # supervisor restart-continues instead of guessing. Stamped only by
+        # _bank_durable_progress on terminal turn outcomes.
+        "turns_completed": int(record.get("turns_completed") or 0),
+        "last_line": _bounded(record.get("last_line"), 400) or None,
+        "last_progress_at": record.get("last_progress_at"),
+        "last_turn_duration_s": record.get("last_turn_duration_s"),
+        "last_turn_outcome": record.get("last_turn_outcome") or None,
     }
 
 
@@ -134,7 +224,7 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
     session_id = str(record.get("session_id") or "").strip()
     if not session_id:
         return
-    path = _metadata_path(session_id)
+    path = _metadata_path(session_id, root=record.get("_scope_store_root"))
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -142,16 +232,43 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
         except OSError:
             pass
         tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(
-            json.dumps(_metadata_snapshot(record), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        tmp.replace(path)
-        _prune_durable_metadata(path.parent)
+        with _PERSIST_IO_LOCK:
+            # Build the snapshot under the lock and stamp a monotonic persist
+            # sequence onto the record in the same critical section: snapshot
+            # and sequence are inseparable, so a later persist that
+            # snapshotted a newer view always carries a higher seq.
+            with _SESSION_LOCK:
+                snapshot = _metadata_snapshot(record)
+                record["_persist_seq"] = seq = record.get("_persist_seq", 0) + 1
+            # tmp names are unique per thread, so O_CREAT stamps 0600 at
+            # birth (R-fold) — no world-readable window between write and a
+            # later chmod.
+            fd = os.open(
+                tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2)
+                )
+            # Claim the file for this snapshot under the lock: if a newer
+            # persist has already snapshotted (turn-terminal overtook a
+            # stalled observer), drop the stale tmp instead of replacing the
+            # durable file — a "running" snapshot must never overwrite a
+            # terminal one.
+            with _SESSION_LOCK:
+                if record.get("_persist_seq") != seq:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                    return
+                tmp.replace(path)
+            _prune_durable_metadata(path.parent)
+        # Advance the in-turn refresh watermark (in-memory only) so the
+        # observer's write cap stays exact across observer and transition
+        # persists. Placed after the replace: only successful writes count.
+        with _SESSION_LOCK:
+            record["last_persisted_activity"] = snapshot.get("last_turn_activity_at")
     except OSError:
         logger.debug(
             "Could not persist delegate-session metadata for %s",
@@ -267,6 +384,53 @@ def _bounded_edges(value: Any, maximum: int = _MAX_TEXT) -> str:
     head = available // 3
     tail = available - head
     return text[:head] + marker + text[-tail:]
+
+
+def _last_line_of(text: Any) -> Optional[str]:
+    """Last non-empty line of a turn's final text, or None."""
+    if not isinstance(text, str):
+        return None
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _bank_durable_progress(
+    record: Dict[str, Any], outcome: str, result: Optional[Dict[str, Any]] = None
+) -> None:
+    """Stamp durable forward-progression evidence for one terminal turn.
+
+    Called ONLY from ``_run_turn``'s terminal blocks (anti-whitewash
+    invariant): ``last_progress_at`` moves exactly when durable content
+    changes — never on dispatch, status transitions, persistence re-writes,
+    or reads. A failed turn is durable evidence of activity, so the stamp
+    advances with an ``error`` outcome without touching
+    ``turns_completed``/``last_line``. Caller must hold ``_SESSION_CONDITION``.
+    """
+    record["last_turn_outcome"] = outcome
+    record["last_progress_at"] = time.time()
+    if result is None:
+        return
+    record["turns_completed"] = int(record.get("turns_completed") or 0) + 1
+    duration = result.get("duration_s") if isinstance(result, dict) else None
+    record["last_turn_duration_s"] = (
+        float(duration) if isinstance(duration, (int, float)) else None
+    )
+    record["last_line"] = _bounded(_last_line_of(result.get("text")), 400) or None
+
+
+def _restore_durable_progress(record: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    """Carry persisted progression evidence into a reopened session record.
+
+    Without this, resume would rewrite the durable file with zeroed counters
+    and erase exactly the restart-survival evidence this module guarantees.
+    """
+    record["turns_completed"] = int(meta.get("turns_completed") or 0)
+    for key in ("last_line", "last_progress_at", "last_turn_duration_s"):
+        record[key] = meta.get(key)
+    record["last_turn_outcome"] = meta.get("last_turn_outcome") or None
 
 
 def _message_text(value: Any) -> str:
@@ -529,6 +693,28 @@ def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
 def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
     client = record.get("client")
     last_activity_at = getattr(client, "last_turn_activity_at", None)
+    # U9: turn-liveness truth. `status` alone can lie — a turn thread that
+    # died abnormally leaves it stuck at "running" — and a quiet-but-alive
+    # turn is indistinguishable from a streaming one without a time anchor.
+    # Report both so a supervisor can tell "alive but quiet" from "frozen".
+    thread = record.get("thread")
+    turn_running = bool(record.get("status") == "running") and (
+        thread is None or thread.is_alive()
+    )
+    # `updated_at` moves on every state transition and would mask a stall, so
+    # inactivity anchors only on real activity sources: the client's streamed
+    # activity, the current turn's start, or session creation. Raw float —
+    # callers diff consecutive reads to see growth.
+    now = time.time()
+    anchors = [
+        value
+        for value in (
+            last_activity_at,
+            record.get("turn_started_at"),
+            record.get("created_at"),
+        )
+        if isinstance(value, (int, float))
+    ]
     out = {
         "session_id": record["session_id"],
         "backend": record.get("backend") or "pi",
@@ -539,6 +725,13 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # Durable forward-progression evidence (see _bank_durable_progress for
+        # the stamping discipline).
+        "turns_completed": int(record.get("turns_completed") or 0),
+        "last_line": record.get("last_line"),
+        "last_progress_at": record.get("last_progress_at"),
+        "last_turn_duration_s": record.get("last_turn_duration_s"),
+        "last_turn_outcome": record.get("last_turn_outcome") or None,
         "last_activity_at": (
             float(last_activity_at)
             if isinstance(last_activity_at, (int, float))
@@ -546,6 +739,26 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
         ),
         "pending_question": _pending_payload(record),
         "error": record.get("error") or None,
+        # T4 (D4): structured outcome so callers can branch without parsing
+        # prose; retry_after drives conductor's retry delay directly.
+        "error_class": record.get("error_class") or None,
+        "retry_after": (
+            float(record["retry_after"])
+            if isinstance(record.get("retry_after"), (int, float))
+            else None
+        ),
+        "consecutive_failures": int(record.get("consecutive_failures") or 0),
+        "turn_running": turn_running,
+        "turn_started_at": record.get("turn_started_at"),
+        "inactive_for_s": max(0.0, now - max(anchors)) if anchors else None,
+        # Surfaced when a stall-time liveness triage ran (banked on the
+        # stall path); None until then.
+        "last_turn_triage": record.get("last_turn_triage") or None,
+        # Recovery lineage: present only when a -recovery- mint replaced the
+        # bound native session at bootstrap.
+        "recovery_of_native_id": record.get("recovery_of_native_id") or None,
+        "recovery_reason": record.get("recovery_reason") or None,
+        "recovered_at": record.get("recovered_at") or None,
     }
     if include_result and record.get("last_result"):
         result = record["last_result"]
@@ -597,10 +810,34 @@ def _durable_summary(
         "pi_session_id": native,  # kept for model-callers
         "status": "offline",
         "cwd": meta.get("cwd"),
+        # Durable forward-progression evidence rides the metadata file, so it
+        # is safe to report offline (no live client needed).
+        "turns_completed": int(meta.get("turns_completed") or 0),
+        "last_line": meta.get("last_line"),
+        "last_progress_at": meta.get("last_progress_at"),
+        "last_turn_duration_s": meta.get("last_turn_duration_s"),
+        "last_turn_outcome": meta.get("last_turn_outcome") or None,
         "created_at": meta.get("created_at"),
         "updated_at": meta.get("updated_at"),
         "pending_question": None,
-        "error": None,
+        "error": meta.get("error") or None,
+        # v4: failure class + provider retry hint survive restarts so an
+        # offline row still tells the supervisor WHY the session died.
+        "error_class": meta.get("error_class") or "",
+        "retry_after": meta.get("retry_after"),
+        # Symmetric with the durable snapshot: name the provider the
+        # failure streak was recorded under.
+        "pi_model": str(meta.get("pi_model") or ""),
+        # U9: persisted turn-liveness evidence only. turn_running and
+        # inactive_for_s are live-only — with no client or thread to ask,
+        # deriving them offline would fabricate liveness.
+        "turn_started_at": meta.get("turn_started_at"),
+        "last_turn_triage": meta.get("last_turn_triage") or None,
+        # Recovery lineage survives restarts; the chain root is immutable
+        # across incarnations.
+        "recovery_of_native_id": meta.get("recovery_of_native_id") or None,
+        "recovery_reason": meta.get("recovery_reason") or None,
+        "recovered_at": meta.get("recovered_at") or None,
     }
     if note:
         out["note"] = note
@@ -690,40 +927,209 @@ def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
     return changed
 
 
+def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
+    """(error_class, retry_after) for a failed delegate turn.
+
+    Typed attributes win: ``DelegateTurnStalled`` already derived its class
+    from streamed evidence at the client. Anything else falls back to
+    classifying the exception text, so plain failures still land in the
+    shared vocabulary.
+    """
+    typed = str(getattr(exc, "error_class", "") or "").strip()
+    if typed:
+        return typed, getattr(exc, "retry_after", None)
+    error_class, _signal, retry_after = classify_delegate_failure(
+        f"{type(exc).__name__}: {exc}",
+        zero_activity=bool(getattr(exc, "zero_activity", False)),
+    )
+    return error_class, retry_after
+
+
+def _circuit_open_error(backend: str, model: str, ledger=None) -> Optional[str]:
+    """Dispatch-time fail-fast guard (A2 breaker): ``None`` lets the turn
+    through; a message refuses it while the (backend, model) provider circuit
+    is open. Retrying a confirmed-dead provider multiplies wall-clock damage
+    (the A4 storm re-entered the same outage for 30-76 minutes per attempt).
+    Fail-open: any internal error lets the dispatch through — the breaker
+    must never become a new way to fail closed.
+
+    ``ledger`` pins the dispatching profile's registry: the turn thread does
+    not inherit the home-override contextvar, so worker calls pass the ledger
+    captured at dispatch time; parent-side gates may omit it and resolve at
+    call time.
+    """
+    try:
+        circuit = (ledger or get_delegate_health_ledger()).check((backend, model))
+    except Exception:
+        logger.debug("delegate provider gate failed open", exc_info=True)
+        return None
+    if circuit is None:
+        return None
+    return (
+        "delegate provider unavailable (error_class=provider_unavailable): "
+        f"{backend}/{model or 'default'} circuit open after "
+        f"{circuit.consecutive} provider-class failures "
+        f"(last: {circuit.last_error_class}); "
+        f"retry after {circuit.retry_after_s:.0f}s"
+    )
+
+
+def _ledger_record_success(key: tuple[str, str], ledger=None) -> None:
+    # ``ledger`` pins the dispatching profile's registry for turn-thread calls
+    # (plain threads do not inherit the home-override contextvar).
+    try:
+        (ledger or get_delegate_health_ledger()).record_success(key)
+    except Exception:
+        logger.debug("delegate health record_success failed (fail-open)", exc_info=True)
+
+
+def _ledger_record_failure(key: tuple[str, str], error_class: str, ledger=None) -> None:
+    # ``ledger`` pins the dispatching profile's registry for turn-thread calls
+    # (plain threads do not inherit the home-override contextvar).
+    # Forward EVERY terminal class, provider or not (R-fold): the ledger
+    # itself decides provider classes escalate the breaker while
+    # non-provider classes merely resolve an in-flight half-open probe (a
+    # probe turn that dies agent_stall/transport must not wedge the key
+    # closed).
+    try:
+        (ledger or get_delegate_health_ledger()).record_failure(key, error_class)
+    except Exception:
+        logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
+
+
+def _observer_loop(record: Dict[str, Any]) -> None:
+    """Rate-capped in-turn durable refresh — the liveness-blindness fix.
+
+    While the turn is open, persist metadata whenever the client's activity
+    signal has advanced at least ``_ACTIVITY_REFRESH_MIN_S`` past the last
+    persisted watermark, so an outside reader of the durable file sees a live
+    "running" session with a fresh activity timestamp instead of the pre-turn
+    snapshot. Never mutates session state: every state transition notifies
+    ``_SESSION_CONDITION``, and the loop re-checks status under the lock on
+    every wake, so it exits as soon as the turn leaves "running".
+    """
+    while True:
+        with _SESSION_CONDITION:
+            if record.get("status") != "running":
+                return
+            _SESSION_CONDITION.wait(timeout=_OBSERVER_POLL_S)
+            if record.get("status") != "running":
+                return
+            last_persisted = record.get("last_persisted_activity")
+        activity = _client_last_activity_at(record.get("client"))
+        if activity is None:
+            # No observable progress to advertise yet; the client's own stall
+            # watchdog owns the no-progress case.
+            continue
+        if (
+            last_persisted is None
+            or activity - float(last_persisted) >= _ACTIVITY_REFRESH_MIN_S
+        ):
+            _persist_metadata(record)
+
+
 def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
+    ledger_key = (
+        str(record.get("backend") or "pi"),
+        str(record.get("model") or ""),
+    )
     with _SESSION_CONDITION:
         if record.get("status") == "closed":
             return
         record["error"] = ""
         _transition_status_locked(record, "running")
+    observer = threading.Thread(
+        target=_observer_loop,
+        args=(record,),
+        name=f"delegate-{record['session_id'][:8]}-obs",
+        # Daemon: the observer only refreshes a file; it must never keep the
+        # interpreter alive (the turn thread itself is deliberately not a
+        # daemon so terminal state is persisted).
+        daemon=True,
+    )
+    observer.start()
     try:
         result = client.run_session_prompt(message, timeout_seconds=timeout)
         state = result.get("state") if isinstance(result, dict) else {}
         with _SESSION_CONDITION:
             record["last_result"] = result
+            # Bank durable forward-progression evidence BEFORE persisting so
+            # the terminal metadata file carries it.
+            _bank_durable_progress(record, "completed", result)
             record["native_session_id"] = (
                 (state.get("sessionId") if isinstance(state, dict) else None)
                 or record.get("native_session_id")
                 or record["session_id"]
             )
+            # A completed turn clears the failure streak.
+            record["error_class"] = ""
+            record["retry_after"] = None
+            record["consecutive_failures"] = 0
             if record.get("status") != "closed":
                 _transition_status_locked(record, "idle")
             else:
                 record["updated_at"] = time.time()
         _persist_metadata(record)
+        # A healthy turn closes any open provider circuit for this
+        # (backend, model) pair — providers recover, and a stale open
+        # circuit would fail-fast future turns against a working provider.
+        _ledger_record_success(ledger_key, ledger=record.get("_scope_ledger"))
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
+        error_class, retry_after = _classify_turn_exception(exc)
         with _SESSION_CONDITION:
+            # Bank progression evidence (outcome=error) BEFORE persisting:
+            # the metadata file is the evidence the replacement supervisor
+            # will act on. A failed turn is durable activity too.
+            _bank_durable_progress(record, "error")
             record["error"] = _bounded(exc, 2000)
+            record["error_class"] = error_class
+            record["retry_after"] = retry_after
+            record["consecutive_failures"] = (
+                int(record.get("consecutive_failures") or 0) + 1
+            )
+            # Stall-time liveness triage rides the typed exception as a
+            # dict; bank it verbatim. A failure without one (non-stall
+            # errors) keeps any previously banked evidence — the most
+            # recent probe remains the best answer to "was the child
+            # actually wedged?".
+            triage = getattr(exc, "liveness_triage", None)
+            if triage:
+                record["last_turn_triage"] = triage
             if record.get("status") != "closed":
                 _transition_status_locked(record, "error")
             else:
                 record["updated_at"] = time.time()
         _persist_metadata(record)
+        # Provider-class failures feed the A2 breaker for this exact
+        # (backend, model) pair; everything else (agent_stall, transport
+        # noise, tool bugs) does NOT — a wedged delegate must not shadow a
+        # healthy provider on the same key.
+        _ledger_record_failure(
+            ledger_key, error_class, ledger=record.get("_scope_ledger")
+        )
+    finally:
+        # Both exit paths have left "running" (idle/error, or "closed" keeps
+        # its own terminal state), and the transition already notified the
+        # condition; notify once more so an observer that missed it wakes now.
+        # Join to keep any last in-flight refresh ordered behind the terminal
+        # persist before this thread reports the turn finished.
+        with _SESSION_CONDITION:
+            _SESSION_CONDITION.notify_all()
+        observer.join(timeout=2.0)
 
 
 def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
+    # Pin the dispatching profile's scope onto the record BEFORE the thread
+    # hop: plain threading.Thread does not inherit contextvars, so the turn
+    # and observer threads would otherwise resolve the launch/default home
+    # (``get_hermes_home()`` and the per-home ledger registry) and write
+    # ledger + durable metadata cross-profile under multiplex. Every worker
+    # side-effect that touches profile state reads these pins instead of
+    # re-resolving.
+    record["_scope_ledger"] = get_delegate_health_ledger()
+    record["_scope_store_root"] = _session_store_root()
     thread = threading.Thread(
         target=_run_turn,
         args=(record, message, timeout),
@@ -736,6 +1142,10 @@ def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None
     )
     with _SESSION_CONDITION:
         record["thread"] = thread
+        # U9: anchor when THIS turn began. Set under the lock together with
+        # the status flip so a racing status read never sees running without
+        # the anchor.
+        record["turn_started_at"] = time.time()
         _transition_status_locked(record, "running")
     thread.start()
 
@@ -793,6 +1203,14 @@ def delegate_session(
     # A healthy delegated turn may run for arbitrarily long as long as the
     # backend continues to produce observable progress.
     effective_timeout = float(max(10, int(timeout or 900)))
+    # Staged handshake budget (A4 recurrence, finding 567c6f06838d): every
+    # native RPC handshake below carries (ceiling, ladder). Stage 1 keeps
+    # the historical 30s wedge-fail probe; later stages let a slow-but-alive
+    # child answer under host load instead of being misclassified as dead —
+    # while the total stays hard-capped so staging can never hang a
+    # delegate slot.
+    handshake_ceiling = min(BOOTSTRAP_TOTAL_CAP, effective_timeout)
+    handshake_stages = bootstrap_stage_budgets(handshake_ceiling)
     try:
         effective_wait = max(
             0.0, min(float(120 if wait_seconds is None else wait_seconds), 3600.0)
@@ -872,6 +1290,27 @@ def delegate_session(
                         # no-op: silently dropping the goal made every later
                         # phase of a multi-turn delegation appear to succeed
                         # while no work ran (conductor v5/v6 cycles).
+                        # U7 running-guard: refuse a SECOND concurrent turn.
+                        # send/steer already guard this seam; this branch
+                        # didn't, so a supervisor retry racing its own
+                        # in-flight turn stacked two run_session_prompt calls
+                        # on one client — the concurrent-dispatch wedge of the
+                        # A4 continuity storms. Guard before the provider
+                        # gate: session state is the immediate truth, and a
+                        # busy session cannot take a new turn even on a
+                        # healthy provider.
+                        if existing.get("status") == "running":
+                            return tool_error(
+                                "Delegate session is currently running "
+                                "(error_class=session_busy). Use action='steer' "
+                                "to redirect it, or wait for idle."
+                            )
+                        gate_error = _circuit_open_error(
+                            str(existing.get("backend") or "pi"),
+                            str(existing.get("model") or ""),
+                        )
+                        if gate_error is not None:
+                            return tool_error(gate_error)
                         _dispatch_turn(
                             existing, _initial_prompt(goal, context), effective_timeout
                         )
@@ -920,6 +1359,7 @@ def delegate_session(
                 )
 
         client_kwargs: dict[str, Any] = {}
+        model_arg = ""
         if backend_name == "pi":
             # Without an explicit model pi falls back to its built-in
             # Anthropic model and dies with 401 on keyless installs.
@@ -929,6 +1369,12 @@ def delegate_session(
             model_arg = explicit_model or _pi_model_for_parent(parent_agent)
             if model_arg:
                 client_kwargs["args"] = ["--model", model_arg]
+        # A2 gate, site 1 — before spawning the child: an open provider
+        # circuit refuses the turn up front instead of letting it wedge for
+        # the full stall window inside the doomed process.
+        gate_error = _circuit_open_error(backend_name, model_arg)
+        if gate_error is not None:
+            return tool_error(gate_error)
         def _make_client(native_session_id: str):
             created = client_class(
                 persistent_session=True,
@@ -943,9 +1389,19 @@ def delegate_session(
             return created
 
         requested_native = native_hint or handle
+        # Recovery lineage: carried from the prior incarnation when it
+        # exists; rewritten below only when THIS bootstrap mints a fresh
+        # -recovery- native session. The chain ROOT (the first native id
+        # this handle ever bound) is immutable across re-mints; reason and
+        # timestamp always name the LATEST mint.
+        recovery_of_native_id = (saved or {}).get("recovery_of_native_id") or None
+        recovery_reason = (saved or {}).get("recovery_reason") or None
+        recovered_at = (saved or {}).get("recovered_at") or None
         client = _make_client(requested_native)
         try:
-            state = client.start(timeout=min(30.0, effective_timeout))
+            state = client.start(
+                timeout=handshake_ceiling, stages=handshake_stages
+            )
         except Exception as exc:  # noqa: BLE001
             try:
                 client.close()
@@ -957,40 +1413,92 @@ def delegate_session(
                 )
 
             # A durable Pi handle may outlive a native Pi RPC session that
-            # aborted mid-turn. Reopening the same native id can then wedge
-            # forever at the initial get_state handshake. Keep the Conductor
+            # aborted mid-turn. Reopening the same native id can then fail or
+            # wedge at the initial get_state handshake. Keep the Conductor
             # binding/backend stable, but mint a fresh *native Pi* session and
             # continue from the durable work-order/worktree. This is Pi
             # recovery, never backend failover.
             if backend_name == "pi" and native_hint:
-                recovery_native = (
-                    f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
-                )
-                logger.warning(
-                    "Pi native session %s failed bootstrap; retrying durable "
-                    "delegate handle %s with fresh native session %s: %s",
-                    native_hint,
-                    handle,
-                    recovery_native,
-                    _bounded(exc, 400),
-                )
-                client = _make_client(recovery_native)
+                # Recovery-lineage fidelity: retry the SAME bound native id
+                # once — a fresh client on that id, still bounded by the
+                # same 30s start handshake — before minting -recovery-. A
+                # single failed reopen is usually a dead child process, not
+                # a lost session; minting on first failure silently
+                # substituted the delegated identity every time, and that
+                # unreported identity churn is what the A4 continuity loop
+                # fed on. Substitution now happens only after the bound id
+                # is confirmed unopenable, and is REPORTED via lineage.
+                # De-synchronize the re-spawn herd (A4): jitter ONLY at the
+                # spawn boundary — a new Node process adds load; waiting
+                # longer inside a live session adds none.
+                time.sleep(respawn_pause(_RESPAWN_RNG))
+                retry_client = _make_client(native_hint)
                 try:
-                    state = client.start(timeout=min(30.0, effective_timeout))
-                except Exception as recovery_exc:  # noqa: BLE001
+                    state = retry_client.start(
+                        timeout=handshake_ceiling, stages=handshake_stages
+                    )
+                    client = retry_client
+                    logger.warning(
+                        "Pi native session %s bootstrap failed once; "
+                        "same-id retry succeeded for delegate handle %s: %s",
+                        native_hint,
+                        handle,
+                        _bounded(exc, 400),
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
                     try:
-                        client.close()
+                        retry_client.close()
                     except Exception:
                         logger.debug(
-                            "Could not close failed Pi recovery delegate client",
+                            "Could not close failed Pi same-id retry client",
                             exc_info=True,
                         )
-                    return tool_error(
-                        "Could not start pi delegate session after fresh-native "
-                        f"recovery: {_bounded(recovery_exc, 1000)} "
-                        f"(original: {_bounded(exc, 400)})"
+                    recovery_native = (
+                        f"{handle}-recovery-{uuid.uuid4().hex[:12]}"
                     )
+                    logger.warning(
+                        "Pi native session %s failed bootstrap and same-id "
+                        "retry; retrying durable delegate handle %s with "
+                        "fresh native session %s: %s",
+                        native_hint,
+                        handle,
+                        recovery_native,
+                        _bounded(retry_exc, 400),
+                    )
+                    time.sleep(respawn_pause(_RESPAWN_RNG))
+                    client = _make_client(recovery_native)
+                    try:
+                        state = client.start(
+                            timeout=handshake_ceiling, stages=handshake_stages
+                        )
+                    except Exception as recovery_exc:  # noqa: BLE001
+                        try:
+                            client.close()
+                        except Exception:
+                            logger.debug(
+                                "Could not close failed Pi recovery delegate client",
+                                exc_info=True,
+                            )
+                        return tool_error(
+                            "Could not start pi delegate session after fresh-native "
+                            f"recovery: {_bounded(recovery_exc, 1000)} "
+                            f"(same-id retry: {_bounded(retry_exc, 400)}; "
+                            f"original: {_bounded(exc, 400)})"
+                        )
+                    # Lineage lands only once the minted session actually
+                    # opened; it describes why substitution happened.
+                    recovery_of_native_id = recovery_of_native_id or native_hint
+                    recovery_reason = _bounded(retry_exc, 400)
+                    recovered_at = time.time()
             else:
+                # The gate above may have granted this (backend, model)'s
+                # half-open probe; a client that never started consumed it
+                # without a provider signal, so resolve it inconclusive now
+                # (R-fold) instead of holding the key closed for a full
+                # cooldown. Parent boundary: call-time ledger resolution.
+                _ledger_record_failure(
+                    (backend_name, model_arg), "client_start_failed"
+                )
                 return tool_error(
                     f"Could not start {backend_name} delegate session: {_bounded(exc, 1000)}"
                 )
@@ -999,6 +1507,7 @@ def delegate_session(
         record: Dict[str, Any] = {
             "session_id": handle,
             "backend": backend_name,
+            "model": model_arg,
             "native_session_id": native_id,
             "owner": owner,
             "owner_scope": _scope_for_workspace(cwd),
@@ -1009,8 +1518,25 @@ def delegate_session(
             "updated_at": now,
             "last_result": None,
             "error": "",
+            # Failure evidence survives supervisor replacement / gateway
+            # restart: a resumed session keeps its streak until a turn
+            # completes successfully.
+            "error_class": str((saved or {}).get("error_class") or ""),
+            "retry_after": (saved or {}).get("retry_after"),
+            "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
+            # U9: a fresh incarnation has no live turn, so turn_started_at
+            # resets; a banked stall triage from the prior incarnation is
+            # evidence the resumed supervisor should see, like the streak.
+            "turn_started_at": None,
+            "last_turn_triage": (saved or {}).get("last_turn_triage") or None,
+            # Recovery lineage threaded from the bootstrap above (chain root
+            # from the prior incarnation, or set by this incarnation's mint).
+            "recovery_of_native_id": recovery_of_native_id,
+            "recovery_reason": recovery_reason,
+            "recovered_at": recovered_at,
             "thread": None,
         }
+        _restore_durable_progress(record, saved or {})
         with _SESSION_LOCK:
             _SESSIONS[handle] = record
         _persist_metadata(record)
@@ -1103,7 +1629,9 @@ def delegate_session(
         if dead_error:
             return tool_error(dead_error)
         try:
-            messages = client.get_messages(timeout=min(30.0, effective_timeout))
+            messages = client.get_messages(
+                timeout=handshake_ceiling, stages=handshake_stages
+            )
         except Exception as exc:  # noqa: BLE001
             return tool_error(
                 f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}"
@@ -1150,6 +1678,13 @@ def delegate_session(
                 return tool_error(
                     "Delegate session is closed. Use action='resume' to reopen it."
                 )
+        # A2 gate, site 3: send dispatches a fresh turn, so an open provider
+        # circuit refuses it instead of wedging a new stall window.
+        gate_error = _circuit_open_error(
+            session_backend, str(record.get("model") or "")
+        )
+        if gate_error is not None:
+            return tool_error(gate_error)
         _dispatch_turn(record, text, effective_timeout)
         return json.dumps(
             {
@@ -1177,6 +1712,13 @@ def delegate_session(
                 # Auto-degrade: the turn already ended (or the backend has no
                 # live steer), so route the message through the send path so
                 # the course-correction is not lost to a race window.
+                # A2 gate, site 4: the degraded path dispatches a fresh turn,
+                # so it gets the same fail-fast as send.
+                gate_error = _circuit_open_error(
+                    session_backend, str(record.get("model") or "")
+                )
+                if gate_error is not None:
+                    return tool_error(gate_error)
                 _dispatch_turn(record, text, effective_timeout)
                 return json.dumps(
                     {
@@ -1188,7 +1730,9 @@ def delegate_session(
                     ensure_ascii=False,
                 )
         try:
-            response = client.steer(text, timeout=min(30.0, effective_timeout))
+            response = client.steer(
+                text, timeout=handshake_ceiling, stages=handshake_stages
+            )
         except Exception as exc:  # noqa: BLE001
             return tool_error(
                 f"Could not steer {session_backend} session: {_bounded(exc, 1000)}"

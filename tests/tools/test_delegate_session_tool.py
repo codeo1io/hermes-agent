@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import stat
+import sys
 import threading
 import time
 
 import pytest
 
 import tools.delegate_session_tool as ds
+from agent.delegate_errors import DelegateTurnStalled
+from agent.delegate_health import reset_delegate_health_ledger
 
 
 class Parent:
@@ -39,6 +44,9 @@ class FakePiClient:
         self.messages = []
         self.steers = []
         self.turn_timeouts = []
+        self.start_budgets = []
+        self.get_messages_budgets = []
+        self.steer_budgets = []
         self.started_turn = threading.Event()
         self.release_turn = threading.Event()
         self.block_turns = False
@@ -46,7 +54,10 @@ class FakePiClient:
         self._proc = None
         self.__class__.instances.append(self)
 
-    def start(self, *, timeout=30.0):
+    def start(self, *, timeout=30.0, stages=None):
+        self.start_budgets.append(
+            (timeout, tuple(stages) if stages is not None else None)
+        )
         return {
             "sessionId": self.session_id,
             "sessionFile": f"/tmp/{self.session_id}.jsonl",
@@ -73,10 +84,16 @@ class FakePiClient:
             },
         }
 
-    def get_messages(self, *, timeout=30.0):
+    def get_messages(self, *, timeout=30.0, stages=None):
+        self.get_messages_budgets.append(
+            (timeout, tuple(stages) if stages is not None else None)
+        )
         return [{"role": "user", "content": m} for m in self.messages]
 
-    def steer(self, message, *, timeout=30.0):
+    def steer(self, message, *, timeout=30.0, stages=None):
+        self.steer_budgets.append(
+            (timeout, tuple(stages) if stages is not None else None)
+        )
         self.steers.append(message)
         return {"success": True, "command": "steer"}
 
@@ -91,6 +108,10 @@ class FakePiClient:
 
 @pytest.fixture(autouse=True)
 def clean_sessions(monkeypatch, tmp_path):
+    # T4: every test starts with a fresh provider breaker — turns now record
+    # into the process-wide ledger, and a circuit opened by one test must not
+    # gate dispatches in the next.
+    reset_delegate_health_ledger()
     with ds._SESSION_LOCK:
         for record in ds._SESSIONS.values():
             try:
@@ -337,10 +358,10 @@ def test_pi_bootstrap_failure_recovers_with_fresh_native_session(monkeypatch):
     class BootstrapFailingPi(FakePiClient):
         instances = []
 
-        def start(self, *, timeout=30.0):
+        def start(self, *, timeout=30.0, stages=None):
             if self.session_id == sid:
                 raise TimeoutError("pi did not answer command 'get_state'")
-            return super().start(timeout=timeout)
+            return super().start(timeout=timeout, stages=stages)
 
     monkeypatch.setattr(ds, "PiRPCClient", BootstrapFailingPi)
 
@@ -357,10 +378,17 @@ def test_pi_bootstrap_failure_recovers_with_fresh_native_session(monkeypatch):
     assert resumed["session_id"] == sid
     assert resumed["native_session_id"] != sid
     assert resumed["native_session_id"].startswith(f"{sid}-recovery-")
-    assert len(BootstrapFailingPi.instances) == 2
+    # One same-id retry before the mint (recovery-lineage fidelity): the
+    # bound id is opened twice, then a fresh -recovery- native session.
+    assert len(BootstrapFailingPi.instances) == 3
     assert BootstrapFailingPi.instances[0].session_id == sid
-    assert BootstrapFailingPi.instances[1].session_id == resumed["native_session_id"]
+    assert BootstrapFailingPi.instances[1].session_id == sid
+    assert BootstrapFailingPi.instances[2].session_id == resumed["native_session_id"]
     assert ds._load_metadata(sid)["native_session_id"] == resumed["native_session_id"]
+    # The substitution is REPORTED, not silent.
+    assert resumed["recovery_of_native_id"] == sid
+    assert resumed["recovery_reason"]
+    assert isinstance(resumed["recovered_at"], float)
 
 
 def test_steer_on_idle_session_degrades_to_send_instead_of_erroring():
@@ -621,7 +649,7 @@ def test_legacy_v2_metadata_migrates_on_same_workspace_resume(tmp_path, monkeypa
     assert resumed["session_id"] == sid
     assert FakePiClient.instances[-1].session_id == sid
     upgraded = json.loads(ds._metadata_path(sid).read_text(encoding="utf-8"))
-    assert upgraded["version"] == 3
+    assert upgraded["version"] == 4
     assert upgraded["owner_scope"] == ds._scope_for_workspace(workspace)
 
 
@@ -924,7 +952,7 @@ def test_metadata_v2_roundtrip_reopens_correct_backend(monkeypatch, tmp_path):
     stale["client"].close()
 
     meta = ds._load_metadata(sid)
-    assert meta["version"] == 3
+    assert meta["version"] == 4
     assert meta["backend"] == "opencode"
     assert meta["native_session_id"] == native
 
@@ -963,7 +991,277 @@ def test_v1_metadata_loads_as_pi(monkeypatch, tmp_path):
     # pi session id is reused as the native session on resume
     assert resumed["native_session_id"] == "pi_native_123"
     # re-persisted using the current metadata schema
-    assert ds._load_metadata(sid)["version"] == 3
+    assert ds._load_metadata(sid)["version"] == 4
+
+
+# ------------------------- metadata v4: failure evidence (A4 remediation)
+# A failed delegate turn must persist WHY it died (class + provider retry
+# hint + streak) so a restarted supervisor resumes with the evidence instead
+# of re-entering the same dead provider blind.
+
+
+def wait_for_metadata(
+    sid: str, *, error_class: str | None, timeout: float = 2.0
+) -> dict:
+    """Poll durable metadata until the persisted outcome matches.
+
+    `wait_for_status` observes the in-memory flip, which precedes the
+    `_persist_metadata` file write; polling the file itself closes that gap.
+    """
+    deadline = time.time() + timeout
+    meta: dict = {}
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid)
+        if error_class is not None and meta.get("error_class") == error_class:
+            return meta
+        time.sleep(0.02)
+    return meta
+
+
+def test_failed_turn_persists_v4_failure_evidence():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    def rate_limited_turn(message, *, timeout_seconds=900.0):
+        raise RuntimeError(
+            "Rate limit: disabling model glm-4.6 for 1800 seconds (cooling down)"
+        )
+
+    client.run_session_prompt = rate_limited_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    meta = wait_for_metadata(sid, error_class="rate_limit")
+    assert meta["status"] == "error"
+    assert meta["version"] == 4
+    assert meta["error_class"] == "rate_limit"
+    assert meta["retry_after"] == 1800.0
+    assert meta["consecutive_failures"] == 1
+
+    # The class survives registry loss: offline rows still say WHY.
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid, None)
+    rows = payload(
+        ds.delegate_session(action="list", parent_agent=parent)
+    )["sessions"]
+    row = next(r for r in rows if r["session_id"] == sid)
+    assert row["status"] == "offline"
+    assert row["error_class"] == "rate_limit"
+    assert row["retry_after"] == 1800.0
+
+
+def test_typed_stall_turn_keeps_class_and_streak_survives_restart():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    def stalled_turn(message, *, timeout_seconds=900.0):
+        raise DelegateTurnStalled(
+            "pi session turn timed out: stalled after 1800s "
+            "without observable progress",
+            error_class="provider_stall",
+            zero_activity=True,
+        )
+
+    client.run_session_prompt = stalled_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    meta = wait_for_metadata(sid, error_class="provider_stall")
+    assert meta["retry_after"] is None
+    assert meta["consecutive_failures"] == 1
+
+    # Supervisor replacement: the resumed session inherits the durable streak
+    # until a turn completes successfully.
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+    assert resumed["success"] is True
+    with ds._SESSION_LOCK:
+        record = ds._SESSIONS[sid]
+        assert record["consecutive_failures"] == 1
+        assert record["error_class"] == "provider_stall"
+
+    # The resumed fake client is unpatched, so the next turn succeeds and
+    # clears the streak. The resumed session starts idle, so poll the durable
+    # outcome (not a status transition) for the clear.
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid)
+        if meta["error_class"] == "" and meta["consecutive_failures"] == 0:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("resumed successful turn did not clear the failure streak")
+    assert meta["status"] == "idle"
+    assert meta["retry_after"] is None
+
+
+def test_v4_metadata_with_unknown_fields_round_trips(tmp_path):
+    sid = "v4-forward-compatible"
+    data = {
+        "version": 4,
+        "backend": "pi",
+        "session_id": sid,
+        "native_session_id": sid,
+        "pi_session_id": sid,
+        "owner": "legacy-supervisor",
+        "cwd": str(tmp_path),
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "status": "error",
+        "error_class": "rate_limit",
+        "retry_after": 1800.0,
+        "last_turn_activity_at": 1.0,
+        "consecutive_failures": 2,
+        "future_field": {"anything": True},
+    }
+    path = ds._metadata_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    meta = ds._load_metadata(sid)
+    # Tolerant load: newer unknown fields pass through untouched.
+    assert meta["version"] == 4
+    assert meta["error_class"] == "rate_limit"
+    assert meta["future_field"] == {"anything": True}
+
+
+def test_failed_turn_persists_union_error_text_and_pi_model(monkeypatch):
+    # U5 (D5-amendment): the durable v4 snapshot unions the parallel
+    # campaigns' field sets — bounded ``error`` prose plus the ``pi_model``
+    # the failure streak was counted under — so a restarted supervisor (or
+    # the sibling campaign's loader) sees why AND on which provider the
+    # session died, without replaying logs.
+    monkeypatch.setenv("HERMES_PI_MODEL", "union-test/model-x")
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    def rate_limited_turn(message, *, timeout_seconds=900.0):
+        raise RuntimeError(
+            "Rate limit: disabling model glm-4.6 for 1800 seconds (cooling down)"
+        )
+
+    client.run_session_prompt = rate_limited_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    meta = wait_for_metadata(sid, error_class="rate_limit")
+    assert meta["pi_model"] == "union-test/model-x"
+    assert "Rate limit: disabling model glm-4.6" in meta["error"]
+
+    # Offline rows stay symmetric with the snapshot's evidence fields.
+    with ds._SESSION_LOCK:
+        ds._SESSIONS.pop(sid, None)
+    rows = payload(
+        ds.delegate_session(action="list", parent_agent=parent)
+    )["sessions"]
+    row = next(r for r in rows if r["session_id"] == sid)
+    assert row["pi_model"] == "union-test/model-x"
+    assert "Rate limit: disabling model glm-4.6" in row["error"]
+
+
+def test_v4_error_field_is_bounded_and_clears_on_success(monkeypatch):
+    monkeypatch.setenv("HERMES_PI_MODEL", "union-bounds/model")
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    def exploding_turn(message, *, timeout_seconds=900.0):
+        raise RuntimeError("Rate limit: cooling down " + "x" * 5000)
+
+    client.run_session_prompt = exploding_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="go", parent_agent=parent
+        )
+    )
+    meta = wait_for_metadata(sid, error_class="rate_limit")
+    assert 0 < len(meta["error"]) <= 2000
+    assert meta["error"].endswith("...")
+
+    # A later successful turn clears the prose along with the class/streak.
+    def healthy_turn(message, *, timeout_seconds=900.0):
+        return {
+            "success": True,
+            "text": "done",
+            "reasoning": "",
+            "duration_s": 0.01,
+            "state": {
+                "sessionId": client.session_id,
+                "messageCount": 1,
+                "isStreaming": False,
+            },
+        }
+
+    client.run_session_prompt = healthy_turn
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="again", parent_agent=parent
+        )
+    )
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid)
+        if meta.get("error_class") == "":
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail("successful turn did not clear the failure evidence")
+    assert meta["error"] is None
+    assert meta["pi_model"] == "union-bounds/model"
+
+
+def test_v4_sibling_schema_fields_load_without_retry_after(tmp_path):
+    # The sibling campaign's v4 snapshot claims the same version with a
+    # different field emphasis (``error``/``pi_model``, no ``retry_after``).
+    # Both loaders stay field-tolerant until the schemas reconcile.
+    sid = "v4-sibling-schema"
+    data = {
+        "version": 4,
+        "backend": "pi",
+        "session_id": sid,
+        "native_session_id": sid,
+        "pi_session_id": sid,
+        "owner": "legacy-supervisor",
+        "cwd": str(tmp_path),
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "status": "error",
+        "error": "Rate limit: cooling down",
+        "error_class": "rate_limit",
+        "pi_model": "custom/glm-4.6",
+        "consecutive_failures": 2,
+        "last_turn_activity_at": 2.0,
+    }
+    path = ds._metadata_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    meta = ds._load_metadata(sid)
+    assert meta["pi_model"] == "custom/glm-4.6"
+    assert meta["error"].startswith("Rate limit")
+    assert meta.get("retry_after") is None
 
 
 def test_list_includes_backend_field(monkeypatch):
@@ -1161,3 +1459,1037 @@ def test_dispatch_turn_uses_non_daemon_thread(monkeypatch):
     assert captured["started"] is True
     assert captured["daemon"] is False
     assert record["status"] == "running"
+
+
+# --- T4 (D3/D4): provider circuit gates + ledger recording -----------------
+
+
+class RateLimitPiClient(FakePiClient):
+    """Every turn fails with a typed provider-class stall (rate_limit)."""
+
+    def run_session_prompt(self, message, *, timeout_seconds=900.0):
+        self.messages.append(message)
+        self.last_turn_activity_at = time.time()
+        raise DelegateTurnStalled(
+            "pi session turn timed out: stalled after 900s without observable progress",
+            error_class="rate_limit",
+            provider_signal="Rate limit: disabling model glm-4.6 for 1800 seconds",
+            retry_after=1800.0,
+        )
+
+
+def _open_circuit(backend: str = "pi", model: str = "glm-4.6") -> None:
+    ledger = reset_delegate_health_ledger()
+    for _ in range(3):
+        ledger.record_failure((backend, model), "rate_limit")
+
+
+def test_open_circuit_refuses_fresh_dispatch_before_spawn(monkeypatch, tmp_path):
+    """Gate site 1: an open (backend, model) circuit refuses the turn before
+    any child process is spawned — no client, no stall window, structured
+    error with the retry hint."""
+    _open_circuit()
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+    parent = Parent()
+
+    result = payload(
+        ds.delegate_session(action="start", parent_agent=parent, goal="do work")
+    )
+
+    assert "error" in result  # tool_error body, not a success payload
+    assert "circuit open" in result["error"]
+    assert "error_class=provider_unavailable" in result["error"]
+    assert "retry after" in result["error"]
+    assert FakePiClient.instances == []  # refused pre-bootstrap, nothing spawned
+
+
+def test_open_circuit_refuses_followup_send_and_degraded_steer(monkeypatch, tmp_path):
+    """Gate sites 2-4: an open circuit refuses live-session follow-ups (start
+    with goal), sends, and steers that would degrade to a fresh dispatch."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    model = str(ds._SESSIONS[sid]["model"])
+    _open_circuit("pi", model)
+
+    send = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="again", parent_agent=parent
+        )
+    )
+    assert "error" in send
+    assert "circuit open" in send["error"]
+
+    followup = payload(
+        ds.delegate_session(
+            action="start", session_id=sid, parent_agent=parent, goal="next phase"
+        )
+    )
+    assert "error" in followup
+    assert "circuit open" in followup["error"]
+
+    steer = payload(
+        ds.delegate_session(
+            action="steer", session_id=sid, message="redirect", parent_agent=parent
+        )
+    )
+    assert "error" in steer
+    assert "circuit open" in steer["error"]
+
+    # No turn was dispatched through any of the three paths.
+    assert ds._SESSIONS[sid]["client"].messages == []
+
+
+def test_provider_failures_from_turns_open_the_circuit(monkeypatch, tmp_path):
+    """Recording (A2): three provider-class turn failures on the same
+    (backend, model) key open the circuit; the fourth dispatch is refused
+    without ever reaching the client, and a healthy turn closes it again."""
+    monkeypatch.setattr(ds, "PiRPCClient", RateLimitPiClient)
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    for expected_streak in (1, 2, 3):
+        payload(
+            ds.delegate_session(
+                action="send", session_id=sid, message=f"go {expected_streak}",
+                parent_agent=parent,
+            )
+        )
+        summary = wait_for_status(parent, sid, "error")
+        assert summary["error_class"] == "rate_limit"
+        assert summary["retry_after"] == 1800.0
+        assert summary["consecutive_failures"] == expected_streak
+
+    # record_failure lands right after the last status transition (same
+    # pattern as record_success) — wait for the breaker to actually open
+    # before probing the gate: the 3rd failure must be durable when dispatch
+    # #4 arrives, or the gate would still see only two.
+    ledger = ds.get_delegate_health_ledger()
+    key = ("pi", str(ds._SESSIONS[sid]["model"]))
+    deadline = time.time() + 2.0
+    circuit = ledger.check(key)
+    while circuit is None and time.time() < deadline:
+        time.sleep(0.01)
+        circuit = ledger.check(key)
+    assert circuit is not None  # 3 provider failures opened it
+
+    fourth = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="doomed", parent_agent=parent
+        )
+    )
+    assert "error" in fourth
+    assert "circuit open" in fourth["error"]
+    # State-level: the circuit is open for this exact key (half-open probing
+    # and success-closing are covered by the ledger's own unit tests).
+    assert circuit.last_error_class == "rate_limit"
+
+
+@pytest.mark.parametrize(
+    "error_class", ["agent_stall", "resource_exhausted", "unknown"]
+)
+def test_non_provider_failures_do_not_open_the_circuit(error_class, monkeypatch, tmp_path):
+    """Non-provider classes are not the provider's fault: any number of them
+    must not stop delegate traffic on that key (fail-open, no shadow gating).
+    agent_stall = the delegate wedged; resource_exhausted = the local host;
+    unknown = unclassified noise."""
+
+    class StallingPiClient(FakePiClient):
+        def run_session_prompt(self, message, *, timeout_seconds=900.0):
+            self.messages.append(message)
+            raise DelegateTurnStalled(
+                "pi session turn timed out: stalled after 900s without observable progress",
+                error_class=error_class,
+            )
+
+    monkeypatch.setattr(ds, "PiRPCClient", StallingPiClient)
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+
+    for i in range(4):
+        payload(
+            ds.delegate_session(
+                action="send", session_id=sid, message=f"go {i}", parent_agent=parent
+            )
+        )
+        wait_for_status(parent, sid, "error")
+
+    accepted = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="still trying", parent_agent=parent
+        )
+    )
+    assert accepted["success"] is True
+    assert accepted["accepted"] is True
+
+
+def test_open_circuit_is_keyed_per_model(monkeypatch, tmp_path):
+    """The breaker key is (backend, model): a circuit opened for one model
+    never gates dispatches to a different model on the same backend — a dead
+    glm-4.6 must not take delegation to other providers down with it."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    session_model = str(ds._SESSIONS[sid]["model"])
+    other_model = "totally-other-model"
+    assert other_model != session_model
+    _open_circuit("pi", other_model)
+
+    send = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="unaffected", parent_agent=parent
+        )
+    )
+
+    assert send["success"] is True
+    # Send returns on accept; sync on the turn actually completing before
+    # reading the client (same pattern as every sibling test here).
+    wait_for_status(parent, sid, "idle")
+    assert ds._SESSIONS[sid]["client"].messages == ["unaffected"]
+
+
+def test_successful_probe_turn_closes_the_circuit(monkeypatch, tmp_path):
+    """Half-open probe -> healthy turn -> circuit fully closed. After the
+    cooldown the gate grants exactly one dispatch; if that turn succeeds the
+    provider is healthy again and the next dispatch flows too (a success ends
+    the outage for that (backend, model) pair, not just one turn)."""
+    import agent.delegate_health as dh
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        dh,
+        "_LEDGERS",
+        {dh.hermes_home_key(): dh.DelegateHealthLedger(now=lambda: clock["t"])},
+    )
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    key = ("pi", str(ds._SESSIONS[sid]["model"]))
+    ledger = ds.get_delegate_health_ledger()
+    for _ in range(3):
+        ledger.record_failure(key, "rate_limit")  # opened_at == 1000, cooldown 900
+
+    clock["t"] = 1500.0  # still cooling down: the gate must refuse
+    assert ledger.check(key) is not None
+
+    clock["t"] = 1000.0 + 901.0  # cooldown elapsed: the gate grants the probe
+    probe = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="probe", parent_agent=parent
+        )
+    )
+    assert probe["success"] is True
+    summary = wait_for_status(parent, sid, "idle")
+    assert summary["error_class"] is None  # success cleared the failure state
+
+    # record_success lands right after the status transition — wait for it
+    # (bounded positive wait; a probe still in flight keeps refusing).
+    deadline = time.time() + 2.0
+    circuit = ledger.check(key)
+    while circuit is not None and time.time() < deadline:
+        time.sleep(0.01)
+        circuit = ledger.check(key)
+    # Closed, not still probing: a probe-in-flight would refuse the check; a
+    # closed circuit answers None.
+    assert circuit is None
+
+    followup = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="after recovery", parent_agent=parent
+        )
+    )
+    assert followup["success"] is True
+
+
+# ── Durable mid-turn liveness (observer) ─────────────────────────────────────
+# Regression for the spool-lease starvation family (finding
+# cognitive-continuity.prevention.d8fce7da, recurrence #7): during the
+# incident, a healthy 30-90 min delegated turn was indistinguishable from a
+# wedged one because durable metadata was only written at dispatch and
+# terminal state — outside readers saw a stale pre-turn snapshot for the
+# whole turn. The in-turn observer closes that blindness.
+
+
+def _blocked_running_session(parent, message="blocked turn"):
+    """Start a session, dispatch a turn the fake holds open, return handles."""
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+    client.block_turns = True
+    sent = payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message=message, parent_agent=parent
+        )
+    )
+    assert sent["accepted"] is True
+    wait_for_status(parent, sid, "running")
+    # Status flips to running before the turn thread starts; the fake's
+    # entry write of last_turn_activity_at must land before callers step it,
+    # or the step races (and loses to) that assignment.
+    assert client.started_turn.wait(timeout=5.0)
+    return sid, client
+
+
+def test_watcher_persists_mid_turn_running_evidence(monkeypatch):
+    """T2: the in-turn refresh observer. While a turn is open, stepping the
+    client's activity signal must advance the durable file on the observer's
+    own — an outside reader sees status running and a fresh activity
+    timestamp without the originating process persisting anything (the exact
+    silence the incident supervisor hit)."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        first = client.last_turn_activity_at
+        client.last_turn_activity_at = first + 1.0
+        baseline = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if meta.get("status") == "running":
+                baseline = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert baseline is not None
+        assert baseline >= first + 1.0
+
+        client.last_turn_activity_at = baseline + 1.0
+        advanced = None
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if (
+                meta.get("status") == "running"
+                and meta.get("last_turn_activity_at", 0.0) > baseline
+            ):
+                advanced = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert advanced is not None
+        assert advanced >= baseline + 1.0
+        # The turn is still open throughout: only the observer wrote this.
+        with ds._SESSION_LOCK:
+            assert ds._SESSIONS[sid]["status"] == "running"
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+def test_watcher_write_amplitude_is_capped_mid_turn(monkeypatch):
+    """T2: five activity steps inside one refresh window must not multiply
+    durable writes — the observer persists at most once per refresh window
+    (contract, not change-detector: amplitude stays bounded as activity
+    frequency grows)."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        client.last_turn_activity_at = client.last_turn_activity_at + 1.0
+        baseline = None
+        deadline = time.time() + 10.0
+        while time.time() < deadline:
+            meta = ds._load_metadata(sid) or {}
+            if meta.get("status") == "running":
+                baseline = meta.get("last_turn_activity_at")
+                break
+            time.sleep(0.01)
+        assert baseline is not None
+        with ds._SESSION_LOCK:
+            # The watermark contract makes the cap exact: the last successful
+            # write's snapshot activity is what the next refresh compares to.
+            assert ds._SESSIONS[sid]["last_persisted_activity"] == baseline
+
+        # Five activity steps, all inside one refresh window of the baseline.
+        for step in range(1, 6):
+            client.last_turn_activity_at = baseline + 0.001 * step
+
+        path = ds._metadata_path(sid)
+        writes = 0
+        last_mtime = path.stat().st_mtime_ns
+        observed: set[float] = set()
+        stop = time.time() + 0.4  # ~8 observer poll windows
+        while time.time() < stop:
+            meta = ds._load_metadata(sid) or {}
+            mtime = path.stat().st_mtime_ns
+            if mtime != last_mtime:
+                writes += 1
+                last_mtime = mtime
+            if meta.get("status") == "running":
+                activity = meta.get("last_turn_activity_at")
+                if activity is not None:
+                    observed.add(activity)
+            time.sleep(0.002)
+
+        assert observed, "observer never advertised mid-turn activity"
+        assert writes <= 2
+        assert len(observed) <= 2
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+def test_watcher_stops_writing_after_turn_ends(monkeypatch):
+    """T2: the observer dies with the turn. After the terminal persist there
+    are no further durable writes for >= 3 poll windows and the turn thread
+    is joinable. A regression guard for the observer mechanism itself (an
+    unbounded observer would churn the store after every turn)."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.05)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.05)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+    record = ds._SESSIONS[sid]
+    deadline = time.time() + 5.0
+    while time.time() < deadline and record["thread"].is_alive():
+        time.sleep(0.01)
+    assert not record["thread"].is_alive()
+
+    while time.time() < deadline:
+        meta = ds._load_metadata(sid) or {}
+        if meta.get("status") == "idle":
+            break
+        time.sleep(0.01)
+
+    path = ds._metadata_path(sid)
+    before = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+    time.sleep(0.3)  # >= 3 observer poll windows
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_wedge_e2e_real_pi_client_durable_running_evidence(monkeypatch, tmp_path):
+    """T5: end-to-end wedge repro on the REAL client boundary. While a live
+    pi turn streams observable progress, durable metadata alone must show a
+    running session with an advancing activity signal — the evidence the
+    incident supervisor lacked when it could not tell a healthy long turn
+    from a wedged one. Union v4 schema: the provider key replaces the
+    observer branch's pid field."""
+    from agent.pi_rpc_client import PiRPCClient as RealPiRPCClient
+
+    script = tmp_path / "fake-pi-slow-turn"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'sessionId':'native-wedge-e2e'}})\n"
+        + "    elif typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        for i in range(200):\n"
+        + "            time.sleep(0.02)\n"
+        + "            send({'type':'message_update','assistantMessageEvent':{'type':'thinking_delta','delta':'tick %d' % i}})\n"
+        + "    elif typ == 'abort':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(ds, "PiRPCClient", RealPiRPCClient)
+    monkeypatch.setenv("HERMES_PI_BIN", str(script))
+
+    parent = Parent()
+    started = payload(
+        ds.delegate_session(action="start", parent_agent=parent, goal="slow turn")
+    )
+    sid = started["session_id"]
+    wait_for_status(parent, sid, "running", timeout=30.0)
+
+    with ds._SESSION_LOCK:
+        ds._persist_metadata(ds._SESSIONS[sid])
+    meta1 = ds._load_metadata(sid)
+    assert meta1["version"] == ds._METADATA_VERSION
+    assert meta1["status"] == "running"
+    assert isinstance(meta1["last_turn_activity_at"], float)
+    assert meta1["last_turn_activity_at"] > 0.0
+
+    # Observable progress keeps advancing the durable activity signal.
+    time.sleep(0.25)
+    with ds._SESSION_LOCK:
+        ds._persist_metadata(ds._SESSIONS[sid])
+    meta2 = ds._load_metadata(sid)
+    assert meta2["status"] == "running"
+    assert meta2["last_turn_activity_at"] > meta1["last_turn_activity_at"]
+
+    # Registry-loss equivalent: a fresh observer reads only durable state,
+    # and the offline summary stays well-formed v4 (no error invented).
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    status = payload(
+        ds.delegate_session(action="status", session_id=sid, parent_agent=parent)
+    )
+    assert status["status"] == "offline"
+    assert status["error"] is None
+    assert status["native_session_id"] == "native-wedge-e2e"
+    assert status["pi_model"] == ""
+
+    stale["client"].close()
+
+
+def test_open_circuit_storm_burst_fails_fast_without_taking_capacity(
+    monkeypatch, tmp_path
+):
+    """Incident shape (d8fce7da recurrence #7): the 44-order injection
+    storm kept re-dispatching into a provider that was already dead, and
+    every doomed order occupied a delegate worker for its full stall
+    window — the capacity-starvation amplifier. Once the circuit is open,
+    a storm-sized burst of re-dispatches (live-session sends AND fresh
+    starts) must be refused up front in bounded wall-clock, with zero
+    turns reaching any client and nothing spawned."""
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    assert str(ds._SESSIONS[sid]["model"]) == "glm-4.6"
+    _open_circuit("pi", "glm-4.6")
+
+    burst_started = time.monotonic()
+    for i in range(44):  # the incident's order count
+        send = payload(
+            ds.delegate_session(
+                action="send",
+                session_id=sid,
+                message=f"storm order {i}",
+                parent_agent=parent,
+            )
+        )
+        assert "error" in send, i
+        assert "circuit open" in send["error"], i
+        fresh = payload(
+            ds.delegate_session(
+                action="start",
+                goal=f"storm order {i}",
+                parent_agent=parent,
+            )
+        )
+        assert "error" in fresh, i
+        assert "circuit open" in fresh["error"], i
+    elapsed = time.monotonic() - burst_started
+
+    # Refusals are ledger checks, not stall windows: 88 gated dispatches
+    # complete in wall-clock a single doomed turn would have burned ~900x
+    # over, and each error still names the remaining cooldown.
+    assert elapsed < 2.0
+    assert "retry after" in send["error"]
+    # Zero delegate capacity consumed: the live session never ran a turn,
+    # and no new client was spawned for any of the 44 fresh orders.
+    assert ds._SESSIONS[sid]["client"].messages == []
+    assert len(FakePiClient.instances) == 1
+    with ds._SESSION_LOCK:
+        assert ds._SESSIONS[sid]["status"] == "idle"
+
+
+def test_turn_evidence_lands_in_dispatching_profile_home(monkeypatch, tmp_path):
+    """F1 regression (A→B→A multiplex): worker threads do not inherit the
+    home-override contextvar, so the durable evidence a turn produces —
+    session metadata and the provider-health ledger update — must be pinned
+    to the DISPATCHING profile at dispatch time. Without the pins the turn
+    thread resolves the launch/default home and writes cross-profile, and a
+    provider failure in profile B poisons the default profile's breaker."""
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+    class RateLimitedClient(FakePiClient):
+        """Fails with a provider-class error (classifies as 'rate_limit') so
+        the turn records a provider failure in the health ledger."""
+
+        def run_session_prompt(self, *args, **kwargs):
+            raise Exception("429 Too Many Requests: rate limit exceeded")
+
+    default_home = tmp_path / "default-home"
+    home_b = tmp_path / "profile-b"
+    home_c = tmp_path / "profile-c"
+    for home in (default_home, home_b, home_c):
+        home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(default_home))
+    reset_delegate_health_ledger()
+    # Re-bind the store root to the LIVE home so a pinned root discriminates
+    # profiles (the autouse fixture otherwise pins one shared tmp store).
+    monkeypatch.setattr(
+        ds,
+        "_session_store_root",
+        lambda: get_hermes_home() / "cache" / "delegate-sessions",
+    )
+
+    class NoStartThread:
+        """Capture the dispatch without running it — the worker body is
+        driven synchronously below with the contextvar unset, which is
+        exactly the view a plain threading.Thread gets."""
+
+        def __init__(self, *, target, args, name, daemon):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(ds.threading, "Thread", NoStartThread)
+
+    def durable_session_ids(home):
+        store = home / "cache" / "delegate-sessions"
+        return {
+            json.loads(p.read_text())["session_id"] for p in store.glob("*.json")
+        }
+
+    # Dispatch under profile B with a provider that fails rate-limited: the
+    # pins are captured in the parent (override active), then the worker
+    # body runs with NO override — the exact environment of a real thread.
+    token_b = set_hermes_home_override(home_b)
+    try:
+        parent_b = Parent("parent-b")
+        started_b = payload(
+            ds.delegate_session(
+                action="start", parent_agent=parent_b, goal="fail fast"
+            )
+        )
+        sid_b = started_b["session_id"]
+        record_b = ds._SESSIONS[sid_b]
+        record_b["client"] = RateLimitedClient()
+    finally:
+        reset_hermes_home_override(token_b)
+    ds._run_turn(record_b, "fail fast", 30.0)
+
+    assert record_b["_scope_store_root"] == home_b / "cache" / "delegate-sessions"
+    assert sid_b in durable_session_ids(home_b)
+    assert (home_b / "cache" / "delegate-provider-health.json").exists()
+
+    # The worker had NO contextvar; the ledger pin is what routed the
+    # failure to B's registry — prove the identity both ways.
+    token = set_hermes_home_override(home_b)
+    try:
+        ledger_b = ds.get_delegate_health_ledger()
+    finally:
+        reset_hermes_home_override(token)
+    assert record_b["_scope_ledger"] is ledger_b
+    assert ds.get_delegate_health_ledger() is not ledger_b
+
+    # A→B→A: a healthy turn under profile C pins C's scope too; the
+    # launch/default home never receives anything from either worker.
+    token_c = set_hermes_home_override(home_c)
+    try:
+        parent_c = Parent("parent-c")
+        started_c = payload(
+            ds.delegate_session(
+                action="start", parent_agent=parent_c, goal="healthy work"
+            )
+        )
+        sid_c = started_c["session_id"]
+        record_c = ds._SESSIONS[sid_c]
+        record_c["client"] = FakePiClient()
+    finally:
+        reset_hermes_home_override(token_c)
+    ds._run_turn(record_c, "healthy work", 30.0)
+
+    assert record_c["_scope_store_root"] == home_c / "cache" / "delegate-sessions"
+    assert sid_c in durable_session_ids(home_c)
+    assert sid_c not in durable_session_ids(home_b)
+
+    assert not durable_session_ids(default_home)
+    assert not (default_home / "cache" / "delegate-provider-health.json").exists()
+
+
+def test_stale_persist_cannot_overwrite_terminal_evidence(monkeypatch):
+    """F3 regression: an observer persist that snapshots the record as
+    'running' but is descheduled before its write must never overwrite the
+    terminal evidence a later persist installed. The write is dropped on a
+    sequence mismatch, so a crashed delegate's durable status stays the
+    last-writer-ordered terminal truth, not a resurrected 'running'."""
+    record = {
+        "session_id": "stale-persist-probe",
+        "parent_session_id": "p",
+        "backend": "pi",
+        "model": "glm-4.6",
+        "status": "running",
+        "created_at": time.time(),
+        "last_turn_activity_at": time.time(),
+    }
+
+    real_snapshot = ds._metadata_snapshot
+    observer_snapshotted = threading.Event()
+    release_observer = threading.Event()
+
+    def gated_snapshot(rec):
+        snapshot = real_snapshot(rec)
+        if snapshot.get("status") == "running" and not observer_snapshotted.is_set():
+            observer_snapshotted.set()
+            # Hold the observer between its snapshot and its write while the
+            # terminal evidence is persisted by the session thread.
+            release_observer.wait(10)
+        return snapshot
+
+    monkeypatch.setattr(ds, "_metadata_snapshot", gated_snapshot)
+
+    observer = threading.Thread(target=ds._persist_metadata, args=(record,))
+    observer.start()
+    assert observer_snapshotted.wait(10)
+
+    record["status"] = "idle"
+    record["outcome"] = "completed"
+    ds._persist_metadata(record)
+
+    path = ds._metadata_path("stale-persist-probe")
+    assert json.loads(path.read_text())["status"] == "idle"
+
+    release_observer.set()
+    observer.join(10)
+    after = json.loads(path.read_text())
+    assert after["status"] == "idle", (
+        "a stale observer persist must be dropped, not overwrite the "
+        f"terminal evidence (got {after['status']!r})"
+    )
+
+
+def test_client_start_failure_resolves_granted_probe(monkeypatch):
+    """The A2 gate grants exactly one half-open probe per cooldown; when
+    that granted dispatch dies before any provider signal (client bootstrap
+    failure at the tool boundary), the early-error path must resolve the
+    probe inconclusive so the key re-arms for the next cooldown instead of
+    refusing every dispatch forever."""
+    import agent.delegate_health as dh
+    from agent.delegate_health import CircuitOpen
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        dh,
+        "_LEDGERS",
+        {dh.hermes_home_key(): dh.DelegateHealthLedger(now=lambda: clock["t"])},
+    )
+
+    class StartFailingPi(FakePiClient):
+        def start(self, *, timeout=30.0, stages=None):
+            raise RuntimeError("bootstrap handshake wedged")
+
+    monkeypatch.setattr(ds, "PiRPCClient", StartFailingPi)
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.setattr(ds, "_pi_model_for_parent", lambda _parent: "glm-4.6")
+
+    ledger = dh._LEDGERS[dh.hermes_home_key()]
+    key = ("pi", "glm-4.6")
+    for _ in range(3):
+        ledger.record_failure(key, "rate_limit")  # opened_at == 1000
+
+    clock["t"] = 1000.0 + 901.0  # cooldown elapsed: the gate grants the probe
+    failed = payload(
+        ds.delegate_session(action="start", goal="probe turn", parent_agent=Parent())
+    )
+    assert "error" in failed
+    assert "Could not start pi delegate session" in failed["error"]
+
+    state = ledger.check(key)
+    assert isinstance(state, CircuitOpen)
+    # Re-armed from the resolution moment (not still holding the probe):
+    assert state.retry_after_s == pytest.approx(900.0)
+    clock["t"] += 901.0
+    assert ledger.check(key) is None  # fresh probe granted — not wedged closed
+
+
+def test_stalled_observer_persist_cannot_overwrite_terminal_state(monkeypatch):
+    """The observer's refresh persist and the turn's terminal persist are
+    serialized end-to-end (snapshot -> tmp write -> atomic replace under one
+    IO lock): a stalled observer write that completes after the turn ended
+    can no longer leave the durable file claiming ``running`` forever — an
+    outside reader (the incident supervisor shape) always sees the terminal
+    state once the turn thread exits."""
+    monkeypatch.setattr(ds, "_OBSERVER_POLL_S", 0.01)
+    monkeypatch.setattr(ds, "_ACTIVITY_REFRESH_MIN_S", 0.01)
+    parent = Parent()
+    sid, client = _blocked_running_session(parent)
+    try:
+        entered = threading.Event()
+        gate = threading.Event()
+        real_json = ds.json
+        stalled: list[bool] = []
+
+        class StallingJson:
+            # Stand-in for IO jitter mid-write: the observer's FIRST
+            # serialization stalls until the test releases it, after the
+            # turn has already reached its terminal state.
+            def dumps(self, obj, **kwargs):
+                if (
+                    threading.current_thread().name.endswith("-obs")
+                    and not stalled
+                ):
+                    stalled.append(True)
+                    entered.set()
+                    assert gate.wait(timeout=10.0)
+                return real_json.dumps(obj, **kwargs)
+
+        monkeypatch.setattr(ds, "json", StallingJson())
+        client.last_turn_activity_at = client.last_turn_activity_at + 1.0
+
+        assert entered.wait(timeout=10.0), "observer never entered its persist"
+        # The turn ends while the observer's write is stalled mid-flight.
+        client.release_turn.set()
+        wait_for_status(parent, sid, "idle", timeout=10.0)
+
+        gate.set()  # the stale (running) snapshot write now completes
+        record = ds._SESSIONS[sid]
+        record["thread"].join(timeout=10.0)
+        assert not record["thread"].is_alive()
+
+        meta = json.loads(ds._metadata_path(sid).read_text())
+        assert meta["status"] == "idle", (
+            "durable metadata regressed to a stale mid-turn snapshot: "
+            f"{meta['status']!r} while the live record is {record['status']!r}"
+        )
+        assert meta["status"] == record["status"]
+    finally:
+        client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+# --- staged start-handshake budgets ------------------------------------------
+# Regression family: the A4 continuity loop (finding 567c6f06838d). The
+# start/get_messages/steer handshakes waited on a FIXED 30s wall clock, so a
+# healthy-but-slow pi child under host load was indistinguishable from a
+# wedge — the handshake timed out, the caller re-spawned another Node
+# process, and the re-spawn herd amplified the very load that caused the
+# timeouts (get_state 30.9s, abort 216s, queue latency 42 minutes). The
+# wiring now derives (ceiling, ladder) from agent/delegate_start_budget.py
+# and pauses (jittered) only immediately before RE-SPAWNING a native process.
+
+
+class SlowAlivePi(FakePiClient):
+    """Answers the start handshake at fake-clock t=35s.
+
+    Models a healthy-but-slow child WITHOUT sleeping: the handshake succeeds
+    iff the allotted budget (the staged ladder when present, else the flat
+    timeout) reaches ``handshake_completes_at``. Under the old flat-30s wiring
+    this client was classified as a wedge — the exact A4 misclassification.
+    """
+
+    instances = []
+    handshake_completes_at = 35.0
+
+    def start(self, *, timeout=30.0, stages=None):
+        self.start_budgets.append(
+            (timeout, tuple(stages) if stages is not None else None)
+        )
+        allotted = float(sum(stages)) if stages else float(timeout)
+        if allotted < self.handshake_completes_at:
+            raise TimeoutError("pi did not answer command 'get_state'")
+        return super().start(timeout=timeout, stages=stages)
+
+
+def test_start_handshake_survives_slow_but_alive_bootstrap(monkeypatch):
+    monkeypatch.setattr(ds, "PiRPCClient", SlowAlivePi)
+    parent = Parent()
+    result = payload(
+        ds.delegate_session(action="start", parent_agent=parent, timeout=900)
+    )
+
+    # Flat-30s wiring RED: the 35s handshake raises TimeoutError and the
+    # start action surfaces tool_error. Staged wiring GREEN: the ladder
+    # (30+90+240) dwarfs 35s.
+    assert result["success"] is True, result
+    client = SlowAlivePi.instances[-1]
+    ceiling, stages = client.start_budgets[-1]
+    assert stages == (30.0, 90.0, 240.0)
+    assert ceiling == 600.0  # capped well under the 900s caller budget
+
+
+class DeadProcPi(FakePiClient):
+    """Fails the handshake instantly, like a dead pi process."""
+
+    instances = []
+
+    def start(self, *, timeout=30.0, stages=None):
+        self.start_budgets.append(
+            (timeout, tuple(stages) if stages is not None else None)
+        )
+        raise RuntimeError("pi rpc process exited during get_state handshake (pid 4242)")
+
+
+def test_start_handshake_dead_process_fails_fast(monkeypatch):
+    # Invariant guard (green before AND after staging): a child that is
+    # simply dead surfaces its causal error immediately — staging must never
+    # pad the wall clock between the process dying and the caller learning.
+    monkeypatch.setattr(ds, "PiRPCClient", DeadProcPi)
+    t0 = time.monotonic()
+    parent = Parent()
+    result = payload(
+        ds.delegate_session(action="start", parent_agent=parent, timeout=900)
+    )
+    elapsed = time.monotonic() - t0
+
+    assert result.get("success") is not True
+    assert "pi rpc process exited" in json.dumps(result)
+    assert elapsed < 10.0
+
+
+def test_handshake_budget_clips_to_effective_timeout():
+    parent = Parent()
+    result = payload(
+        ds.delegate_session(action="start", parent_agent=parent, timeout=45)
+    )
+    assert result["success"] is True, result
+    ceiling, stages = FakePiClient.instances[-1].start_budgets[-1]
+    assert ceiling == 45.0
+    assert stages == (30.0, 15.0)
+
+    result = payload(
+        ds.delegate_session(action="start", parent_agent=parent, timeout=10)
+    )
+    assert result["success"] is True, result
+    ceiling, stages = FakePiClient.instances[-1].start_budgets[-1]
+    assert ceiling == 10.0
+    assert stages == (10.0,)
+
+
+def test_messages_and_steer_handshakes_share_the_staged_budget():
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    client = FakePiClient.instances[-1]
+
+    messages = payload(
+        ds.delegate_session(
+            action="messages", session_id=sid, parent_agent=parent, timeout=900
+        )
+    )
+    assert messages["success"] is True, messages
+    ceiling, stages = client.get_messages_budgets[-1]
+    assert ceiling == 600.0
+    assert stages == (30.0, 90.0, 240.0)
+
+    # Steer site: only reached while a turn is live (idle sessions degrade
+    # steer to a follow-up send instead).
+    client.block_turns = True
+    payload(
+        ds.delegate_session(
+            action="send", session_id=sid, message="long task", parent_agent=parent
+        )
+    )
+    assert client.started_turn.wait(timeout=5)
+    steered = payload(
+        ds.delegate_session(
+            action="steer",
+            session_id=sid,
+            message="focus on tests",
+            parent_agent=parent,
+            timeout=900,
+        )
+    )
+    assert steered["success"] is True, steered
+    ceiling, stages = client.steer_budgets[-1]
+    assert ceiling == 600.0
+    assert stages == (30.0, 90.0, 240.0)
+    client.release_turn.set()
+    wait_for_status(parent, sid, "idle")
+
+
+class _TimeSpy:
+    """Patches only ``ds.time``: records sleeps, delegates everything else."""
+
+    def __init__(self, events):
+        self._events = events
+
+    def sleep(self, seconds):
+        self._events.append(("sleep", seconds))
+
+    def monotonic(self):
+        return time.monotonic()
+
+    def time(self):
+        return time.time()
+
+
+def _resume_setup(parent, client_cls):
+    """Start a healthy session, then force the next bootstrap to use client_cls."""
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+    return sid
+
+
+def test_respawn_jitter_pauses_before_same_id_retry(monkeypatch):
+    events = []
+    monkeypatch.setattr(ds, "time", _TimeSpy(events))
+    monkeypatch.setattr(ds, "_RESPAWN_RNG", random.Random(42))
+
+    class FlakyPrimaryPi(FakePiClient):
+        instances = []
+
+        def start(self, *, timeout=30.0, stages=None):
+            self.start_budgets.append(
+                (timeout, tuple(stages) if stages is not None else None)
+            )
+            events.append(("start", self.session_id))
+            if len(FlakyPrimaryPi.instances) == 1:  # the primary open fails once
+                raise TimeoutError("pi did not answer command 'get_state'")
+            return super().start(timeout=timeout, stages=stages)
+
+    parent = Parent()
+    sid = _resume_setup(parent, FlakyPrimaryPi)
+    monkeypatch.setattr(ds, "PiRPCClient", FlakyPrimaryPi)
+
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+
+    assert resumed["success"] is True, resumed
+    starts = [e for e in events if e[0] == "start"]
+    sleeps = [e for e in events if e[0] == "sleep"]
+    assert len(starts) == 2  # primary + same-id retry
+    assert len(sleeps) == 1  # jitter before the re-spawn ONLY
+    assert events == [starts[0], sleeps[0], starts[1]]
+    assert 0.5 <= sleeps[0][1] < 2.0
+    # The retry's handshake is still the full staged budget, not the flat 30.
+    _, stages = FlakyPrimaryPi.instances[-1].start_budgets[-1]
+    assert stages == (30.0, 90.0, 240.0)
+
+
+def test_respawn_jitter_before_each_respawn_in_full_recovery_flow(monkeypatch):
+    events = []
+    monkeypatch.setattr(ds, "time", _TimeSpy(events))
+    monkeypatch.setattr(ds, "_RESPAWN_RNG", random.Random(7))
+
+    class AlwaysDeadPi(FakePiClient):
+        instances = []
+
+        def start(self, *, timeout=30.0, stages=None):
+            self.start_budgets.append(
+                (timeout, tuple(stages) if stages is not None else None)
+            )
+            events.append(("start", self.session_id))
+            raise TimeoutError("pi did not answer command 'get_state'")
+
+    parent = Parent()
+    sid = _resume_setup(parent, AlwaysDeadPi)
+    monkeypatch.setattr(ds, "PiRPCClient", AlwaysDeadPi)
+
+    resumed = payload(
+        ds.delegate_session(action="resume", session_id=sid, parent_agent=parent)
+    )
+
+    # Primary + same-id retry + fresh-native recovery all fail: the tool
+    # surfaces the full causal chain, never hangs.
+    assert resumed.get("success") is not True
+    starts = [e for e in events if e[0] == "start"]
+    sleeps = [e for e in events if e[0] == "sleep"]
+    assert len(starts) == 3
+    assert len(sleeps) == 2  # one jittered pause before EACH re-spawn
+    assert events == [starts[0], sleeps[0], starts[1], sleeps[1], starts[2]]
+    assert all(0.5 <= s[1] < 2.0 for s in sleeps)
+    # Staging never widens stage 1: every attempt still begins with the fast
+    # 30s wedge-fail probe.
+    for inst in AlwaysDeadPi.instances:
+        _, stages = inst.start_budgets[-1]
+        assert stages is not None and stages[0] == 30.0
