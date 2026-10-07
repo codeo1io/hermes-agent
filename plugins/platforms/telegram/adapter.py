@@ -2390,7 +2390,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if progress is None:
             progress = self._polling_progress_event
         with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(progress.wait(), timeout=_POLLING_PROGRESS_TIMEOUT)
+            # asyncio.timeout (not wait_for): a cancellation racing the deadline must
+            # propagate as CancelledError, not be eaten into the suppressed TimeoutError.
+            async with asyncio.timeout(_POLLING_PROGRESS_TIMEOUT):
+                await progress.wait()
         if self._verifier_stale(generation, progress):
             return
         app = self._app
@@ -2401,7 +2404,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 reason="polling progress verifier: updater not running")
             return
         try:
-            await asyncio.wait_for(app.bot.get_me(), PROBE_TIMEOUT)
+            # asyncio.timeout (not wait_for): cancellation must not be classified as a
+            # connectivity probe failure (wait_for's cancel/timeout race raises TimeoutError,
+            # landing in the except-Exception recovery branch below as a zombie).
+            async with asyncio.timeout(PROBE_TIMEOUT):
+                await app.bot.get_me()
         except Exception as probe_err:
             if self._verifier_stale(generation, progress):
                 return
@@ -5914,7 +5921,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if not force and self._bot_identity_is_fresh():
             return
         try:
-            me = await asyncio.wait_for(bot.get_me(), self._BOT_IDENTITY_PROBE_TIMEOUT)
+            # asyncio.timeout (not wait_for): the wait_for cancel/timeout race turns a
+            # cancellation into TimeoutError, defeating the CancelledError re-raise below.
+            async with asyncio.timeout(self._BOT_IDENTITY_PROBE_TIMEOUT):
+                me = await bot.get_me()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -552,6 +552,92 @@ async def test_heartbeat_probe_defers_to_inflight_recovery(monkeypatch):
     adapter._handle_polling_network_error.assert_not_awaited()
 
 
+# ── Cancellation propagation at the polling probe sites ─────────────────
+# wait_for's cancel/timeout race turns a stop-cancel into TimeoutError (or
+# eats it when the inner awaitable completed in the same tick), so the
+# verifier / identity probes kept running as zombies after teardown. The
+# probes use asyncio.timeout, which re-raises an external cancel.
+
+
+@pytest.mark.asyncio
+async def test_verifier_progress_wait_cancellation_racing_completion_propagates(monkeypatch):
+    """A stop-cancel landing while the progress wait completes must surface as
+    CancelledError, not be eaten into the suppressed TimeoutError path."""
+    adapter = _make_adapter()
+    monkeypatch.setattr(tg_adapter, "_POLLING_PROGRESS_TIMEOUT", 5)
+
+    gate: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    class _GatedProgress:
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self):
+            return await gate
+
+    task = asyncio.create_task(adapter._verify_polling_after_reconnect(None, _GatedProgress()))
+    await asyncio.sleep(0)  # verifier is now parked inside the progress wait
+    gate.set_result(True)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert getattr(adapter, "_polling_error_task", None) is None
+
+
+@pytest.mark.asyncio
+async def test_verifier_probe_cancellation_racing_completion_propagates(monkeypatch):
+    """A stop-cancel landing while the getMe probe completes must surface as
+    CancelledError — an eaten cancel let the verifier fall through and schedule
+    polling recovery from a cancelled context (zombie ladder entry)."""
+    adapter = _make_adapter()
+
+    mock_app = MagicMock()
+    mock_app.updater = MagicMock(running=True)
+    probe_started = asyncio.Event()
+    gate: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    async def get_me():
+        probe_started.set()
+        return await gate
+
+    mock_app.bot.get_me = get_me
+    adapter._app = mock_app
+
+    generation, progress = adapter._begin_polling_generation()
+    monkeypatch.setattr(tg_adapter, "_POLLING_PROGRESS_TIMEOUT", 0)
+
+    task = asyncio.create_task(adapter._verify_polling_after_reconnect(generation, progress))
+    await probe_started.wait()
+    gate.set_result(MagicMock())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert getattr(adapter, "_polling_error_task", None) is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_bot_identity_cancellation_racing_completion_propagates():
+    """A stop-cancel landing while the identity probe completes must surface
+    as CancelledError instead of being eaten into a successful refresh."""
+    adapter = _make_adapter()
+    probe_started = asyncio.Event()
+    gate: asyncio.Future = asyncio.get_running_loop().create_future()
+
+    class _Bot:
+        async def get_me(self):
+            probe_started.set()
+            return await gate
+
+    adapter._bot = _Bot()
+    task = asyncio.create_task(adapter._refresh_bot_identity(force=True))
+    await probe_started.wait()
+    gate.set_result(MagicMock(username="freshbot"))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert getattr(adapter, "_bot_identity_checked_at", None) is None
+
+
 @pytest.mark.asyncio
 async def test_reconnect_schedules_heartbeat_probe_on_success():
     """

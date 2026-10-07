@@ -387,15 +387,6 @@ _DASHBOARD_EMBEDDED_CHAT_ENABLED = True
 _DESKTOP_ATTACHMENT_WS_MAX_BYTES = 384 * 1024 * 1024
 
 
-# CORS: localhost origins only — allow_origins=["*"] on 0.0.0.0 would let any
-# website read/modify config and secrets.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Endpoints that do NOT require the session token; everything else under /api/
 # is gated below. Shared with the OAuth gate so the two allowlists cannot
 # drift (/api/status once 401'd under the OAuth gate, breaking the portal probe).
@@ -735,7 +726,7 @@ DASHBOARD_HEALTH = DashboardHealth()
 
 @app.middleware("http")
 async def _dashboard_health_middleware(request: Request, call_next):
-    """Outermost middleware (registered last): count unhandled exceptions and 5xx; re-raises, never alters."""
+    """Outermost non-CORS middleware (registered last): count unhandled exceptions and 5xx; re-raises, never alters."""
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -745,6 +736,18 @@ async def _dashboard_health_middleware(request: Request, call_next):
         DASHBOARD_HEALTH.record_error(f"http_{response.status_code}", request.url.path)
     return response
 
+
+# CORS: localhost origins only — allow_origins=["*"] on 0.0.0.0 would let any
+# website read/modify config and secrets. Registered AFTER the auth and health
+# middlewares above so it is the OUTERMOST layer (add_middleware inserts at
+# position 0 of the stack; last-added runs first): a cross-origin OPTIONS
+# preflight must be answered by CORS before the auth middleware can 401 it.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Authenticated-route self-test: one in-process request per minute against a
 # cheap DB-touching route, catching "liveness fine but every authed request 500s".
