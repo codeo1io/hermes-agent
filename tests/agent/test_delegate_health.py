@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.delegate_errors import classify_delegate_failure
 from agent.delegate_health import (
     CircuitOpen,
     DelegateHealthLedger,
@@ -96,6 +97,22 @@ def test_non_provider_classes_never_open(error_class):
     ledger, _clock = make_ledger()
     for _ in range(FAILURE_THRESHOLD * 3):
         ledger.record_failure(KEY, error_class)
+    assert ledger.check(KEY) is None
+
+
+def test_three_handshake_failures_do_not_open_the_circuit():
+    """Invariant companion to the ``bootstrap_timeout`` class (plan U1):
+    three classified handshake timeouts — the evidenced host-load wedge —
+    never open the breaker, so a healthy provider is not cooled by a slow
+    local bring-up. (Invariant, not red by design: the classifier-level red
+    is pinned in tests/agent/test_delegate_errors.py.)"""
+    ledger, clock = make_ledger()
+    for _ in range(FAILURE_THRESHOLD * 3):
+        error_class, _signal, _retry = classify_delegate_failure(
+            "pi did not answer command 'get_state'", zero_activity=True
+        )
+        ledger.record_failure(KEY, error_class)
+        clock.advance(1.0)
     assert ledger.check(KEY) is None
 
 

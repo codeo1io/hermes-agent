@@ -88,6 +88,14 @@ _RATE_LIMIT_MARKERS: tuple = (
     "usage limit",
 )
 _OVERLOADED_MARKERS: tuple = (re.compile(r"\b503\b"), "overloaded")
+# Bootstrap handshake: pi received a command and never answered it — the
+# exact wording ``_request_pi`` raises when the staged handshake ladder is
+# exhausted (``pi did not answer command 'get_state'``). This is the native
+# bring-up boundary under host load, not a provider condition, so it must
+# outrank the generic timeout table and stay outside
+# ``PROVIDER_FAILURE_CLASSES``: three slow handshakes during a host-load
+# episode must never cool a healthy provider.
+_HANDSHAKE_MARKERS: tuple = ("did not answer command",)
 _TIMEOUT_MARKERS: tuple = ("timed out", "operation was aborted", "aborted")
 _RESOURCE_MARKERS: tuple = (
     "resource temporarily unavailable",
@@ -139,6 +147,7 @@ def classify_delegate_failure(
     for markers, error_class in (
         (_RATE_LIMIT_MARKERS, "rate_limit"),
         (_OVERLOADED_MARKERS, "overloaded"),
+        (_HANDSHAKE_MARKERS, "bootstrap_timeout"),
         (_TIMEOUT_MARKERS, "timeout"),
         (_RESOURCE_MARKERS, "resource_exhausted"),
         (_TRANSPORT_MARKERS, "transport"),

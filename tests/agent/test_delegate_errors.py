@@ -56,6 +56,10 @@ def test_delegate_turn_stalled_is_a_timeout_error_with_typed_attrs():
         # Overloaded upstream.
         ("HTTP 503 Service Unavailable", "overloaded"),
         ("provider is overloaded, try later", "overloaded"),
+        # Native bootstrap handshake — must outrank the generic timeout
+        # table (pi_rpc_client raises this exact wording when the staged
+        # handshake ladder is exhausted).
+        ("pi did not answer command 'get_state'", "bootstrap_timeout"),
         # Timeout / abort paths.
         ("operation was aborted", "timeout"),
         ("request timed out upstream", "timeout"),
@@ -161,3 +165,49 @@ def test_only_provider_conditions_may_open_the_breaker():
     assert not {"agent_stall", "resource_exhausted", "transport", "unknown"} & (
         PROVIDER_FAILURE_CLASSES
     )
+
+
+# ------------------------------------------- native bootstrap handshake (U1)
+
+
+def test_handshake_timeout_classifies_bootstrap_timeout():
+    """The evidenced spool-boundary string — ``pi did not answer command
+    'get_state'`` (10-06 recurrence: get_state answered at 30.9s under load
+    17.5-26.5) — pins to its own class instead of degrading to
+    ``agent_stall``."""
+    error_class, provider_signal, retry_after = classify_delegate_failure(
+        "pi did not answer command 'get_state'", zero_activity=False
+    )
+    assert error_class == "bootstrap_timeout"
+    assert "did not answer" in provider_signal
+    assert retry_after is None
+
+
+def test_handshake_marker_outranks_generic_timeout_table():
+    """Table order is the precedence contract: handshake failures often
+    ride alongside abort/timeout prose ('operation was aborted' on the same
+    failure); the specific handshake signature must win over
+    ``_TIMEOUT_MARKERS``."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "pi did not answer command 'start': operation was aborted",
+        zero_activity=False,
+    )
+    assert error_class == "bootstrap_timeout"
+
+
+def test_handshake_timeout_with_zero_activity_is_not_provider_stall():
+    """Without the handshake class this exact text with zero_activity=True
+    classified ``provider_stall`` — a PROVIDER class — so a host-load
+    handshake wedge could open the breaker against a healthy provider.
+    The marker table must outrank the structural signal."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "pi did not answer command 'get_messages'", zero_activity=True
+    )
+    assert error_class == "bootstrap_timeout"
+
+
+def test_bootstrap_timeout_is_not_a_provider_failure_class():
+    """Invariant (green by design; the classifier-level reds live above):
+    the breaker vocabulary must never admit the handshake class — host-load
+    bring-up episodes must not cool a healthy provider."""
+    assert "bootstrap_timeout" not in PROVIDER_FAILURE_CLASSES

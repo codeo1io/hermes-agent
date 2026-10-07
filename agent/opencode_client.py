@@ -677,10 +677,16 @@ class OpenCodeClient:
             retry_after=retry_after,
         )
 
-    def steer(self, message: str, timeout_seconds: float = 30.0) -> Dict[str, Any]:
+    def steer(
+        self, message: str, timeout: float = 30.0, stages: list[float] | None = None
+    ) -> Dict[str, Any]:
         # OpenCode prompt_async has no native live-steer injection; the tool
         # layer degrades steer to a queued follow-up turn when no turn is
         # running.  Reaching this method means the caller chose to send anyway.
+        # `timeout`/`stages`: call-shape parity with PiRPCClient's staged
+        # handshake (tools/delegate_session_tool passes both to every client);
+        # accepted and ignored — this path returns an immediate queued note,
+        # never waits.
         return {"text": "", "note": "opencode has no live steer; message queued", "queued": True}
 
     def abort(self, timeout: float = 10.0) -> None:

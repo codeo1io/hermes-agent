@@ -823,3 +823,169 @@ def test_usage_tokens_captured_from_message_update(fake_pi):
         "assistantMessageEvent": {"type": "text_delta", "delta": "hi"},
     })
     assert (client._prompt_tokens, client._completion_tokens) == (20, 9)
+
+
+# ------------------------------------------ staged handshake wait (U3)
+
+
+class _FakeProc:
+    """Stand-in for the spawned child: poll() None = alive, else exit code."""
+
+    def __init__(self, exit_code: int | None = None) -> None:
+        self._exit_code = exit_code
+
+    def poll(self) -> int | None:
+        return self._exit_code
+
+
+def _staged_client(fake_pi, *, exit_code: int | None = None):
+    """A client whose child is fake and whose wire is a recorder: exercises
+    _request_pi's staged wait without spawning anything."""
+    client = make_client(fake_pi)
+    sent: list[dict] = []
+    client._send_pi = lambda payload: sent.append(payload)
+    client._proc = _FakeProc(exit_code)
+    return client, sent
+
+
+def test_staged_wait_exhausts_ladder_then_preserves_timeout_message(fake_pi):
+    """Total staged wait == sum(stages), the command is sent exactly once
+    (no duplicate ids between stages), the pending entry is cleaned up, and
+    the TimeoutError wording is byte-identical to the legacy single wait —
+    the conductor spool boundary greps that prose."""
+    client, sent = _staged_client(fake_pi)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as excinfo:
+        client._request_pi({"type": "get_state"}, timeout=5.0, stages=[0.05, 0.05])
+    elapsed = time.monotonic() - started
+    assert str(excinfo.value) == "pi did not answer command 'get_state'"
+    assert 0.1 <= elapsed < 2.0  # sum(stages)=0.1, not the 5s single-shot
+    assert len(sent) == 1
+    assert client._pending == {}
+
+
+def test_staged_wait_survives_slow_but_alive_answer(fake_pi):
+    """THE remediation shape: the answer lands after stage 1 expired. Fixed
+    30s wiring failed exactly here (10-06 recurrence: get_state answered at
+    30.9s); the ladder keeps waiting on the SAME pending entry and
+    succeeds."""
+    client, sent = _staged_client(fake_pi)
+
+    def answerer():
+        time.sleep(0.15)
+        with client._pending_lock:
+            _waiter, slot = next(iter(client._pending.values()))
+        slot[0] = {"success": True, "data": {"alive": True}}
+        _waiter.set()
+
+    thread = threading.Thread(target=answerer)
+    thread.start()
+    try:
+        started = time.monotonic()
+        response = client._request_pi(
+            {"type": "get_state"}, timeout=0.05, stages=[0.05, 5.0]
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        thread.join(timeout=6.0)
+    assert response == {"success": True, "data": {"alive": True}}
+    assert elapsed < 4.5  # returned when the answer landed, not at exhaustion
+    assert len(sent) == 1  # never re-sent the command between stages
+
+
+def test_staged_wait_dead_process_fails_fast_as_transport(fake_pi):
+    """A dead child will never answer: the between-stage liveness probe
+    raises transport immediately instead of walking out the ladder."""
+    client, _sent = _staged_client(fake_pi, exit_code=1)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as excinfo:
+        client._request_pi({"type": "get_state"}, timeout=5.0, stages=[0.05, 5.0, 5.0])
+    elapsed = time.monotonic() - started
+    assert "pi rpc process exited with code 1" in str(excinfo.value)
+    assert elapsed < 2.0  # stage-1 short-circuit, not the full ladder
+    assert client._pending == {}
+
+
+def test_staged_wait_dead_process_uses_reader_error_verbatim(fake_pi):
+    """When the reader's EOF drain recorded the real exit error, the
+    short-circuit reports that wording, not a synthesized one."""
+    client, _sent = _staged_client(fake_pi, exit_code=-15)
+    client._process_exited_error = "pi rpc process exited with code -15"
+    with pytest.raises(RuntimeError, match="exited with code -15"):
+        client._request_pi({"type": "start"}, timeout=5.0, stages=[0.05, 5.0])
+
+
+def test_single_stage_list_matches_legacy_wait(fake_pi):
+    """``stages=[t]`` ≡ ``timeout=t``: the stage replaces (never adds to)
+    the timeout, and the raised wording matches the legacy path exactly."""
+    client, _sent = _staged_client(fake_pi)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as staged_error:
+        client._request_pi({"type": "get_state"}, timeout=9.0, stages=[0.07])
+    assert time.monotonic() - started < 2.0  # 0.07s stage, not 9.07s
+    legacy, _legacy_sent = _staged_client(fake_pi)
+    with pytest.raises(TimeoutError) as legacy_error:
+        legacy._request_pi({"type": "get_state"}, timeout=0.07)
+    assert str(staged_error.value) == str(legacy_error.value)
+
+
+def test_staged_wait_adds_no_jitter_between_stages(fake_pi):
+    """Respawn jitter belongs to the re-spawn boundary in the delegate tool
+    layer; the staged wait itself must cost exactly sum(stages) — the ladder
+    buys patience, it must not add sleeps."""
+    client, _sent = _staged_client(fake_pi)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        client._request_pi(
+            {"type": "get_state"}, timeout=5.0, stages=[0.05, 0.05, 0.05]
+        )
+    elapsed = time.monotonic() - started
+    assert 0.15 <= elapsed < 0.5  # respawn_pause floors at 0.5s — excluded
+
+
+def test_control_methods_pass_stages_to_request_pi(fake_pi, clean_registry):
+    """start/get_state/get_messages/steer forward the ladder verbatim;
+    default calls forward ``None`` — never a surprise ladder."""
+    client, _sent = _staged_client(fake_pi)  # live fake proc: _spawn no-ops
+    recorded: list[dict] = []
+
+    def recorder(command, timeout=60.0, stages=None):
+        recorded.append(
+            {"type": command["type"], "timeout": timeout, "stages": stages}
+        )
+        return {"success": True, "data": {}}
+
+    client._request_pi = recorder
+    ladder = [30.0, 90.0, 240.0]
+    client.start(stages=ladder)
+    client.get_state(stages=ladder)
+    client.get_messages(stages=ladder)
+    client.steer("hello", stages=ladder)
+    client.start()
+    client.get_messages()
+    assert [(call["type"], call["stages"]) for call in recorded] == [
+        ("get_state", ladder),
+        ("get_state", ladder),
+        ("get_messages", ladder),
+        ("steer", ladder),
+        ("get_state", None),
+        ("get_messages", None),
+    ]
+
+
+def test_abort_is_never_staged(fake_pi):
+    """abort is the control escape that cuts a wedged turn loose — it must
+    stay a short fixed-bound wait even when every other handshake walks the
+    bootstrap ladder."""
+    client, _sent = _staged_client(fake_pi)
+    recorded: list[dict] = []
+
+    def recorder(command, timeout=60.0, stages=None):
+        recorded.append({"timeout": timeout, "stages": stages})
+        return {"success": True}
+
+    client._request_pi = recorder
+    client.abort()
+    assert recorded == [{"timeout": 30.0, "stages": None}]
+    with pytest.raises(TypeError):
+        client.abort(stages=[30.0])  # type: ignore[call-arg]

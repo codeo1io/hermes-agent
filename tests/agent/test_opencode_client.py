@@ -584,3 +584,17 @@ def test_run_prompt_advances_liveness_activity_on_transcript_change():
     # wall-clock activity sources) and lands inside the turn.
     assert isinstance(client.last_turn_activity_at, float)
     assert before <= client.last_turn_activity_at <= after
+
+
+def test_steer_accepts_delegate_tool_call_shape():
+    """``tools/delegate_session_tool`` calls ``client.steer(text, timeout=...,
+    stages=...)`` on every backend.  The opencode path is an immediate queued
+    note (no wait), so the staged-handshake kwargs must be accepted and
+    ignored — a ``TypeError`` here would turn every opencode steer into
+    ``Could not steer opencode session`` and break the queued-note promise."""
+    transport = FakeTransport([])
+    client = make_client(transport)
+    result = client.steer("keep going", timeout=600.0, stages=[30.0, 90.0, 240.0])
+    assert result["queued"] is True
+    assert "note" in result
+    assert transport.requests == []  # no wire traffic: steer is a queued note

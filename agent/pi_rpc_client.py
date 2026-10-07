@@ -524,7 +524,9 @@ class PiRPCClient:
             proc.stdin.write(json.dumps(command) + "\n")
             proc.stdin.flush()
 
-    def _request_pi(self, command: dict, timeout: float = 60.0) -> dict:
+    def _request_pi(
+        self, command: dict, timeout: float = 60.0, stages: list[float] | None = None
+    ) -> dict:
         with self._pending_lock:
             self._next_id += 1
             request_id = self._next_id
@@ -532,11 +534,37 @@ class PiRPCClient:
             slot: list = [None]
             self._pending[request_id] = [waiter, slot]
         self._send_pi(dict(command, id=request_id))
-        if not waiter.wait(timeout):
-            with self._pending_lock:
-                self._pending.pop(request_id, None)
-            raise TimeoutError(f"pi did not answer command {command.get('type')!r}")
-        return slot[0] or {}
+        if stages is None:
+            # Legacy single bounded wait — today's behavior, byte for byte.
+            if not waiter.wait(timeout):
+                with self._pending_lock:
+                    self._pending.pop(request_id, None)
+                raise TimeoutError(f"pi did not answer command {command.get('type')!r}")
+            return slot[0] or {}
+        # Staged handshake wait (agent/delegate_start_budget.py ladder): the
+        # SAME pending entry is waited on stage by stage — the command is
+        # never re-sent — so a child that is merely slow under host load gets
+        # the full ladder while stage 1 keeps the fast wedge-fail. Between
+        # stages the child is probed: a dead process will never answer, and
+        # waiting out the ladder on a corpse both burns the phase budget and
+        # misreports a transport death as a bootstrap timeout. (The reader's
+        # EOF drain usually wins this race and settles the waiter with the
+        # exit error; the probe only catches the window it has not reached.)
+        for stage in stages or [timeout]:  # empty ladder degrades to one wait
+            if waiter.wait(stage):
+                return slot[0] or {}
+            proc = self._proc
+            if proc is None or proc.poll() is not None:
+                with self._pending_lock:
+                    self._pending.pop(request_id, None)
+                code = None if proc is None else proc.poll()
+                raise RuntimeError(
+                    self._process_exited_error
+                    or f"pi rpc process exited with code {code}"
+                )
+        with self._pending_lock:
+            self._pending.pop(request_id, None)
+        raise TimeoutError(f"pi did not answer command {command.get('type')!r}")
 
     def _mark_turn_activity(self) -> None:
         with self._turn_activity_lock:
@@ -745,25 +773,35 @@ class PiRPCClient:
 
     # -- persistent-session control -------------------------------------------
 
-    def start(self, *, timeout: float = 30.0, stages: list[float] | None = None) -> dict[str, Any]:
+    def start(
+        self, *, timeout: float = 30.0, stages: list[float] | None = None
+    ) -> dict[str, Any]:
         """Start the Pi RPC process and return native session state.
 
         ``stages`` carries the staged handshake ladder from
-        ``agent/delegate_start_budget.py`` (call-shape parity with the tool
-        wiring). It is accepted and ignored for now: single-bounded-wait
-        behavior. The staged ladder-walking semantics (probe liveness between
-        stages) land with the pi stall-riders change.
+        ``agent/delegate_start_budget.py``: the same pending get_state is
+        waited on stage by stage with the child liveness-probed between
+        stages — a live process under host load gets the full ladder, a
+        dead one fails fast as transport. ``None`` keeps the single bounded
+        ``timeout`` wait; the TimeoutError wording is identical on both
+        paths (the conductor spool boundary greps it).
         """
         self._spawn()
-        response = self._request_pi({"type": "get_state"}, timeout=timeout)
+        response = self._request_pi(
+            {"type": "get_state"}, timeout=timeout, stages=stages
+        )
         if response.get("success") is False:
             raise RuntimeError(response.get("error") or "pi get_state failed")
         data = response.get("data")
         return data if isinstance(data, dict) else {}
 
-    def get_state(self, *, timeout: float = 30.0) -> dict[str, Any]:
+    def get_state(
+        self, *, timeout: float = 30.0, stages: list[float] | None = None
+    ) -> dict[str, Any]:
         self._spawn()
-        response = self._request_pi({"type": "get_state"}, timeout=timeout)
+        response = self._request_pi(
+            {"type": "get_state"}, timeout=timeout, stages=stages
+        )
         if response.get("success") is False:
             raise RuntimeError(response.get("error") or "pi get_state failed")
         data = response.get("data")
@@ -772,9 +810,10 @@ class PiRPCClient:
     def get_messages(
         self, *, timeout: float = 30.0, stages: list[float] | None = None
     ) -> list[Any]:
-        # `stages`: accepted-and-ignored — see start().
         self._spawn()
-        response = self._request_pi({"type": "get_messages"}, timeout=timeout)
+        response = self._request_pi(
+            {"type": "get_messages"}, timeout=timeout, stages=stages
+        )
         if response.get("success") is False:
             raise RuntimeError(response.get("error") or "pi get_messages failed")
         data = response.get("data")
@@ -792,9 +831,14 @@ class PiRPCClient:
         if self.answer_pending_question(message):
             return {"success": True, "command": "answer_question"}
         self._spawn()
-        return self._request_pi({"type": "steer", "message": message}, timeout=timeout)
+        return self._request_pi(
+            {"type": "steer", "message": message}, timeout=timeout, stages=stages
+        )
 
     def abort(self, *, timeout: float = 30.0) -> dict[str, Any]:
+        # Deliberately never staged: abort is the control escape that cuts a
+        # wedged turn loose — it must stay a short fixed-bound wait even when
+        # every other handshake walks the bootstrap ladder.
         self._spawn()
         return self._request_pi({"type": "abort"}, timeout=timeout)
 
