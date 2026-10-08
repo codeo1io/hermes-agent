@@ -130,6 +130,36 @@ jobs:
           # Outside the workspace on purpose: logs written into the repo
           # would trip the driver's own dirty-tree guard.
           HERMES_E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
+          # Known-failure classification: a matching rule (exact OLD commit +
+          # method pair + transcript signatures) writes a receipt the chart
+          # renders as `known [n]` instead of unexpected-red. The driver's
+          # fail() only consults the classifier when this is set.
+          HERMES_E2E_KNOWN_FAILURES: '1'
+
+      # Same receipt contract as the windows/macos leg workflows: the result
+      # chart turns a SUCCESSFUL job that uploaded install-e2e-known-<rule
+      # id>--<leg id> into a `known [n]` cell.
+      - name: Upload known-failure receipt
+        id: known
+        if: always()
+        run: |
+          set -euo pipefail
+          receipt="${{ runner.temp }}/hermes-installer-script-e2e/known-failure.json"
+          if [ ! -f "$receipt" ]; then
+            echo 'no known-failure receipt; nothing to upload' >&2
+            exit 0
+          fi
+          id="$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).id' "$receipt")"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "path=$receipt" >> "$GITHUB_OUTPUT"
+      - name: Publish known-failure receipt
+        if: always() && steps.known.outputs.id != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-e2e-known-${{ steps.known.outputs.id }}--${{ inputs.leg-id }}
+          path: ${{ steps.known.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Stop screen recording
         if: always()

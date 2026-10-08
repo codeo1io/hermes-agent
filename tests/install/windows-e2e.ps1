@@ -981,7 +981,32 @@ function Invoke-CheckedPhaseUpdate {
     } catch {
         $failure = $_
         $node = Get-ManagedNode
-        $classification = & $node (Join-Path $AssetsDir "known-failures.cjs") $WorkRoot $InstallMethod $Route $failure.Exception.Message
+        $classification = & $node (Join-Path $AssetsDir "known-failures.cjs") $WorkRoot $InstallMethod $Route $failure.Exception.Message windows update
+        $classificationExit = $LASTEXITCODE
+        if ($classificationExit -ne 0) { throw $failure }
+        $receipt = ($classification | Out-String) | ConvertFrom-Json
+        Write-Host "KNOWN FAILURE [$($receipt.id)]: $($receipt.title)"
+        Write-Host "  $($receipt.explanation)"
+        if ($env:GITHUB_OUTPUT) {
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "known_failure=$($receipt.id)" -Encoding UTF8
+        }
+        if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Value "Known historical failure: $($receipt.title). See the result chart footnote and uploaded known-failure.json."
+        }
+    }
+}
+
+function Invoke-CheckedPhaseInstall {
+    # Install-phase known failures (the published Setup.exe failing against a
+    # pre-pm OLD tree) classify the same way: rotate nothing -- the bootstrap
+    # log IS the evidence -- and let the classifier consult it. Fail-closed:
+    # an unmatched failure rethrows.
+    try {
+        Invoke-PhaseInstall
+    } catch {
+        $failure = $_
+        $node = Get-ManagedNode
+        $classification = & $node (Join-Path $AssetsDir "known-failures.cjs") $WorkRoot $InstallMethod $Route $failure.Exception.Message windows install
         $classificationExit = $LASTEXITCODE
         if ($classificationExit -ne 0) { throw $failure }
         $receipt = ($classification | Out-String) | ConvertFrom-Json
@@ -1012,11 +1037,11 @@ Set-GitRedirect
 
 switch ($Phase) {
     "stage"   { Invoke-PhaseStage }
-    "install" { Invoke-PhaseInstall }
+    "install" { Invoke-CheckedPhaseInstall }
     "update"  { Invoke-CheckedPhaseUpdate }
     "all" {
         Invoke-PhaseStage
-        Invoke-PhaseInstall
+        Invoke-CheckedPhaseInstall
         Invoke-CheckedPhaseUpdate
     }
 }
