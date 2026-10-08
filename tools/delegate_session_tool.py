@@ -26,6 +26,7 @@ from typing import Any, Dict, Optional
 
 from agent.delegate_errors import classify_delegate_failure
 from agent.delegate_health import get_delegate_health_ledger
+from agent.delegate_salvage import bank_turn_salvage
 from agent.delegate_start_budget import (
     BOOTSTRAP_TOTAL_CAP,
     bootstrap_stage_budgets,
@@ -187,6 +188,14 @@ def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
         "last_progress_at": record.get("last_progress_at"),
         "last_turn_duration_s": record.get("last_turn_duration_s"),
         "last_turn_outcome": record.get("last_turn_outcome") or None,
+        # v4 additive (abort-salvage envelope, family
+        # cognitive-continuity.prevention.6c3867f4ffd9): bounded transcript
+        # tail + last tool calls of the turn that DIED, fetched best-effort
+        # on the failure path so a replacement supervisor sees the work
+        # product, not just the failure class. Strictly additive — older
+        # v4 files simply lack it; no version bump (loader passes unknown
+        # fields through).
+        "salvage_tail": record.get("salvage_tail") or None,
     }
 
 
@@ -431,6 +440,10 @@ def _restore_durable_progress(record: Dict[str, Any], meta: Dict[str, Any]) -> N
     for key in ("last_line", "last_progress_at", "last_turn_duration_s"):
         record[key] = meta.get(key)
     record["last_turn_outcome"] = meta.get("last_turn_outcome") or None
+    # The salvage tail of the turn that died before the restart rides the
+    # reopen too — dropping it here would let the resumed session's first
+    # persist erase exactly the continuity evidence this module guarantees.
+    record["salvage_tail"] = meta.get("salvage_tail") or None
 
 
 def _message_text(value: Any) -> str:
@@ -838,6 +851,9 @@ def _durable_summary(
         "recovery_of_native_id": meta.get("recovery_of_native_id") or None,
         "recovery_reason": meta.get("recovery_reason") or None,
         "recovered_at": meta.get("recovered_at") or None,
+        # Symmetric with the durable snapshot: the salvage tail is
+        # persisted data, safe to report offline (no live client needed).
+        "salvage_tail": meta.get("salvage_tail") or None,
     }
     if note:
         out["note"] = note
@@ -1062,10 +1078,14 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
                 or record.get("native_session_id")
                 or record["session_id"]
             )
-            # A completed turn clears the failure streak.
+            # A completed turn clears the failure streak — and the
+            # salvage evidence of whatever died before it: a stale
+            # salvage_tail would describe a turn that is no longer the
+            # last one.
             record["error_class"] = ""
             record["retry_after"] = None
             record["consecutive_failures"] = 0
+            record["salvage_tail"] = None
             if record.get("status") != "closed":
                 _transition_status_locked(record, "idle")
             else:
@@ -1078,6 +1098,14 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
     except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         error_class, retry_after = _classify_turn_exception(exc)
+        # Bank WHAT the dying turn produced (bounded transcript tail)
+        # before banking WHY it died. The fetch runs OUTSIDE the session
+        # lock — the RPC may block on a wedged child, and
+        # _SESSION_CONDITION is global across delegate sessions — and can
+        # never raise, so it cannot mask the failure evidence below
+        # (family cognitive-continuity.prevention.6c3867f4ffd9: aborted
+        # turns used to leave heartbeats but no work product).
+        salvage_tail = bank_turn_salvage(client)
         with _SESSION_CONDITION:
             # Bank progression evidence (outcome=error) BEFORE persisting:
             # the metadata file is the evidence the replacement supervisor
@@ -1089,6 +1117,7 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
             record["consecutive_failures"] = (
                 int(record.get("consecutive_failures") or 0) + 1
             )
+            record["salvage_tail"] = salvage_tail
             # Stall-time liveness triage rides the typed exception as a
             # dict; bank it verbatim. A failure without one (non-stall
             # errors) keeps any previously banked evidence — the most
