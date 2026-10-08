@@ -173,15 +173,30 @@ def get_nt_namespace_error(path: str, *, verb: str = "Access") -> Optional[str]:
     )
 
 
+# Home-dotfile credential material as relpath tuples under the user's home:
+# exact files hard-denied for writes. Module-level (not function-local) so the
+# managed-files router (hermes_cli/web_routers/files.py) derives its browser
+# denylist from this single source instead of mirroring it by hand.
+_WRITE_DENIED_HOME_FILE_RELPATHS = (
+    (".ssh", "authorized_keys"), (".ssh", "id_rsa"), (".ssh", "id_ed25519"),
+    (".netrc",), (".pgpass",), (".npmrc",), (".pypirc",), (".git-credentials",),
+)
+
+# Credential/config directory trees under the user's home, denied whole:
+# single-component names (matched on any path component) plus nested relpaths
+# like (".config", "gh") (matched as consecutive components).
+_WRITE_DENIED_HOME_DIR_RELPATHS = (
+    (".ssh",), (".aws",), (".gnupg",), (".kube",),
+    (".docker",), (".azure",), (".config", "gh"), (".config", "gcloud"),
+)
+
+
 def build_write_denied_paths(home: str) -> set[str]:
     """Return exact sensitive paths that must never be written."""
     # ``~/.ssh/config`` is deliberately NOT hard-denied: no key bytes, and editing
     # it is routine. It can carry ProxyCommand / Match exec, so it goes through the
     # approval gate instead (build_write_approval_paths).
-    home_files = (
-        (".ssh", "authorized_keys"), (".ssh", "id_rsa"), (".ssh", "id_ed25519"),
-        (".netrc",), (".pgpass",), (".npmrc",), (".pypirc",), (".git-credentials",),
-    )
+    home_files = _WRITE_DENIED_HOME_FILE_RELPATHS
     # Secret material under HERMES_HOME, on both the active profile and the global
     # root: overwriting the root .env leaks credentials across every profile that
     # inherits it, and the root Anthropic PKCE store is still read by default /
@@ -209,9 +224,8 @@ def build_write_denied_paths(home: str) -> set[str]:
 def build_write_denied_prefixes(home: str) -> list[str]:
     """Return sensitive directory prefixes that must never be written."""
     paths = [
-        *(os.path.join(home, d) for d in (".ssh", ".aws", ".gnupg", ".kube")),
+        *(os.path.join(home, *d) for d in _WRITE_DENIED_HOME_DIR_RELPATHS),
         "/etc/sudoers.d", "/etc/systemd",
-        *(os.path.join(home, *d) for d in ((".docker",), (".azure",), (".config", "gh"), (".config", "gcloud"))),
     ]
     return [os.path.realpath(p) + os.sep for p in paths]
 

@@ -24,10 +24,11 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
+from agent import file_safety as _file_safety
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import (
-    _fs_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
+    _fs_path, _hosted_fs_read_guard, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
 )
 from hermes_cli.web_models import (
     ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
@@ -58,24 +59,53 @@ _FS_READDIR_HIDDEN = {
 
 # Basenames the managed-files API must never list, read or download: credential
 # stores that become live secrets in the browsable tree the moment an operator
-# points the managed root at HERMES_HOME. Mirrors the two canonical guards
-# (agent.file_safety.get_read_block_error, gateway.platforms.base
-# ._ROOT_CREDENTIAL_FILES) so the Files tab never lags behind them.
+# points the managed root at HERMES_HOME. DERIVED from the canonical guards in
+# agent.file_safety (credential stores, home-dotfile material, protected
+# subpaths) so the Files tab can never lag behind what the agent's own file
+# tools refuse for the same tree. The two additions the gateway exfil superset
+# (gateway.platforms.base._ROOT_CREDENTIAL_PATHS) carries beyond file_safety
+# are embedded below — that module is too heavy to import on the dashboard
+# boot path — and pinned equal to the live table by
+# tests/hermes_cli/test_web_files_sensitive_parity.py.
 # These typically contain credentials (API keys, tokens) and exposing them through the dashboard file
 # browser is a security leak — see issue #57505.
-_SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
-    "auth.json", "auth.lock", "credentials", "config.yaml", ".anthropic_oauth.json",
-    "google_token.json", "google_oauth_pending.json", "google_oauth.json",
-    "webhook_subscriptions.json", "bws_cache.json", "bws_cache.enc.json",
-    ".git-credentials",  # git's credential-store cache (file_safety blocks it too)
+_GATEWAY_EXFIL_ONLY_BASENAMES = frozenset({
+    "credentials", "config.yaml", "google_token.json", "google_oauth_pending.json",
+    "bws_cache.enc.json",
 })
+# Conversation-transcript / task stores from the same gateway superset, with
+# their SQLite WAL/SHM/rollback-journal sidecars (WAL mode touches -wal on
+# every write, so blocking the bare DB alone is not enough).
+_STATE_STORE_BASENAMES = frozenset(
+    f"{store}{suffix}"
+    for store in ("state.db", "kanban.db")
+    for suffix in ("", "-wal", "-shm", "-journal")
+)
+_SENSITIVE_MANAGED_FILE_BASENAMES = (
+    frozenset(Path(rel).name for rel in _file_safety._CREDENTIAL_FILE_NAMES)
+    | frozenset(rel[-1] for rel in _file_safety._WRITE_DENIED_HOME_FILE_RELPATHS)
+    | _GATEWAY_EXFIL_ONLY_BASENAMES
+    | _STATE_STORE_BASENAMES
+)
 
-# Directory names whose whole subtree is credential material (the canonical
-# guards deny these as trees: _ROOT_CREDENTIAL_DIRS and the mcp-tokens/ prefix
-# match). The browser can descend into subdirs, so a basename-only guard would
-# still expose ``mcp-tokens/<server>.json``; match on ANY path component so the
-# trees are blocked wherever they sit under the root, no HERMES_HOME resolution.
-_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})
+# Directory names whose whole subtree is credential material: single-source
+# from agent.file_safety (read-denied trees, protected subpaths, write-denied
+# home-dotfile config trees). The browser can descend into subdirs, so a
+# basename-only guard would still expose ``mcp-tokens/<server>.json``; match
+# on ANY path component so the trees are blocked wherever they sit under the
+# root, no HERMES_HOME resolution. Nested write-denied relpaths (".config",
+# "gh") that must NOT match on their first component alone are matched as
+# consecutive-component pairs by _is_sensitive_path instead.
+_SENSITIVE_MANAGED_DIR_NAMES = (
+    frozenset(_file_safety._HERMES_PROTECTED_SUBPATHS)
+    | frozenset(d[0] for d in _file_safety._READ_DENIED_DIRS)
+    | frozenset(
+        d[0] for d in _file_safety._WRITE_DENIED_HOME_DIR_RELPATHS if len(d) == 1
+    )
+)
+_SENSITIVE_MANAGED_DIR_PAIRS = frozenset(
+    d for d in _file_safety._WRITE_DENIED_HOME_DIR_RELPATHS if len(d) > 1
+)
 
 
 def _is_sensitive_filename(name: str) -> bool:
@@ -91,8 +121,10 @@ def _is_sensitive_filename(name: str) -> bool:
 
 def _is_sensitive_path(path: Path) -> bool:
     """True when the basename is sensitive OR any path component (case-
-    insensitive) is a credential directory. Read-side guard (list/read/
-    download); the write endpoints are a separate threat class.
+    insensitive) is a credential directory / protected subpath, or two
+    consecutive components name a nested credential tree (".config"/"gh",
+    ".config"/"gcloud" — a bare ".config" component stays readable).
+    Read-side guard (list/read/download); the write endpoints are a separate threat class.
 
     Read-side only: this guards list/read/download (the #57505 exfil surface). The write endpoints
     (upload/mkdir/delete) are a separate threat class handled by the write-path checks; extending this guard
@@ -100,7 +132,13 @@ def _is_sensitive_path(path: Path) -> bool:
     """
     if _is_sensitive_filename(path.name):
         return True
-    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)
+    parts = [part.lower() for part in path.parts]
+    if any(part in _SENSITIVE_MANAGED_DIR_NAMES for part in parts):
+        return True
+    return any(
+        (parts[i], parts[i + 1]) in _SENSITIVE_MANAGED_DIR_PAIRS
+        for i in range(len(parts) - 1)
+    )
 
 
 _FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
@@ -615,8 +653,9 @@ _FS_LIST_ERRNO = (
 
 
 @router.get("/api/fs/list")
-async def fs_list(path: str):
+async def fs_list(path: str, request: Request):
     target = _fs_path(path)
+    _hosted_fs_read_guard(target, request)
     try:
         entries = []
         with os.scandir(target) as scan:
@@ -638,8 +677,10 @@ async def fs_list(path: str):
 
 
 @router.get("/api/fs/read-text")
-async def fs_read_text(path: str):
-    target, st = _fs_regular_file(_fs_path(path))
+async def fs_read_text(path: str, request: Request):
+    target = _fs_path(path)
+    _hosted_fs_read_guard(target, request)
+    target, st = _fs_regular_file(target)
     if st.st_size > _FS_TEXT_SOURCE_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
     data = await asyncio.to_thread(
@@ -718,10 +759,12 @@ async def _fs_download_path(path: str, profile: Optional[str], session_id: Optio
 
 @router.get("/api/fs/read-data-url")
 async def fs_read_data_url(
-    path: str, profile: Optional[str] = None, session_id: Optional[str] = None,
+    path: str, request: Request, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
     from hermes_cli.web_server import _FS_DATA_URL_MAX_BYTES
-    target, st = _fs_regular_file(await _fs_download_path(path, profile, session_id))
+    target = await _fs_download_path(path, profile, session_id)
+    _hosted_fs_read_guard(target, request)
+    target, st = _fs_regular_file(target)
     if st.st_size > _FS_DATA_URL_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
     encoded = await asyncio.to_thread(
@@ -732,9 +775,11 @@ async def fs_read_data_url(
 
 @router.get("/api/fs/download")
 async def fs_download(
-    path: str, profile: Optional[str] = None, session_id: Optional[str] = None,
+    path: str, request: Request, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
-    target, _st = _fs_regular_file(await _fs_download_path(path, profile, session_id))
+    target = await _fs_download_path(path, profile, session_id)
+    _hosted_fs_read_guard(target, request)
+    target, _st = _fs_regular_file(target)
     return FileResponse(
         path=str(target),
         media_type=_fs_mime_type(target),

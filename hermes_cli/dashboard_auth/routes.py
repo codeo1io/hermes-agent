@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from typing import Any, Deque, Dict
 from urllib.parse import quote, unquote, urlencode, urlparse, urlunparse
 
@@ -337,8 +337,24 @@ async def auth_callback(
 # proxy the IP is the proxy's unless X-Forwarded-For).
 _PW_RATE_MAX_ATTEMPTS = 10
 _PW_RATE_WINDOW_SEC = 60.0
-_pw_attempts: Dict[str, Deque[float]] = defaultdict(deque)
+# Bound the distinct client-IP keys we keep so a spoofed-source flood cannot
+# grow the limiter without limit (adopted from upstream d59c736fcbb).
+_PW_RATE_MAX_BUCKETS = 4096
+_pw_attempts: "OrderedDict[str, Deque[float]]" = OrderedDict()
 _pw_attempts_lock = threading.Lock()
+
+
+def _prune_password_rate_buckets_locked(cutoff: float) -> None:
+    """Drop expired entries; drop buckets left empty (old client IPs).
+
+    Must be called with ``_pw_attempts_lock`` held.
+    """
+    for bucket_key in list(_pw_attempts.keys()):
+        bucket = _pw_attempts[bucket_key]
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if not bucket:
+            _pw_attempts.pop(bucket_key, None)
 
 
 def _password_rate_limited(ip: str) -> bool:
@@ -347,7 +363,19 @@ def _password_rate_limited(ip: str) -> bool:
     now = time.monotonic()
     cutoff = now - _PW_RATE_WINDOW_SEC
     with _pw_attempts_lock:
-        bucket = _pw_attempts[ip or "_unknown_"]
+        key = ip or "_unknown_"
+        max_buckets = max(1, int(_PW_RATE_MAX_BUCKETS))
+        if key not in _pw_attempts and len(_pw_attempts) >= max_buckets:
+            _prune_password_rate_buckets_locked(cutoff)
+        while key not in _pw_attempts and len(_pw_attempts) >= max_buckets:
+            _pw_attempts.popitem(last=False)
+
+        bucket = _pw_attempts.get(key)
+        if bucket is None:
+            bucket = deque()
+            _pw_attempts[key] = bucket
+        else:
+            _pw_attempts.move_to_end(key)
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= _PW_RATE_MAX_ATTEMPTS:
