@@ -144,6 +144,26 @@ class Fleet:
         marks = marks or {}
         return {role: list(srv.requests[marks.get(role, 0):]) for role, srv in self.servers.items()}
 
+    def settle(self, quiet: float = 5.0, timeout: float = 60.0) -> None:
+        """Block until no server has served a new request for ``quiet`` seconds (bounded by ``timeout``).
+
+        Off-critical-path aux calls (auto-title upgrades) fire from daemon threads in the
+        gateway process, so their POST can land after ``message.complete``. A turn that
+        closes its measurement window with such a straggler still in flight hands the call
+        to the NEXT leg's window, where its correctly-selected host and key read as a leak.
+        Waiting for fleet quiescence keeps each straggler inside the turn that issued it.
+        Fails open at ``timeout``: an unusually late call is then exactly what the next
+        leg's routing check should flag.
+        """
+        deadline = time.monotonic() + timeout
+        last_change = time.monotonic()
+        last_total = sum(len(srv.requests) for srv in self.servers.values())
+        while time.monotonic() < deadline and time.monotonic() - last_change < quiet:
+            time.sleep(0.1)
+            total = sum(len(srv.requests) for srv in self.servers.values())
+            if total != last_total:
+                last_change, last_total = time.monotonic(), total
+
     def owner_of(self, secret: str) -> str:
         for role, keys in self.keys.items():
             if secret in keys:

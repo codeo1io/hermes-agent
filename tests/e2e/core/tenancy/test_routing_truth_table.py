@@ -377,7 +377,15 @@ def test_tui_gateway_model_switch_routing(tmp_path: Path, request: pytest.Fixtur
             pool_state["fail"] = leg.host == "pool" and not leg.ok
             done = gw.turn(sid, f"turn {i}")
             if i == 0:
-                gw.seen_or_wait(gw.event("session.title", sid), timeout=120)  # first-turn aux call settles
+                # Instant stage-1 title, emitted synchronously in the turn prologue — pins the
+                # event contract only; it does NOT wait for the stage-2 model title below.
+                gw.seen_or_wait(gw.event("session.title", sid), timeout=120)
+            # Close this leg's window only once its off-critical-path aux work settles: the
+            # stage-2 auto-title upgrade runs on a daemon thread and its POST routinely lands
+            # after message.complete, so a window closed early bills turn-N's own correctly-
+            # routed call to the next leg as a leak (CI failed leg 1 twice exactly so, on
+            # turn-0's title POST reaching 'main').
+            fleet.settle()
             log = fleet.since(marks)
             payload = (done.get("params") or {}).get("payload") or {}
             ctx = f"leg {i} ({leg.value!r} -> {leg.host}): {done.get('params', {}).get('type')} {str(payload)[:300]}\n{describe(log)}"
