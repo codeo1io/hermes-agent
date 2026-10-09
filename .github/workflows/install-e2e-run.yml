@@ -104,6 +104,21 @@ jobs:
           mode: start
           output: ${{ runner.temp }}/e2e-logs/recording.mkv
 
+      # The desktop app compiles its X11 HID monitor natively at install
+      # time (apps/desktop/electron/native/hud-modifier-monitor-x11.c:
+      # Xlib.h, XKBlib.h, extensions/XInput2.h). The stock ubuntu-latest
+      # image ships the X runtime but not the headers, so every linux leg
+      # that installs the desktop dies in electron-rebuild with
+      # "fatal error: X11/Xlib.h: No such file or directory" and the
+      # app-driven update then fails its assertion. macOS legs route here
+      # too (runner: macos-latest) -- apt is Linux-only, so gate on OS.
+      - name: Install X11 dev headers (linux desktop native build)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libx11-dev libxi-dev
+
       - name: Run install + update E2E
         run: |
           set -euo pipefail
