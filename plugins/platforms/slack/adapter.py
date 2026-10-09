@@ -13,13 +13,18 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, ClassVar, Dict, Optional, Any, Tuple, List
 
-import aiohttp
-
+# aiohttp ships only in the [slack]/[messaging] extras, so guard it like the slack SDKs
+# above: the adapter module (and the e2e conftest that imports it with mocked slack
+# modules) must stay importable without the extras; runtime callers treat a missing
+# aiohttp via SLACK_AVAILABLE and the globals() lookup in _is_likely_transient_network_error.
+aiohttp: Any = None
 try:
+    import aiohttp as _aiohttp
     from slack_bolt.async_app import AsyncApp
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_sdk.web.async_client import AsyncWebClient
 
+    aiohttp = _aiohttp
     SLACK_AVAILABLE = True
 except ImportError:
     SLACK_AVAILABLE = False
