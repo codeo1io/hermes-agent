@@ -69,6 +69,7 @@ describe('known install failures', () => {
       error: 'E2E ASSERTION FAILED: AutoHotkey driver exited 0 (Install clicked, Launch clicked, app window seen)',
       logs: { bootstrap: pmLockLog },
     }
+
     expect(matchKnownFailure(sample)?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
     // Update-phase re-runs of the Setup.exe classify too
     expect(matchKnownFailure({ ...sample, phase: 'update', installMethod: 'installer-script', updateMethod: 'desktop-installer@latest' })?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
@@ -88,6 +89,7 @@ describe('known install failures', () => {
       error: 'E2E ASSERTION FAILED: dmg bootstrap exited 1; transcript above',
       logs: { bootstrap: '2026-10-08T14:40:01.228057Z ERROR hermes_bootstrap_lib::bootstrap: bootstrap FAILED stage=Some("python-deps") error=pm install failed' },
     }
+
     expect(matchKnownFailure(sample)?.id).toBe('pre-pm-macos-setup-pm-install-failed')
     expect(matchKnownFailure({ ...sample, platform: 'windows' })).toBeNull()
     expect(matchKnownFailure({ ...sample, logs: { bootstrap: 'bootstrap FAILED stage=Some("products") error=pm install failed' } })).toBeNull()
@@ -102,12 +104,14 @@ describe('known install failures', () => {
       '[+05:56]   - <ws connected> ws://127.0.0.1:46701/8dd906ea-127e-4166-a48b-5c017d2fdae8',
       '[+05:56]   - [pid=5934][out] [hermes] install stamp: 39a374d35288 (main) from ci',
     ].join('\n')
+
     const sample = {
       platform: 'linux', phase: 'update', commit: PRE_PM,
       installMethod: 'installer-script', updateMethod: 'hermes-desktop-app-update',
       error: 'E2E ASSERTION FAILED: app-driven update exited 1; transcript above',
       logs: { 'app-update': hangLog },
     }
+
     expect(matchKnownFailure(sample)?.id).toBe('pre-pm-linux-app-update-self-relaunch')
     // Fail-closed: a firstWindow timeout (window appeared, different class) or
     // a different OS/method must NOT classify
@@ -118,12 +122,15 @@ describe('known install failures', () => {
 
   it('classifyWorkRoot reads posix state from an explicit OLD sha and logs dir', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'known-install-'))
+
     try {
       mkdirSync(path.join(root, 'logs'), { recursive: true })
       writeFileSync(path.join(root, 'logs', 'app-update.log'), 'electron.launch: Timeout 180000ms exceeded.\n<ws connected> ws://127.0.0.1:46701/8dd906ea\n')
+
       const receipt = classifyWorkRoot(root, 'installer-script', 'hermes-desktop-app-update',
         'E2E ASSERTION FAILED: app-driven update exited 1; transcript above',
         'linux', 'update', PRE_PM, path.join(root, 'logs'))
+
       expect(receipt?.id).toBe('pre-pm-linux-app-update-self-relaunch')
       // No explicit sha -> falls back to shas.json (absent here -> throw, the
       // posix drivers always pass the sha)
