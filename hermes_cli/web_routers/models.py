@@ -8,7 +8,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_server_config import (
@@ -50,11 +50,50 @@ def _load_config_scoped(profile: Optional[str]) -> dict:
         return load_config()
 
 
+def _profile_param_trusted(request: Request) -> bool:
+    """Whether THIS request may select a profile via ``?profile=`` on a public route.
+
+    Profile selection is an authenticated capability: this route is in ``PUBLIC_API_PATHS``
+    (the SPA pre-loads model metadata before login), and an unauthenticated ``?profile=``
+    used to answer 404-unknown vs 200-known — a cross-profile enumeration oracle. Trusted =
+    the gate already attached a session, the token-auth seam authenticated a service caller,
+    a loopback dashboard (``auth_required`` False, every caller local), or — because public
+    paths short-circuit the gate BEFORE it verifies cookies — a session cookie/bearer that
+    verifies against the provider stack right here. A provider outage fails CLOSED for the
+    param (default profile served) and never for the route itself.
+    """
+    if not getattr(request.app.state, "auth_required", False):
+        return True
+    if getattr(request.state, "session", None) is not None:
+        return True
+    if getattr(request.state, "token_authenticated", False):
+        return True
+    from hermes_cli.dashboard_auth.cookies import read_session_cookies, read_session_provider
+    from hermes_cli.dashboard_auth.middleware import _verify_access_token
+    from hermes_cli.dashboard_auth.request_utils import extract_bearer
+
+    bearer = extract_bearer(request)
+    access_token, _refresh_token = read_session_cookies(request)
+    token = bearer or access_token
+    if not token:
+        return False
+    try:
+        return _verify_access_token(
+            request, access_token=token,
+            provider_hint=None if bearer else read_session_provider(request),
+            audit=False,
+        ) is not None
+    except Exception:
+        return False  # provider unreachable/misconfigured: strip the param, serve the page
+
+
 @router.get("/api/model/info")
-def get_model_info(profile: Optional[str] = None):
+def get_model_info(request: Request, profile: Optional[str] = None):
     """Resolved metadata for the configured model: auto-detected vs configured
     context length (so the UI can show "Auto-detected: 200K" beside the
     override) plus models.dev capabilities when available."""
+    if profile and not _profile_param_trusted(request):
+        profile = None  # public caller: serve the dashboard's own profile, uniformly
     try:
         model_cfg = _load_config_scoped(profile).get("model", "")
         model_name, provider = _main_model_fields(model_cfg)

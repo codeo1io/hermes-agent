@@ -89,6 +89,11 @@ def _origin_head_abbrev(cwd: str) -> str:
 
 
 def _ref_exists(cwd: str, ref: str) -> bool:
+    # A leading dash is never a valid ref name — reject it outright so an option-looking
+    # "ref" cannot reach git's option parser. No "--" separator: rev-parse treats
+    # post-"--" args as pathspecs, which would break resolution itself.
+    if ref.startswith("-"):
+        return False
     return _git(cwd, ["rev-parse", "--verify", "--quiet", ref])[0] == 0
 
 
@@ -330,6 +335,12 @@ def review_revert(cwd: str, file_path: str | None) -> dict:
 
 
 def review_rev_parse(cwd: str, ref: str | None) -> str | None:
+    # ``ref`` arrives from the dashboard (GET /api/git/review/rev-parse?ref=). A leading dash
+    # is never a valid ref name, and unchecked it is consumed by git's own option parser
+    # instead of resolved (--show-toplevel leaks the server's absolute repo path). No "--"
+    # separator: rev-parse treats post-"--" args as pathspecs, so resolution itself would break.
+    if ref is not None and ref.startswith("-"):
+        return None
     return _git_line(cwd, ["rev-parse", ref or "HEAD"]) or None
 
 

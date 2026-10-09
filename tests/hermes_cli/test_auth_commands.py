@@ -1074,3 +1074,26 @@ def test_openrouter_loopback_callback_binds_nonce_path_and_rejects_forged_redire
     assert seen["forged_status"] == 404
     assert seen["genuine_status"] == 200
     assert code == "good-code"
+
+
+def test_auth_list_prints_pending_oauth_heal_notices(tmp_path, monkeypatch, capsys):
+    """``hermes auth list`` must drain queued oauth-heal notices (rm-046 / assess C2).
+
+    load_pool() queues consolidation notices on the shared heal-notice queue;
+    the consume call used to sit orphaned in a shadowed duplicate def, so grants
+    healed by ``auth list`` went unreported while ``auth status`` reported them.
+    Behavior contract: whatever the queue holds when the listing finishes gets
+    printed.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}, "credential_pool": {}})
+
+    from hermes_cli import auth_commands
+
+    monkeypatch.setattr(
+        auth_commands.auth_mod, "consume_oauth_heal_notices",
+        lambda: ["consolidated forked OAuth grant (hermes-a -> hermes-b)"],
+    )
+    auth_commands.auth_list_command(type("Args", (), {"provider": None})())
+
+    assert "note: consolidated forked OAuth grant" in capsys.readouterr().out

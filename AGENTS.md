@@ -202,7 +202,7 @@ hermes-agent/
 ├── tools/                # Tool implementations, auto-discovered via tools/registry.py
 │   └── environments/     # Terminal backends (local, docker, ssh, modal, daytona, singularity)
 ├── gateway/              # run.py facade + run_*.py phases + session*.py + platforms/
-│   ├── platforms/        # One adapter per platform; see platforms/ADDING_A_PLATFORM.md
+│   ├── platforms/        # Core adapters only; 20+ bundled adapters live in plugins/platforms/ (see ADDING_A_PLATFORM.md)
 │   └── builtin_hooks/    # Always-registered gateway hooks (extension point; none shipped)
 ├── plugins/              # memory/, context_engine/, model-providers/, kanban/, image_gen/, ...
 ├── skills/               # Built-in skills (by category)   optional-skills/: shipped, not active

@@ -384,3 +384,42 @@ def test_all_providers_unreachable_returns_503(_gated_state):
     assert "unreachable" in r.text.lower()
 
 
+# ---------------------------------------------------------------------------
+# /api/model/info: ?profile= is an authenticated capability (rm-045b)
+# ---------------------------------------------------------------------------
+
+
+def test_gated_model_info_ignores_profile_param_when_unauthenticated(gated_app):
+    """A public caller must not get a profile-enumeration oracle (rm-045b).
+
+    ``/api/model/info`` is in ``PUBLIC_API_PATHS`` (the SPA pre-loads model
+    metadata before login) and it used to accept ``?profile=``: an
+    unauthenticated caller could distinguish an existing profile from a missing
+    one (200 vs 404) and read per-profile model metadata. The public response
+    must be identical with and without the param.
+    """
+    no_param = gated_app.get("/api/model/info")
+    assert no_param.status_code == 200, no_param.text
+    with_param = gated_app.get(
+        "/api/model/info", params={"profile": "definitely-not-a-profile"})
+    assert with_param.status_code == 200, (
+        "public /api/model/info must not turn ?profile= into a 404/200 oracle: "
+        f"got {with_param.status_code}: {with_param.text}"
+    )
+    assert with_param.json() == no_param.json()
+
+
+def test_gated_model_info_honors_profile_param_when_authenticated(gated_app):
+    """Authentication keeps full profile resolution (the fix must not degrade it).
+
+    With a verified session the param is honored: an unknown profile still
+    surfaces the router's 404 exactly as before.
+    """
+    _complete_stub_login(gated_app)
+    r = gated_app.get(
+        "/api/model/info", params={"profile": "definitely-not-a-profile"})
+    assert r.status_code == 404, (
+        f"expected unknown-profile 404, got {r.status_code}: {r.text}"
+    )
+
+

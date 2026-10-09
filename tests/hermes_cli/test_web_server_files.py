@@ -458,3 +458,41 @@ def test_git_branch_decodes_utf8_under_a_gbk_default_codec(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: "gbk")
 
     assert _rt_files._fs_git_branch(str(tmp_path)) == branch
+
+
+def test_write_denied_secret_dir_trees_blocked_on_read_parity(forced_files_client):
+    """Read parity with the canonical credential-tree guards (rm-045a / assess C1).
+
+    ``agent.file_safety`` denies ``vault`` and ``browser-profile`` as whole trees
+    for BOTH reads (``_HERMES_PROTECTED_SUBPATHS``) and writes
+    (``_WRITE_DENIED_SECRET_DIRS``); the dashboard Files router used to list /
+    read / download them freely — exposing the vault key beside its ciphertext and
+    the copied browser Login Data / cookies while the write path correctly
+    refused to touch them. The Files tab must not lag the canonical guards.
+    """
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+
+    vault_dir = root / "vault"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / "store.enc").write_text("CIPHERTEXT\n")
+
+    browser_dir = root / "browser-profile"
+    browser_dir.mkdir(parents=True, exist_ok=True)
+    (browser_dir / "Login Data").write_text("COOKIES\n")
+
+    root_names = [e["name"] for e in client.get(
+        "/api/files", params={"path": str(root)}).json()["entries"]]
+    assert "vault" not in root_names
+    assert "browser-profile" not in root_names
+
+    # Descending into the dir yields nothing: every child is filtered because a
+    # parent component is a credential dir.
+    vault_listing = client.get("/api/files", params={"path": str(vault_dir)})
+    assert [e["name"] for e in vault_listing.json()["entries"]] == []
+
+    # Direct reads/downloads of the credential files are refused.
+    for p in (vault_dir / "store.enc", browser_dir / "Login Data"):
+        assert client.get("/api/files/read", params={"path": str(p)}).status_code == 403, str(p)
+        assert client.get("/api/files/download", params={"path": str(p)}).status_code == 403, str(p)
+        assert client.get("/api/files/stream", params={"path": str(p)}).status_code == 403, str(p)

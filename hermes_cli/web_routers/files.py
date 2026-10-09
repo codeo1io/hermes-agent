@@ -75,7 +75,10 @@ _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
 # match). The browser can descend into subdirs, so a basename-only guard would
 # still expose ``mcp-tokens/<server>.json``; match on ANY path component so the
 # trees are blocked wherever they sit under the root, no HERMES_HOME resolution.
-_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})
+# vault/ and browser-profile/ are the write-side secret trees (agent.file_safety's
+# _WRITE_DENIED_SECRET_DIRS): reading them would expose the vault key beside its
+# ciphertext and copied browser cookies beside Login Data.
+_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing", "vault", "browser-profile"})
 
 
 def _is_sensitive_filename(name: str) -> bool:
