@@ -265,6 +265,21 @@ async function main() {
       .catch(() => {}); // spinner or mid-transition - fine, just wait
     await window.waitForTimeout(15_000);
     updateVisible = await updateNow.isVisible().catch(() => false);
+    if (!updateVisible) {
+      // v2026.6.x About panels render no inline "Update now": behind > 0
+      // surfaces "See what's new" instead, which opens the in-page updates
+      // dialog (updates-overlay.tsx) where the real "Update now" button
+      // lives. That dialog shares this window's DOM, so the updateNow
+      // locator above matches it once open — open it like a user would and
+      // re-test. Newer panels keep the inline button and never get here.
+      const seeWhatsNew = window.getByRole('button', { name: /see what('|’)?s new/i }).first();
+      if (await seeWhatsNew.isVisible().catch(() => false)) {
+        log('opening the updates dialog via "See what\'s new" (v2026.6.x path)');
+        await seeWhatsNew.click({ timeout: 5_000 }).catch(() => {});
+        await window.waitForTimeout(2_000);
+        updateVisible = await updateNow.isVisible().catch(() => false);
+      }
+    }
   }
   try {
     await updateNow.waitFor({ state: 'visible', timeout: 15_000 });

@@ -55,6 +55,9 @@ describe('known install failures', () => {
   // pm-era Setup.exe/dmg cannot install a pre-pm OLD tree, and the pre-pm
   // app self-replaces during first launch out from under Playwright.
   const PRE_PM = 'f97608f178d1ffeca59860195ab7da295f7c8e5f'
+  // v2026.6.5 — an OLDER pre-pm release; its installer legs fail the same two
+  // pm-stage classes (run 68 jobs 113617868134 / 113617867219).
+  const PRE_PM_JUNE = '3c231eb3979ab9c57d5cd6d02f1d577a3b718b43'
 
   const pmLockLog = [
     '2026-10-08T14:56:08.706006Z  INFO bootstrap.log: -> downloading uv 0.12.3 (win32-x64) stage=venv',
@@ -72,6 +75,8 @@ describe('known install failures', () => {
     expect(matchKnownFailure(sample)?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
     // Update-phase re-runs of the Setup.exe classify too
     expect(matchKnownFailure({ ...sample, phase: 'update', installMethod: 'installer-script', updateMethod: 'desktop-installer@latest' })?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
+    // v2026.6.5 (also pre-pm) fails the identical stage (run 68 job 113617868134)
+    expect(matchKnownFailure({ ...sample, commit: PRE_PM_JUNE })?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
     // Fail-closed: a different OLD commit, a different stage, a different
     // filename, or a different method pair must NOT classify
     expect(matchKnownFailure({ ...sample, commit: 'a'.repeat(40) })).toBeNull()
@@ -92,6 +97,8 @@ describe('known install failures', () => {
     expect(matchKnownFailure({ ...sample, platform: 'windows' })).toBeNull()
     expect(matchKnownFailure({ ...sample, logs: { bootstrap: 'bootstrap FAILED stage=Some("products") error=pm install failed' } })).toBeNull()
     expect(matchKnownFailure({ ...sample, phase: 'update' })).toBeNull()
+    // v2026.6.5 (also pre-pm) fails the identical stage (run 68 job 113617867219)
+    expect(matchKnownFailure({ ...sample, commit: PRE_PM_JUNE })?.id).toBe('pre-pm-macos-setup-pm-install-failed')
   })
 
   it('classifies the pre-pm linux app-update Playwright launch hang', () => {
