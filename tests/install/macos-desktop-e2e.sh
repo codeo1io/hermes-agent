@@ -81,7 +81,26 @@ export HOME_SANDBOX="$WORK_ROOT/home"
 
 step() { printf '\n=== %s ===\n' "$*"; }
 ok()   { printf '  OK %s\n' "$*"; }
-fail() { printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2; exit 1; }
+# Fail with a chance to classify (installer-script-e2e.sh's fail() documents
+# the contract): a matching known-failure rule writes the receipt and exits
+# 0 so the chart shows `known [n]`; any mismatch re-fails unchanged.
+fail() {
+  printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2
+  if [ -n "${HERMES_E2E_KNOWN_FAILURES:-}" ] && command -v node >/dev/null 2>&1 && [ -f "$STATE" ]; then
+    local old_sha phase
+    old_sha="$(sed -n 's/^OLD_SHA=//p' "$STATE" 2>/dev/null || true)"
+    phase="$PHASE"
+    [ "$phase" = "all" ] && phase="install"
+    if [ -n "$old_sha" ] && node "$ASSETS/known-failures.cjs" \
+        "$WORK_ROOT" "desktop-installer@latest" "$UPDATE_METHOD" \
+        "E2E ASSERTION FAILED: $*" macos "$phase" "$old_sha" "$LOG_DIR" \
+        2>>"$LOG_DIR/known-failure-classify.log"; then
+      printf 'KNOWN FAILURE classified; receipt at %s/known-failure.json\n' "$WORK_ROOT"
+      exit 0
+    fi
+  fi
+  exit 1
+}
 # shellcheck source=../e2e-assets/ts-prefix.sh
 source "$(dirname "$0")/e2e-assets/ts-prefix.sh" 2>/dev/null || ts_prefix() { cat; }
 log_group() {
