@@ -8,6 +8,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import functools
 import mimetypes
 import os
 import re
@@ -26,6 +27,7 @@ from fastapi.responses import FileResponse
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 from hermes_cli.web_deps import late
+from hermes_cli.web_routers._common import scoped_to_thread
 from hermes_cli.web_server_files import (
     _fs_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
 )
@@ -584,7 +586,7 @@ async def create_managed_directory(payload: ManagedDirectoryCreate, request: Req
 
 
 @router.delete("/api/files")
-async def delete_managed_file(payload: ManagedFileDelete, request: Request):
+async def delete_managed_file(payload: ManagedFileDelete, request: Request, profile: Optional[str] = None):
     policy, target, display_path = _resolve_managed_path(payload.path, request)
     if policy.locked_root is not None and target == policy.locked_root:
         raise HTTPException(status_code=400, detail="Cannot delete the managed files root")
@@ -593,14 +595,14 @@ async def delete_managed_file(payload: ManagedFileDelete, request: Request):
     if not target.exists():
         raise HTTPException(status_code=404, detail="Path not found")
 
+    # rmtree of a deep tree can take seconds — dispatch the whole delete op to a
+    # worker thread under the owning profile's scope (web_routers/_common.py).
+    if target.is_dir():
+        delete = functools.partial(shutil.rmtree, target) if payload.recursive else target.rmdir
+    else:
+        delete = target.unlink
     try:
-        if target.is_dir():
-            if payload.recursive:
-                shutil.rmtree(target)
-            else:
-                target.rmdir()
-        else:
-            target.unlink()
+        await scoped_to_thread(profile, delete)
     except OSError as exc:
         status_code = 409 if target.is_dir() and not payload.recursive else 500
         raise HTTPException(status_code=status_code, detail=f"Could not delete path: {exc}")

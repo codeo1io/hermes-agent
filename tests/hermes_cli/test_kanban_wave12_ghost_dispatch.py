@@ -23,7 +23,6 @@ Two pinned behaviors:
 from __future__ import annotations
 
 import gc
-import inspect
 
 import sqlite3
 import time
@@ -34,7 +33,6 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
-from hermes_state_guard import _real_platform_state_root
 
 pytestmark = pytest.mark.dispatch_min_age_real
 
@@ -89,31 +87,27 @@ def test_connect_runs_the_test_isolation_choke(monkeypatch, tmp_path):
     """connect() must refuse a production-root kanban path from a test context.
 
     Wave-9's guard was init_db-only; the wave-12 scratch checkout proved the
-    connect path is the one real leak lanes take. Belt AND braces: probe the
-    module source for the call (scratch trees must match deployed parity),
-    and behaviorally refuse the live board when this host has one. The
-    conftest write-guard wraps ``connect`` per-test, so the behavioral probe
-    calls the UNWRAPPED function object directly.
+    connect path is the one real leak lanes take. Behavioral: point the
+    production-root resolver at a temp "real board" (the guard late-imports the
+    resolver from hermes_state_guard, so the module attribute is the seam) and
+    assert the UNWRAPPED connect refuses it before any write. The conftest
+    write-guard wraps ``connect`` per-test, so recover the module-level
+    original it captured (its first closure cell) and drive THAT.
     """
-    import inspect
-
-    # conftest's per-test _guarded_connect wrapper is active; recover the
-    # module-level original it captured (its first closure cell) and probe
-    # THAT source — the wrapper's own source never contains our choke call.
     func = kbc.connect
     if func.__code__.co_name != "connect":
         func = next(
             (c.cell_contents for c in func.__closure__ or () if callable(c.cell_contents)),
             func,
         )
-    src = inspect.getsource(func)
-    assert "_ensure_test_isolation(path)" in src, (
-        "connect() lost the _ensure_test_isolation choke — guard parity with init_db is gone"
-    )
-    root = _real_platform_state_root()
-    if root is None or not (root / "kanban.db").exists():
-        pytest.skip("no live board on this host — source-parity probe above is the pin")
-    before = (root / "kanban.db").stat().st_mtime_ns
+    import hermes_state_guard as _hsg
+
+    root = tmp_path / "prod-root"
+    root.mkdir()
+    board = root / "kanban.db"
+    board.write_bytes(b"live-board")
+    monkeypatch.setattr(_hsg, "_real_platform_state_root", lambda: root)
+    before = board.stat().st_mtime_ns
     with pytest.raises(RuntimeError, match="test-isolation guard|kanban_write_guard"):
-        kbc.connect(root / "kanban.db")
-    assert (root / "kanban.db").stat().st_mtime_ns == before
+        func(board)
+    assert board.stat().st_mtime_ns == before

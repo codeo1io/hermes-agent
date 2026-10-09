@@ -989,9 +989,11 @@ async def _materialize_video(video_url: str, task_id: Optional[str], temp_paths:
         except ImageResolutionError as exc:
             raise ValueError(f"Could not read video from terminal backend: {exc}") from exc
         temp_dir = get_hermes_dir("cache/video", "temp_video_files")
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        # Off-loop parity with _prepare_image: terminal-backend payloads are real
+        # videos (often tens of MB); dispatch mkdir + write to a worker thread.
+        await asyncio.to_thread(temp_dir.mkdir, parents=True, exist_ok=True)
         path = temp_dir / f"terminal_video_{uuid.uuid4()}{suffix}"
-        path.write_bytes(resolved.data)
+        await asyncio.to_thread(path.write_bytes, resolved.data)
         temp_paths.append(path)
         return path
     if local_path.is_file():
