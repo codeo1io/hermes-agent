@@ -2416,6 +2416,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 result=result, effective_task_id=effective_task_id, tool_call_id=tool_call_id,
                 duration_ms=duration_ms, middleware_trace=_tool_middleware_trace,
             )
+            # Inline dispatch never reaches handle_function_call, so the concurrent path
+            # owns the transform_tool_result contract here, exactly as the sequential
+            # publisher does for inline tools ("every tool", once per call).
             return apply_transform_tool_result(
                 agent, function_name=function_name, function_args=call_args, result=result,
                 effective_task_id=effective_task_id, tool_call_id=tool_call_id, duration_ms=duration_ms,
@@ -2423,7 +2426,7 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
     elif function_name == "delegate_session":
         def _execute(next_args: dict) -> Any:
             from tools.delegate_session_tool import delegate_session as _delegate_session
-            return _delegate_session(
+            result = _delegate_session(
                 action=next_args.get("action") or "start",
                 session_id=next_args.get("session_id"),
                 goal=next_args.get("goal"),
@@ -2431,6 +2434,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 message=next_args.get("message"),
                 timeout=next_args.get("timeout"),
                 parent_agent=agent,
+            )
+            # Same contract as inline tools: delegate dispatch bypasses handle_function_call.
+            return apply_transform_tool_result(
+                agent, function_name=function_name, function_args=next_args, result=result,
+                effective_task_id=effective_task_id, tool_call_id=tool_call_id,
+                duration_ms=int((time.monotonic() - tool_start_time) * 1000),
             )
     else:
         def _execute(next_args: dict) -> Any:

@@ -1116,12 +1116,15 @@ def _scoped_key_env(name: str) -> str:
 
     In agent turns the scope's verdict is authoritative (a scoped miss must not borrow another
     profile's key); only the unscoped default-profile path (``UnscopedSecretError``) reads
-    ``os.environ`` -- any other scope failure propagates instead of borrowing the ambient env.
+    ``os.environ`` -- any other scope failure propagates instead of borrowing the ambient
+    env. A failed scope import (partial ``hermes update``) degrades to the legacy env read.
     """
     if not name:
         return ""
-    from agent.secret_scope import UnscopedSecretError, get_secret
-
+    try:
+        from agent.secret_scope import UnscopedSecretError, get_secret
+    except Exception:  # partial `hermes update` — degrade to the legacy env read
+        return (os.getenv(name) or "").strip()
     try:
         return (get_secret(name) or "").strip()
     except UnscopedSecretError:
@@ -3355,6 +3358,16 @@ def _is_structured_output_rejection(exc: Exception) -> bool:
     # 422) rather than by naming the feature. The field is what they refuse; the retry
     # without it is the same remedy, so treat the shape error as a rejection too.
     if "response_format" in err_lower and "json_schema" in err_lower:
+        return True
+    # Gemini native generationConfig 400s reject the structured-output wire in Gemini's own
+    # vocabulary: INVALID_ARGUMENT naming the response mime type or the response_schema /
+    # response_json_schema fields at 'generation_config'. The retry without the field is the
+    # same remedy as the OpenAI-wire rejections above.
+    if "gemini" in err_lower and "invalid_argument" in err_lower and (
+        "response_schema" in err_lower
+        or "response_json_schema" in err_lower
+        or "response mime type" in err_lower
+    ):
         return True
     return _is_unsupported_parameter_error(exc, "response_format") or _is_unsupported_parameter_error(exc, "output_config")
 

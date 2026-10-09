@@ -7,6 +7,7 @@ lifecycle as wired into BuzzAdapter.
 """
 
 import asyncio
+import contextlib
 import json
 import time
 
@@ -191,6 +192,53 @@ async def test_websocket_loop_reconnects_when_read_goes_silent(monkeypatch, capl
     assert sockets[0].exited, "the silent connection was not closed before reconnecting"
     assert any("went silent" in record.message for record in caplog.records)
     assert states[:2] == ["retrying", "connected"], f"health must flip to retrying and back, got {states}"
+
+
+@pytest.mark.asyncio
+async def test_websocket_loop_ends_when_a_wait_for_eats_the_cancel(monkeypatch):
+    """A stop-cancel dropped by an eating await must still end the reconnect loop.
+
+    CPython 3.11's ``asyncio.wait_for`` returns the inner result instead of raising
+    when the inner completes as the cancel lands, so a cancel arriving while auth is
+    resuming was swallowed entirely: the loop reconnected forever (zombie churn while
+    the gateway believed the platform had stopped). ``cancelling()`` still counts the
+    eaten request; the loop must honour it on the next cycle.
+    """
+    adapter = _make_adapter()
+
+    async def auth_that_eats_the_cancel(websocket):
+        me = asyncio.current_task()
+        me.cancel()  # a stop-cancel arrives while the inner recv is already done …
+        try:
+            await asyncio.sleep(0)  # delivery fires here …
+        except asyncio.CancelledError:
+            pass  # … and the wait_for eat path drops it (the count stays > 0)
+        raise ConnectionError("relay rejected the AUTH")
+
+    monkeypatch.setattr(adapter, "_authenticate_websocket", auth_that_eats_the_cancel)
+
+    release_parked_receive = asyncio.Event()
+
+    async def parked_anext():
+        await asyncio.Event().wait()
+
+    def fake_connect(*args, **kwargs):
+        return _ScriptedWebSocket(parked_anext)
+
+    import websockets as _ws_mod
+
+    monkeypatch.setattr(_ws_mod, "connect", fake_connect)
+
+    task = asyncio.create_task(adapter._websocket_loop())
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5.0)
+        assert task.cancelled(), "loop must end cancelled, not keep reconnecting"
+    finally:
+        release_parked_receive.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(task, 5.0)
 
 
 @pytest.mark.asyncio
@@ -744,8 +792,13 @@ async def test_ws_discovery_loop_subscribes_newly_discovered_conversation(monkey
     finally:
         task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
+            # Bounded teardown: the sweep assertions above have already been
+            # evaluated; a cancellation landing inside the transport's
+            # swallow window (#98097 shape) must not park this file until the
+            # runner's file-timeout. The lifecycle contract — discovery task
+            # dying with its connection — is asserted by the test below.
+            await asyncio.wait_for(task, 5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
 
     assert new_dm in subscriptions.values(), "sweep did not subscribe the new conversation"
