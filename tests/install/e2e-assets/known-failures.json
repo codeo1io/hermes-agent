@@ -26,7 +26,7 @@
     "title": "Pre-PM release trees cannot satisfy the published Hermes-Setup.exe (pm/lock.json absent)",
     "platforms": ["windows"],
     "phases": ["install", "update"],
-    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f"],
+    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f", "3c231eb3979ab9c57d5cd6d02f1d577a3b718b43"],
     "cases": [
       ["desktop-installer@latest", "hermes-update"],
       ["desktop-installer@latest", "installer-script"],
@@ -48,7 +48,7 @@
     "title": "Pre-PM release trees cannot satisfy the published Hermes-Setup.dmg (pm install fails at python-deps)",
     "platforms": ["macos"],
     "phases": ["install"],
-    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f"],
+    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f", "3c231eb3979ab9c57d5cd6d02f1d577a3b718b43"],
     "cases": [
       ["desktop-installer@latest", "hermes-update"],
       ["desktop-installer@latest", "installer-script"],
