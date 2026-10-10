@@ -31,6 +31,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
+from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
+
 logger = logging.getLogger(__name__)
 
 # Answerer contract shared with the Pi backend: (method, question, options) -> str | None
@@ -319,6 +321,11 @@ class OpenCodeClient:
         # Question ids already replied/rejected (SSE watcher + poll loop race).
         self._answered_questions: set = set()
         self.is_closed = False
+        # Wall-clock of the last observed in-turn progress (transcript
+        # change). The delegate observer polls this so an outside reader of
+        # the durable metadata can tell a live opencode turn from a wedged
+        # one — without it opencode delegations are liveness-blind.
+        self.last_turn_activity_at: Optional[float] = None
 
     # -- internals ---------------------------------------------------------
 
@@ -349,7 +356,13 @@ class OpenCodeClient:
 
     # -- backend surface ---------------------------------------------------
 
-    def start(self, timeout: float = 30.0) -> Dict[str, Any]:
+    def start(
+        self, timeout: float = 30.0, stages: list[float] | None = None
+    ) -> Dict[str, Any]:
+        # `stages` is call-shape parity with PiRPCClient's staged start
+        # handshake (agent/delegate_start_budget.py): the opencode transport
+        # is one bounded HTTP wait with no ladder semantics, so it is
+        # accepted and ignored.
         if self.native_session_id:
             # Reopen a persisted session: verify it is still addressable.
             try:
@@ -511,6 +524,10 @@ class OpenCodeClient:
         deadline = time.monotonic() + timeout_seconds
         last_snapshot: Optional[tuple] = None
         stable_since: Optional[float] = None
+        # Latest fresh assistant text seen while polling: classification
+        # evidence if the turn times out (A1 sibling — provider errors the
+        # model streamed are stronger than the bare timeout prose).
+        evidence_text = ""
         # Completion signal, in order of reliability:
         #   1. SSE ``session.idle`` for this session (authoritative; watched on
         #      a background thread so question answering keeps running).
@@ -534,6 +551,13 @@ class OpenCodeClient:
                 messages = data if isinstance(data, list) else (data or {}).get("data") or []
                 messages = sorted(messages, key=self._message_sort_key)
                 fresh = [m for m in messages if m.get("info", {}).get("id") not in baseline_ids]
+                if fresh:
+                    for m in reversed(fresh):
+                        if (m.get("info") or {}).get("role") == "assistant":
+                            captured = self._assistant_text(m)
+                            if captured:
+                                evidence_text = captured[-2048:]
+                                break
                 snapshot = tuple(
                     (
                         (m.get("info") or {}).get("id"),
@@ -547,6 +571,7 @@ class OpenCodeClient:
                 else:
                     stable_since = None
                     last_snapshot = snapshot
+                    self.last_turn_activity_at = time.time()
                 tools_running = any(
                     (part or {}).get("type") == "tool"
                     and (part.get("state") or {}).get("status") == "running"
@@ -634,12 +659,34 @@ class OpenCodeClient:
             self.abort(timeout=10.0)
         except Exception:
             logger.debug("opencode abort after timeout failed", exc_info=True)
-        raise TimeoutError(f"OpenCode turn timed out after {timeout_seconds:.0f}s")
+        # Typed stall for the shared delegate vocabulary (A1/D2 sibling):
+        # the supervisor reads error_class instead of re-parsing prose, and
+        # the provider breaker (A2) records it. This timeout is an absolute
+        # wall budget (deliberate, unlike pi's inactivity window), so
+        # zero_activity is not a structural signal here; classify from the
+        # text the turn actually streamed, else fall back to agent_stall.
+        error_class, provider_signal, retry_after = classify_delegate_failure(
+            evidence_text, zero_activity=False
+        )
+        if not evidence_text.strip():
+            error_class = "agent_stall"
+        raise DelegateTurnStalled(
+            f"OpenCode turn timed out after {timeout_seconds:.0f}s",
+            error_class=error_class,
+            provider_signal=provider_signal,
+            retry_after=retry_after,
+        )
 
-    def steer(self, message: str, timeout_seconds: float = 30.0) -> Dict[str, Any]:
+    def steer(
+        self, message: str, timeout: float = 30.0, stages: list[float] | None = None
+    ) -> Dict[str, Any]:
         # OpenCode prompt_async has no native live-steer injection; the tool
         # layer degrades steer to a queued follow-up turn when no turn is
         # running.  Reaching this method means the caller chose to send anyway.
+        # `timeout`/`stages`: call-shape parity with PiRPCClient's staged
+        # handshake (tools/delegate_session_tool passes both to every client);
+        # accepted and ignored — this path returns an immediate queued note,
+        # never waits.
         return {"text": "", "note": "opencode has no live steer; message queued", "queued": True}
 
     def abort(self, timeout: float = 10.0) -> None:
@@ -647,7 +694,10 @@ class OpenCodeClient:
             return
         self._request("POST", f"/session/{self.native_session_id}/abort{self._qdir()}")
 
-    def get_messages(self, timeout: float = 30.0) -> List[dict]:
+    def get_messages(
+        self, timeout: float = 30.0, stages: list[float] | None = None
+    ) -> List[dict]:
+        # `stages`: accepted-and-ignored, see start().
         _status, data = self._request("GET", f"/session/{self.native_session_id}/message{self._qdir()}")
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         return sorted(messages, key=self._message_sort_key)

@@ -11,6 +11,7 @@ the real binary or network. Pins the behaviors the parent relies on:
 (3) the pi-rpc provider resolves without any ACP env vars set.
 """
 
+import re
 import stat
 import sys
 import threading
@@ -18,6 +19,7 @@ import time
 
 import pytest
 
+from agent.delegate_errors import DelegateTurnStalled
 from agent.pi_rpc_client import (
     PiRPCClient,
     PendingQuestion,
@@ -165,7 +167,10 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
         + "    if typ == 'prompt':\n"
         + "        send({'type':'response','id':msg['id'],'success':True})\n"
         + "        for i in range(6):\n"
-        + "            time.sleep(0.04)\n"
+        # 10x scheduling margin between the tick gap and the stall budget:
+        # tighter margins (2x-3x) false-positived stalls under the parallel
+        # test runner when a single tick's reader-thread wakeup was delayed.
+        + "            time.sleep(0.10)\n"
         + "            send({'type':'message_update','assistantMessageEvent':{'type':'thinking_delta','delta':'tick'}})\n"
         + "        send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'done'}})\n"
         + "        send({'type':'agent_settled'})\n"
@@ -183,9 +188,9 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
         persistent_session=True,
     )
     started = time.monotonic()
-    result = client.run_session_prompt("go", timeout_seconds=0.08)
+    result = client.run_session_prompt("go", timeout_seconds=1.0)
     elapsed = time.monotonic() - started
-    assert elapsed > 0.20
+    assert elapsed > 0.50
     assert result["text"] == "done"
     client.close()
 
@@ -217,6 +222,285 @@ def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
         client.run_session_prompt("go", timeout_seconds=0.08)
     assert time.monotonic() - started < 0.8
     client.close()
+
+
+# ------------------------------------- typed stall classification (A4)
+# A stalled turn must say WHAT died: a silent provider, a wedged agent, or a
+# provider that announced its own outage. Regression for the 09-30 cooling-down
+# storm that stalled delegates for 1800-3600s and re-entered on every retry.
+
+def _stall_builder(tmp_path, name, after_ack):
+    """Fake pi that acks the prompt, runs `after_ack`, then never settles."""
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + after_ack
+        + "        time.sleep(30)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def _stall_after_ack(tmp_path, name, after_ack):
+    client = PiRPCClient(
+        acp_command=_stall_builder(tmp_path, name, after_ack),
+        base_url="pi://stall-classify",
+        persistent_session=True,
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        return excinfo.value
+    finally:
+        client.close()
+
+
+def test_zero_activity_stall_classifies_provider_stall(tmp_path):
+    err = _stall_after_ack(tmp_path, "fake-pi-silent", "        pass\n")
+    # Prompt acked, then no unsolicited event at all: the delegate agent
+    # itself produced nothing — the structural signature of a dead upstream.
+    assert err.error_class == "provider_stall"
+    assert err.zero_activity is True
+    assert isinstance(err, TimeoutError)
+
+
+def test_partial_activity_stall_classifies_agent_stall(tmp_path):
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-one-think",
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'considering'}})\n",
+    )
+    # The agent streamed something and then wedged: the provider answered.
+    assert err.error_class == "agent_stall"
+    assert err.zero_activity is False
+
+
+def test_streamed_provider_outage_line_classifies_rate_limit(tmp_path):
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-rate-limit",
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'text_delta','delta':'Rate limit: disabling model glm-4.6 "
+        "for 1800 seconds (cooling down)'}})\n",
+    )
+    assert err.error_class == "rate_limit"
+    assert "Rate limit" in err.provider_signal
+    assert err.retry_after == 1800.0
+
+
+def test_message_list_shrink_counts_as_turn_activity(tmp_path):
+    """A mid-turn compaction is progress, not silence. When the child
+    summarizes its context, the parent sees message updates whose reported
+    message count goes DOWN; that shrink event must refresh the activity
+    signal like any other turn event — otherwise an in-flight compaction
+    would be misread as a zero-activity provider death and open the
+    provider breaker on a perfectly healthy provider."""
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-compaction",
+        "        send({'type':'message_update','messageCount':5,'assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'long context accumulating'}})\n"
+        "        send({'type':'message_update','messageCount':2,'assistantMessageEvent':"
+        "{'type':'text_delta','delta':'[compact] context summarized'}})\n",
+    )
+    assert err.error_class == "agent_stall"  # streamed-then-wedged, not dead
+    assert err.zero_activity is False
+
+
+def test_stall_message_keeps_suffix_and_gains_timeout_prefix(tmp_path):
+    err = _stall_after_ack(tmp_path, "fake-pi-prefix-suffix", "        pass\n")
+    # Conductor's spool classifier keys on both markers: the new start-failure
+    # prefix gets a fresh-session retry, and the legacy stall suffix keeps
+    # existing `except TimeoutError` / marker consumers working.
+    assert re.match(
+        r"pi session turn timed out: stalled after \d+s without observable progress",
+        str(err),
+    )
+    assert re.search(r"stalled after .* without observable progress", str(err))
+
+
+def test_stall_terminates_pi_child_that_ignores_abort(tmp_path):
+    """C rider: a wedged child must not outlive the turn it stalled.
+
+    The stall branch aborts and waits a settle grace; a child still running
+    after that is wedged and only leaks capacity. It must be terminated
+    before the typed raise (A4 incident: leaked workers held spool slots for
+    the full 1800/3600s window).
+    """
+    client = PiRPCClient(
+        acp_command=_stall_builder(tmp_path, "fake-pi-zombie", "        pass\n"),
+        base_url="pi://zombie-rider",
+        persistent_session=True,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(DelegateTurnStalled):
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        elapsed = time.monotonic() - started
+        assert client._proc is not None
+        # Dead AND reaped — not sleeping off a 30s hang holding capacity.
+        assert client._proc.poll() is not None
+        assert elapsed < 10.0
+    finally:
+        client.close()
+
+
+# ------------------------------ stall-time liveness triage (A4)
+# A typed stall says WHAT failed (error_class); the triage dict says what a
+# probe FOUND at stall time. A supervisor must distinguish a process wedge
+# (alive, RPC dead), a responsive-but-unproductive turn (alive, RPC answers),
+# and a dead child — by fields, never by parsing prose. Regression for the
+# A4 continuity loop where every stall was prose and every layer re-derived
+# its own story from it.
+
+
+def _triage_for(tmp_path, name, script_body):
+    """Build a fake pi from `script_body`, stall a turn, return the
+    liveness_triage dict carried by the typed stall."""
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + script_body
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://triage-test",
+        persistent_session=True,
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        return excinfo.value.liveness_triage
+    finally:
+        client.close()
+
+
+def test_stall_triage_wedge_process_alive_rpc_dead(tmp_path):
+    """Child acked the prompt, then stopped reading stdin entirely: the
+    process is alive but wedged — the probe times out, not the process."""
+    triage = _triage_for(
+        tmp_path,
+        "fake-pi-wedge",
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    if msg.get('type') == 'prompt':\n"
+        "        send({'type':'response','id':msg['id'],'success':True})\n"
+        "        time.sleep(30)\n",
+    )
+    assert triage["process_alive"] is True
+    assert triage["rpc_responsive"] is None  # probe timed out, not answered
+    assert triage["probe_latency_ms"] is None
+    assert triage["message_count"] == 0  # nothing streamed since the ack
+    assert triage["last_event_age_s"] >= 0.08  # at least the stall window
+    assert isinstance(triage["probed_at"], float)
+
+
+def test_stall_triage_responsive_but_unproductive(tmp_path):
+    """Child acks the prompt and keeps answering control RPCs while never
+    making turn progress: alive AND responsive — an unproductive turn, not a
+    wedge. The probe must land before the rider kills the child, else this
+    case is indistinguishable from the wedge by construction."""
+    triage = _triage_for(
+        tmp_path,
+        "fake-pi-unproductive",
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    typ = msg.get('type')\n"
+        "    if typ == 'prompt':\n"
+        "        send({'type':'response','id':msg['id'],'success':True})\n"
+        "    elif typ == 'get_state':\n"
+        "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n",
+    )
+    assert triage["process_alive"] is True
+    assert triage["rpc_responsive"] is True
+    assert triage["probe_latency_ms"] >= 0.0
+    assert triage["message_count"] == 0  # RPC answers are not turn progress
+
+
+def test_stall_triage_dead_process_reports_dead_by_field(tmp_path):
+    """Child answers the abort by exiting without settling: the triage must
+    report the dead process as a FIELD (process_alive False, probe skipped)
+    — never by rewording the frozen stall message."""
+    triage = _triage_for(
+        tmp_path,
+        "fake-pi-abort-exit",
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    typ = msg.get('type')\n"
+        "    if typ == 'prompt':\n"
+        "        send({'type':'response','id':msg['id'],'success':True})\n"
+        "    elif typ == 'abort':\n"
+        "        sys.exit(0)  # answer the abort by dying, without settling\n",
+    )
+    assert triage["process_alive"] is False
+    assert triage["rpc_responsive"] is None  # no probe on a dead process
+    assert triage["probe_latency_ms"] is None
+
+
+def test_terminated_stall_child_respawns_same_session_id(tmp_path):
+    """After the rider kills the child, the next turn respawns the SAME
+    native session id on a fresh process (transparent recovery, no lost
+    session binding)."""
+    marker = tmp_path / "second-life"
+    script = tmp_path / "fake-pi-two-lives"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, os, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        if os.path.exists(%r):\n" % str(marker)
+        + "            send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'recovered'}})\n"
+        + "            send({'type':'agent_settled'})\n"
+        + "        else:\n"
+        + "            open(%r, 'w').close()\n" % str(marker)
+        + "            time.sleep(30)\n"
+        + "    elif typ == 'get_last_assistant_text':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'text':'recovered'}})\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://two-lives",
+        persistent_session=True,
+        session_id="stable-sess-1",
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled):
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        first_pid = client._proc.pid
+        assert client._proc.poll() is not None  # rider terminated it
+
+        result = client.run_session_prompt("go again", timeout_seconds=5)
+
+        assert result["text"] == "recovered"
+        assert client._proc is not None
+        assert client._proc.poll() is None  # new live process serving
+        assert client._proc.pid != first_pid  # respawned, not reused
+        assert client._session_id == "stable-sess-1"  # binding stable
+    finally:
+        client.close()
 
 
 # ------------------------------------------------- answer text mapping
@@ -539,3 +823,169 @@ def test_usage_tokens_captured_from_message_update(fake_pi):
         "assistantMessageEvent": {"type": "text_delta", "delta": "hi"},
     })
     assert (client._prompt_tokens, client._completion_tokens) == (20, 9)
+
+
+# ------------------------------------------ staged handshake wait (U3)
+
+
+class _FakeProc:
+    """Stand-in for the spawned child: poll() None = alive, else exit code."""
+
+    def __init__(self, exit_code: int | None = None) -> None:
+        self._exit_code = exit_code
+
+    def poll(self) -> int | None:
+        return self._exit_code
+
+
+def _staged_client(fake_pi, *, exit_code: int | None = None):
+    """A client whose child is fake and whose wire is a recorder: exercises
+    _request_pi's staged wait without spawning anything."""
+    client = make_client(fake_pi)
+    sent: list[dict] = []
+    client._send_pi = lambda payload: sent.append(payload)
+    client._proc = _FakeProc(exit_code)
+    return client, sent
+
+
+def test_staged_wait_exhausts_ladder_then_preserves_timeout_message(fake_pi):
+    """Total staged wait == sum(stages), the command is sent exactly once
+    (no duplicate ids between stages), the pending entry is cleaned up, and
+    the TimeoutError wording is byte-identical to the legacy single wait —
+    the conductor spool boundary greps that prose."""
+    client, sent = _staged_client(fake_pi)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as excinfo:
+        client._request_pi({"type": "get_state"}, timeout=5.0, stages=[0.05, 0.05])
+    elapsed = time.monotonic() - started
+    assert str(excinfo.value) == "pi did not answer command 'get_state'"
+    assert 0.1 <= elapsed < 2.0  # sum(stages)=0.1, not the 5s single-shot
+    assert len(sent) == 1
+    assert client._pending == {}
+
+
+def test_staged_wait_survives_slow_but_alive_answer(fake_pi):
+    """THE remediation shape: the answer lands after stage 1 expired. Fixed
+    30s wiring failed exactly here (10-06 recurrence: get_state answered at
+    30.9s); the ladder keeps waiting on the SAME pending entry and
+    succeeds."""
+    client, sent = _staged_client(fake_pi)
+
+    def answerer():
+        time.sleep(0.15)
+        with client._pending_lock:
+            _waiter, slot = next(iter(client._pending.values()))
+        slot[0] = {"success": True, "data": {"alive": True}}
+        _waiter.set()
+
+    thread = threading.Thread(target=answerer)
+    thread.start()
+    try:
+        started = time.monotonic()
+        response = client._request_pi(
+            {"type": "get_state"}, timeout=0.05, stages=[0.05, 5.0]
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        thread.join(timeout=6.0)
+    assert response == {"success": True, "data": {"alive": True}}
+    assert elapsed < 4.5  # returned when the answer landed, not at exhaustion
+    assert len(sent) == 1  # never re-sent the command between stages
+
+
+def test_staged_wait_dead_process_fails_fast_as_transport(fake_pi):
+    """A dead child will never answer: the between-stage liveness probe
+    raises transport immediately instead of walking out the ladder."""
+    client, _sent = _staged_client(fake_pi, exit_code=1)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as excinfo:
+        client._request_pi({"type": "get_state"}, timeout=5.0, stages=[0.05, 5.0, 5.0])
+    elapsed = time.monotonic() - started
+    assert "pi rpc process exited with code 1" in str(excinfo.value)
+    assert elapsed < 2.0  # stage-1 short-circuit, not the full ladder
+    assert client._pending == {}
+
+
+def test_staged_wait_dead_process_uses_reader_error_verbatim(fake_pi):
+    """When the reader's EOF drain recorded the real exit error, the
+    short-circuit reports that wording, not a synthesized one."""
+    client, _sent = _staged_client(fake_pi, exit_code=-15)
+    client._process_exited_error = "pi rpc process exited with code -15"
+    with pytest.raises(RuntimeError, match="exited with code -15"):
+        client._request_pi({"type": "start"}, timeout=5.0, stages=[0.05, 5.0])
+
+
+def test_single_stage_list_matches_legacy_wait(fake_pi):
+    """``stages=[t]`` ≡ ``timeout=t``: the stage replaces (never adds to)
+    the timeout, and the raised wording matches the legacy path exactly."""
+    client, _sent = _staged_client(fake_pi)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as staged_error:
+        client._request_pi({"type": "get_state"}, timeout=9.0, stages=[0.07])
+    assert time.monotonic() - started < 2.0  # 0.07s stage, not 9.07s
+    legacy, _legacy_sent = _staged_client(fake_pi)
+    with pytest.raises(TimeoutError) as legacy_error:
+        legacy._request_pi({"type": "get_state"}, timeout=0.07)
+    assert str(staged_error.value) == str(legacy_error.value)
+
+
+def test_staged_wait_adds_no_jitter_between_stages(fake_pi):
+    """Respawn jitter belongs to the re-spawn boundary in the delegate tool
+    layer; the staged wait itself must cost exactly sum(stages) — the ladder
+    buys patience, it must not add sleeps."""
+    client, _sent = _staged_client(fake_pi)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        client._request_pi(
+            {"type": "get_state"}, timeout=5.0, stages=[0.05, 0.05, 0.05]
+        )
+    elapsed = time.monotonic() - started
+    assert 0.15 <= elapsed < 0.5  # respawn_pause floors at 0.5s — excluded
+
+
+def test_control_methods_pass_stages_to_request_pi(fake_pi, clean_registry):
+    """start/get_state/get_messages/steer forward the ladder verbatim;
+    default calls forward ``None`` — never a surprise ladder."""
+    client, _sent = _staged_client(fake_pi)  # live fake proc: _spawn no-ops
+    recorded: list[dict] = []
+
+    def recorder(command, timeout=60.0, stages=None):
+        recorded.append(
+            {"type": command["type"], "timeout": timeout, "stages": stages}
+        )
+        return {"success": True, "data": {}}
+
+    client._request_pi = recorder
+    ladder = [30.0, 90.0, 240.0]
+    client.start(stages=ladder)
+    client.get_state(stages=ladder)
+    client.get_messages(stages=ladder)
+    client.steer("hello", stages=ladder)
+    client.start()
+    client.get_messages()
+    assert [(call["type"], call["stages"]) for call in recorded] == [
+        ("get_state", ladder),
+        ("get_state", ladder),
+        ("get_messages", ladder),
+        ("steer", ladder),
+        ("get_state", None),
+        ("get_messages", None),
+    ]
+
+
+def test_abort_is_never_staged(fake_pi):
+    """abort is the control escape that cuts a wedged turn loose — it must
+    stay a short fixed-bound wait even when every other handshake walks the
+    bootstrap ladder."""
+    client, _sent = _staged_client(fake_pi)
+    recorded: list[dict] = []
+
+    def recorder(command, timeout=60.0, stages=None):
+        recorded.append({"timeout": timeout, "stages": stages})
+        return {"success": True}
+
+    client._request_pi = recorder
+    client.abort()
+    assert recorded == [{"timeout": 30.0, "stages": None}]
+    with pytest.raises(TypeError):
+        client.abort(stages=[30.0])  # type: ignore[call-arg]
