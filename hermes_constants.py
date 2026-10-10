@@ -597,14 +597,34 @@ def _fetch_url(url: str, timeout: int) -> bytes | None:
         return None
 
 
+def _verify_node_zip_sha256(sums_bytes: bytes, zip_name: str, zip_bytes: bytes) -> bool:
+    """True iff SHASUMS.txt lists ``zip_name`` with the sha256 of ``zip_bytes``.
+
+    Fail closed: a missing entry or unparsable sums file counts as a mismatch.
+    Constant-time compare, so a probing attacker learns nothing from timing either.
+    """
+    import hashlib
+    import hmac
+
+    actual = hashlib.sha256(zip_bytes).hexdigest()
+    for line in sums_bytes.decode("utf-8", errors="replace").splitlines():
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip().lstrip("*").strip() == zip_name:
+            return hmac.compare_digest(parts[0].strip().lower(), actual)
+    return False
+
+
 def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
     """Download the target-major portable Node zip into a sibling ``node.new-*`` dir.
 
-    A sibling makes the later swap a same-volume rename. ``None`` on any failure.
+    A sibling makes the later swap a same-volume rename. ``None`` on any failure —
+    including integrity failures: the zip is verified against the pinned dist root's
+    SHASUMS.txt before extraction, and extraction rejects zip-slip/symlink members
+    (``update_cmd_zip._extract_zip_safely``), so a compromised mirror cannot plant
+    bytes that later get swapped into ``~/.hermes/node``.
     """
     import tempfile
     import uuid
-    import zipfile
 
     index_url = f"https://nodejs.org/dist/latest-v{_HERMES_NODE_TARGET_MAJOR}.x/"
     index_bytes = _fetch_url(index_url, 60)
@@ -618,6 +638,12 @@ def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
     zip_bytes = _fetch_url(f"{index_url}{zip_name}", 300)
     if zip_bytes is None:
         return None
+    # Supply-chain trust: the download is only as trustworthy as the transport.
+    # Verify against nodejs.org's SHASUMS.txt from the same pinned dist root
+    # before extracting anything (fail closed on fetch or verify failure).
+    sums_bytes = _fetch_url(f"{index_url}SHASUMS.txt", 60)
+    if sums_bytes is None or not _verify_node_zip_sha256(sums_bytes, zip_name, zip_bytes):
+        return None
     staged = home / f"node.new-{uuid.uuid4().hex[:8]}"
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -625,13 +651,16 @@ def _stage_windows_node_zip(home: Path, node_arch: str) -> Path | None:
             (tmp_path / zip_name).write_bytes(zip_bytes)
             extract_dir = tmp_path / "extract"
             extract_dir.mkdir()
-            with zipfile.ZipFile(tmp_path / zip_name) as archive:
-                archive.extractall(extract_dir)
+            # Late import: hermes_constants is imported by everything; keep the CLI
+            # package off this module's import path until the staging actually runs.
+            from hermes_cli.update_cmd_zip import _extract_zip_safely
+
+            _extract_zip_safely(str(tmp_path / zip_name), str(extract_dir))
             extracted = next(extract_dir.glob("node-v*"), None)
             if extracted is None or not extracted.is_dir():
                 return None
             shutil.move(str(extracted), str(staged))
-    except OSError:
+    except (OSError, ValueError):
         return None
     return staged
 

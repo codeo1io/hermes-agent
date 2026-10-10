@@ -458,3 +458,45 @@ def test_git_branch_decodes_utf8_under_a_gbk_default_codec(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, "_text_encoding", lambda: "gbk")
 
     assert _rt_files._fs_git_branch(str(tmp_path)) == branch
+
+
+def test_recursive_delete_runs_off_loop(forced_files_client, monkeypatch):
+    """The DELETE op is dispatched to a worker thread (was on-loop shutil.rmtree).
+
+    Regression (cycle-2 assess, files.py:599): rmtree of a deep managed tree ran
+    on the dashboard's event loop, stalling every other request for the duration.
+    """
+    import shutil
+    import threading
+
+    import hermes_cli.web_routers.files as files_mod
+
+    client, root = forced_files_client
+    target = root / "projects" / "legacy"
+    target.mkdir(parents=True)
+    (target / "a.bin").write_bytes(b"a" * 1024)
+
+    real_scoped = files_mod.scoped_to_thread
+    seen = {}
+
+    async def _record_scoped(profile, op):  # noqa: ARG001
+        seen["loop_thread"] = threading.get_ident()
+        return await real_scoped(profile, op)
+
+    monkeypatch.setattr(files_mod, "scoped_to_thread", _record_scoped)
+
+    real_rmtree = shutil.rmtree
+
+    def _record_rmtree(path, *args, **kwargs):
+        seen["rmtree_thread"] = threading.get_ident()
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", _record_rmtree)
+
+    resp = client.request("DELETE", "/api/files", json={"path": "projects/legacy", "recursive": True})
+
+    assert resp.status_code == 200, resp.text
+    assert not target.exists(), "delete must still actually delete"
+    assert seen["rmtree_thread"] != seen["loop_thread"], (
+        "recursive delete must run on a worker thread, not the dashboard event loop"
+    )

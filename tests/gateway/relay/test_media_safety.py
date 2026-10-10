@@ -15,6 +15,7 @@ Contracts pinned here:
 
 from __future__ import annotations
 
+import threading
 import urllib.request
 
 import pytest
@@ -151,3 +152,79 @@ async def test_public_urls_are_vetted_through_is_safe_url(client, monkeypatch):
 
     assert await client.download("https://cdn.discordapp.com/attachments/1/2/i.png") is None
     assert seen == [], "is_safe_url=False must short-circuit before urlopen"
+
+# ── upload: cap-before-read + off-loop file read ─────────────────────────
+
+
+class _UploadResp:
+    def __init__(self, body: bytes = b'{"id": "m1"}'):
+        self._body = body
+
+    def read(self, *_a):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_upload_reads_file_off_loop(client, tmp_path, monkeypatch):
+    """The local-file read in upload() runs on a worker thread (was an on-loop read_bytes)."""
+    media = tmp_path / "shot.png"
+    media.write_bytes(b"\x89PNG")
+
+    seen = {}
+    real_read = media_mod.Path.read_bytes
+
+    def _record_read(self):
+        seen["thread"] = threading.get_ident()
+        return real_read(self)
+
+    monkeypatch.setattr(media_mod.Path, "read_bytes", _record_read)
+
+    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+        return _UploadResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    url = await client.upload(str(media))
+
+    assert url == "https://conn.example/relay/media/m1"
+    assert seen["thread"] != threading.get_ident(), "file read must be dispatched off-loop"
+
+
+@pytest.mark.asyncio
+async def test_upload_refuses_oversized_file_before_reading(client, tmp_path, monkeypatch):
+    """An over-cap file is refused on stat, before any byte is read or POSTed.
+
+    Regression (cycle-2 assess, media.py:103-110): the size verdict used to come
+    from the fully-read buffer, so an attacker-sized file was read whole first.
+    """
+    monkeypatch.setattr(media_mod, "MEDIA_MAX_BYTES", 8)
+    media = tmp_path / "huge.bin"
+    media.write_bytes(b"x" * 16)
+    seen = _capture_urlopen(monkeypatch)
+
+    def _must_not_read(self):
+        raise AssertionError("oversized file must be refused before any read")
+
+    monkeypatch.setattr(media_mod.Path, "read_bytes", _must_not_read)
+
+    assert await client.upload(str(media)) is None
+    assert seen == [], "no network attempt for an over-cap file"
+
+
+@pytest.mark.asyncio
+async def test_upload_rechecks_size_after_read(client, tmp_path, monkeypatch):
+    """A file that grows between stat and read is still refused before the POST."""
+    monkeypatch.setattr(media_mod, "MEDIA_MAX_BYTES", 8)
+    media = tmp_path / "growing.bin"
+    media.write_bytes(b"small")  # stat sees 5 bytes — inside the cap
+    seen = _capture_urlopen(monkeypatch)
+    monkeypatch.setattr(media_mod.Path, "read_bytes", lambda self: b"x" * 16)
+
+    assert await client.upload(str(media)) is None
+    assert seen == []

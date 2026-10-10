@@ -70,6 +70,9 @@ _MEDIA_SIZE_LIMITS = {
     "image": 5 * 1024 * 1024, "video": 16 * 1024 * 1024, "audio": 16 * 1024 * 1024,
     "document": 100 * 1024 * 1024, "sticker": 100 * 1024,
 }
+_INBOUND_MEDIA_MAX_BYTES = max(_MEDIA_SIZE_LIMITS.values())
+"""Ceiling for one inbound media download: the largest per-type cap Meta documents
+(documents today). Bounds the buffer for an attacker-sized blob URL."""
 # Default mime types when we can't guess from the path's extension.
 _DEFAULT_MIME = {
     "image": "image/jpeg", "video": "video/mp4", "audio": "audio/mpeg",
@@ -629,6 +632,48 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             return None
         return resp
 
+    async def _fetch_media_bytes_capped(
+        self, url: str, headers: Dict[str, str], media_id: str
+    ) -> Optional[bytes]:
+        """GET a media blob under a hard byte ceiling (streaming; ``None`` on any failure).
+
+        ``_graph_get`` returns a fully-buffered response — fine for the small metadata
+        JSON, but the bytes leg is attacker-sized and must not be buffered whole. It
+        streams instead: refuse an over-cap Content-Length up front, abort mid-read
+        the moment the cap is crossed, and only then join what was read.
+        """
+        cap = _INBOUND_MEDIA_MAX_BYTES
+        chunks: list[bytes] = []
+        total = 0
+        try:
+            async with self._http_client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code != 200:
+                    logger.warning(
+                        "[whatsapp_cloud] media bytes fetch failed (id=%s, status=%d)",
+                        media_id, resp.status_code,
+                    )
+                    return None
+                declared = resp.headers.get("Content-Length", "")
+                if declared.isdigit() and int(declared) > cap:
+                    logger.warning(
+                        "[whatsapp_cloud] media %s declined: Content-Length %s over %d cap",
+                        media_id, declared, cap,
+                    )
+                    return None
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > cap:
+                        logger.warning(
+                            "[whatsapp_cloud] media %s declined: exceeded %d byte cap mid-download",
+                            media_id, cap,
+                        )
+                        return None
+                    chunks.append(chunk)
+        except Exception:
+            logger.exception("[whatsapp_cloud] media bytes fetch raised (id=%s)", media_id)
+            return None
+        return b"".join(chunks)
+
     async def _download_media_to_cache(self, media_id: str, *, ext_hint: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
         """Two-step Graph download: ``GET /<id>`` → signed temp URL (~5 min) → bytes.
         Returns ``(local_path, mime_type)`` or ``(None, None)`` on any failure (logged)."""
@@ -652,13 +697,13 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         if not temp_url:
             return None, None
         # Auth is required even though the URL is signed (Meta documents this).
-        blob_resp = await self._graph_get(temp_url, headers, "bytes", media_id)
-        if blob_resp is None:
+        blob = await self._fetch_media_bytes_capped(temp_url, headers, media_id)
+        if blob is None:
             return None, None
-        _INBOUND_MEDIA_CACHE.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(_INBOUND_MEDIA_CACHE.mkdir, parents=True, exist_ok=True)
         out_path = _INBOUND_MEDIA_CACHE / f"{media_id}{ext_hint or _ext_for_mime(mime) or '.bin'}"
         try:
-            out_path.write_bytes(blob_resp.content)
+            await asyncio.to_thread(out_path.write_bytes, blob)
         except OSError:
             logger.exception("[whatsapp_cloud] failed to write cached media (id=%s)", media_id)
             return None, None
