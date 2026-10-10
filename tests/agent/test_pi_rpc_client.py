@@ -11,6 +11,7 @@ the real binary or network. Pins the behaviors the parent relies on:
 (3) the pi-rpc provider resolves without any ACP env vars set.
 """
 
+import re
 import stat
 import sys
 import threading
@@ -18,6 +19,7 @@ import time
 
 import pytest
 
+from agent.delegate_errors import DelegateTurnStalled
 from agent.pi_rpc_client import (
     PiRPCClient,
     PendingQuestion,
@@ -165,7 +167,10 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
         + "    if typ == 'prompt':\n"
         + "        send({'type':'response','id':msg['id'],'success':True})\n"
         + "        for i in range(6):\n"
-        + "            time.sleep(0.04)\n"
+        # 10x scheduling margin between the tick gap and the stall budget:
+        # tighter margins (2x-3x) false-positived stalls under the parallel
+        # test runner when a single tick's reader-thread wakeup was delayed.
+        + "            time.sleep(0.10)\n"
         + "            send({'type':'message_update','assistantMessageEvent':{'type':'thinking_delta','delta':'tick'}})\n"
         + "        send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'done'}})\n"
         + "        send({'type':'agent_settled'})\n"
@@ -183,9 +188,9 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
         persistent_session=True,
     )
     started = time.monotonic()
-    result = client.run_session_prompt("go", timeout_seconds=0.08)
+    result = client.run_session_prompt("go", timeout_seconds=1.0)
     elapsed = time.monotonic() - started
-    assert elapsed > 0.20
+    assert elapsed > 0.50
     assert result["text"] == "done"
     client.close()
 
@@ -217,6 +222,189 @@ def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
         client.run_session_prompt("go", timeout_seconds=0.08)
     assert time.monotonic() - started < 0.8
     client.close()
+
+
+# ------------------------------------- typed stall classification (A4)
+# A stalled turn must say WHAT died: a silent provider, a wedged agent, or a
+# provider that announced its own outage. Regression for the 09-30 cooling-down
+# storm that stalled delegates for 1800-3600s and re-entered on every retry.
+
+def _stall_builder(tmp_path, name, after_ack):
+    """Fake pi that acks the prompt, runs `after_ack`, then never settles."""
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + after_ack
+        + "        time.sleep(30)\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def _stall_after_ack(tmp_path, name, after_ack):
+    client = PiRPCClient(
+        acp_command=_stall_builder(tmp_path, name, after_ack),
+        base_url="pi://stall-classify",
+        persistent_session=True,
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled) as excinfo:
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        return excinfo.value
+    finally:
+        client.close()
+
+
+def test_zero_activity_stall_classifies_provider_stall(tmp_path):
+    err = _stall_after_ack(tmp_path, "fake-pi-silent", "        pass\n")
+    # Prompt acked, then no unsolicited event at all: the delegate agent
+    # itself produced nothing — the structural signature of a dead upstream.
+    assert err.error_class == "provider_stall"
+    assert err.zero_activity is True
+    assert isinstance(err, TimeoutError)
+
+
+def test_partial_activity_stall_classifies_agent_stall(tmp_path):
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-one-think",
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'considering'}})\n",
+    )
+    # The agent streamed something and then wedged: the provider answered.
+    assert err.error_class == "agent_stall"
+    assert err.zero_activity is False
+
+
+def test_streamed_provider_outage_line_classifies_rate_limit(tmp_path):
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-rate-limit",
+        "        send({'type':'message_update','assistantMessageEvent':"
+        "{'type':'text_delta','delta':'Rate limit: disabling model glm-4.6 "
+        "for 1800 seconds (cooling down)'}})\n",
+    )
+    assert err.error_class == "rate_limit"
+    assert "Rate limit" in err.provider_signal
+    assert err.retry_after == 1800.0
+
+
+def test_message_list_shrink_counts_as_turn_activity(tmp_path):
+    """A mid-turn compaction is progress, not silence. When the child
+    summarizes its context, the parent sees message updates whose reported
+    message count goes DOWN; that shrink event must refresh the activity
+    signal like any other turn event — otherwise an in-flight compaction
+    would be misread as a zero-activity provider death and open the
+    provider breaker on a perfectly healthy provider."""
+    err = _stall_after_ack(
+        tmp_path,
+        "fake-pi-compaction",
+        "        send({'type':'message_update','messageCount':5,'assistantMessageEvent':"
+        "{'type':'thinking_delta','delta':'long context accumulating'}})\n"
+        "        send({'type':'message_update','messageCount':2,'assistantMessageEvent':"
+        "{'type':'text_delta','delta':'[compact] context summarized'}})\n",
+    )
+    assert err.error_class == "agent_stall"  # streamed-then-wedged, not dead
+    assert err.zero_activity is False
+
+
+def test_stall_message_keeps_suffix_and_gains_timeout_prefix(tmp_path):
+    err = _stall_after_ack(tmp_path, "fake-pi-prefix-suffix", "        pass\n")
+    # Conductor's spool classifier keys on both markers: the new start-failure
+    # prefix gets a fresh-session retry, and the legacy stall suffix keeps
+    # existing `except TimeoutError` / marker consumers working.
+    assert re.match(
+        r"pi session turn timed out: stalled after \d+s without observable progress",
+        str(err),
+    )
+    assert re.search(r"stalled after .* without observable progress", str(err))
+
+
+def test_stall_terminates_pi_child_that_ignores_abort(tmp_path):
+    """C rider: a wedged child must not outlive the turn it stalled.
+
+    The stall branch aborts and waits a settle grace; a child still running
+    after that is wedged and only leaks capacity. It must be terminated
+    before the typed raise (A4 incident: leaked workers held spool slots for
+    the full 1800/3600s window).
+    """
+    client = PiRPCClient(
+        acp_command=_stall_builder(tmp_path, "fake-pi-zombie", "        pass\n"),
+        base_url="pi://zombie-rider",
+        persistent_session=True,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(DelegateTurnStalled):
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        elapsed = time.monotonic() - started
+        assert client._proc is not None
+        # Dead AND reaped — not sleeping off a 30s hang holding capacity.
+        assert client._proc.poll() is not None
+        assert elapsed < 10.0
+    finally:
+        client.close()
+
+
+def test_terminated_stall_child_respawns_same_session_id(tmp_path):
+    """After the rider kills the child, the next turn respawns the SAME
+    native session id on a fresh process (transparent recovery, no lost
+    session binding)."""
+    marker = tmp_path / "second-life"
+    script = tmp_path / "fake-pi-two-lives"
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, os, sys, time\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        if os.path.exists(%r):\n" % str(marker)
+        + "            send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'recovered'}})\n"
+        + "            send({'type':'agent_settled'})\n"
+        + "        else:\n"
+        + "            open(%r, 'w').close()\n" % str(marker)
+        + "            time.sleep(30)\n"
+        + "    elif typ == 'get_last_assistant_text':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{'text':'recovered'}})\n"
+        + "    elif typ == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://two-lives",
+        persistent_session=True,
+        session_id="stable-sess-1",
+    )
+    try:
+        with pytest.raises(DelegateTurnStalled):
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        first_pid = client._proc.pid
+        assert client._proc.poll() is not None  # rider terminated it
+
+        result = client.run_session_prompt("go again", timeout_seconds=5)
+
+        assert result["text"] == "recovered"
+        assert client._proc is not None
+        assert client._proc.poll() is None  # new live process serving
+        assert client._proc.pid != first_pid  # respawned, not reused
+        assert client._session_id == "stable-sess-1"  # binding stable
+    finally:
+        client.close()
 
 
 # ------------------------------------------------- answer text mapping

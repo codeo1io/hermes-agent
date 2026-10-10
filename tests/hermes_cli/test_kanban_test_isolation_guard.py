@@ -163,7 +163,14 @@ def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
 
     root = _real_platform_state_root()
     assert root is not None
-    raw = sqlite3.connect(root / "kanban.db")
+    db = root / "kanban.db"
+    # A fresh CI host has no real-home Hermes root yet, and a raw sqlite3.connect
+    # cannot create the board file through a missing parent directory. Materialize
+    # the empty live-board artifact first: the isolation guard refuses inside
+    # write_txn before any schema access, so an empty file IS the live board here.
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.touch(exist_ok=True)
+    raw = sqlite3.connect(db)
     try:
         with pytest.raises(RuntimeError, match="test-isolation guard"):
             with kbc.write_txn(raw):
