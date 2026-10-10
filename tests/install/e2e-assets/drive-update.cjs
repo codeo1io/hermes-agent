@@ -238,6 +238,20 @@ async function main() {
         .catch(() => {})
       await page.waitForTimeout(15_000)
       visible = await updateNow.isVisible().catch(() => false)
+      if (!visible) {
+        // v2026.6.x About panels render no inline "Update now": behind > 0
+        // surfaces "See what's new" instead, which opens the in-page updates
+        // dialog where the real "Update now" button lives. The dialog shares
+        // this page's DOM, so updateNow matches it once open — click through
+        // like a user and re-test. Newer panels never reach this branch.
+        const seeWhatsNew = page.getByRole('button', { name: /see what('|’)?s new/i }).first()
+        if (await seeWhatsNew.isVisible().catch(() => false)) {
+          log('opening the updates dialog via "See what\'s new" (v2026.6.x path)')
+          await seeWhatsNew.click({ timeout: 5_000 }).catch(() => {})
+          await page.waitForTimeout(2_000)
+          visible = await updateNow.isVisible().catch(() => false)
+        }
+      }
     }
   }
 
