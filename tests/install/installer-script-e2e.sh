@@ -89,7 +89,30 @@ SERVE_REPO="$WORK_ROOT/serve.git"
 
 step() { printf '\n=== %s ===\n' "$*"; }
 ok()   { printf '  OK %s\n' "$*"; }
-fail() { printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2; exit 1; }
+# Fail with a chance to classify: when the failure matches a known-failure
+# rule (exact OLD commit + method pair + transcript signatures), write the
+# receipt to the workroot and exit 0 so the leg reports `known [n]` in the
+# result chart instead of unexpected-red. Any mismatch re-fails unchanged
+# (fail-closed: a stranger failure is still a red leg).
+fail() {
+  printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2
+  # ${OLD_SHA:-}: early fails (dirty-tree, tag resolution) run before OLD_SHA
+  # exists; with no OLD commit there is nothing to pin a rule to.
+  if [ -n "${HERMES_E2E_KNOWN_FAILURES:-}" ] && command -v node >/dev/null 2>&1 \
+     && [ -n "${OLD_SHA:-}" ]; then
+    if node "$ASSETS_DIR/known-failures.cjs" \
+        "$WORK_ROOT" "$INSTALL_METHOD" "$UPDATE_METHOD" \
+        "E2E ASSERTION FAILED: $*" \
+        "$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/^darwin$/macos/')" \
+        update "$OLD_SHA" "$LOG_DIR" 2>>"$LOG_DIR/known-failure-classify.log"; then
+      printf 'KNOWN FAILURE classified; receipt at %s/known-failure.json\n' "$WORK_ROOT"
+      exit 0
+    fi
+  fi
+  exit 1
+}
+# The classifier asset lives next to the driver's other e2e assets.
+ASSETS_DIR="$(cd "$(dirname "$0")/e2e-assets" && pwd)"
 # shellcheck source=../e2e-assets/ts-prefix.sh
 source "$(dirname "$0")/e2e-assets/ts-prefix.sh" 2>/dev/null || ts_prefix() { cat; }
 # Full transcript in the job log, collapsed (GitHub renders ::group:: as a

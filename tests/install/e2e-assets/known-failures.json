@@ -20,5 +20,62 @@
     "signatures": ["\\[updates\\] no staged updater; surfacing manual `hermes update` for CLI install at", "\\[updates\\] manual: hermes update(?:\\r?\\n|$)"],
     "explanation": "The July Windows app has no staged updater after a script install. Its Update button explicitly returns manual: hermes update without starting a hand-off. Desktop-installer installs are not covered by this exception.",
     "evidence": "https://github.com/ethernet8023/hermes-agent/actions/runs/34055462305/job/101546487667"
+  },
+  {
+    "id": "pre-pm-windows-setup-needs-pm-lock",
+    "title": "Pre-PM release trees cannot satisfy the published Hermes-Setup.exe (pm/lock.json absent)",
+    "platforms": ["windows"],
+    "phases": ["install", "update"],
+    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f"],
+    "cases": [
+      ["desktop-installer@latest", "hermes-update"],
+      ["desktop-installer@latest", "installer-script"],
+      ["desktop-installer@latest", "installer-script+desktop"],
+      ["desktop-installer@latest", "open-app-update"],
+      ["desktop-installer@latest", "hermes-desktop-app-update"],
+      ["desktop-installer@latest", "desktop-installer@latest"],
+      ["installer-script", "desktop-installer@latest"],
+      ["installer-script+desktop", "desktop-installer@latest"]
+    ],
+    "errors": ["^E2E ASSERTION FAILED: AutoHotkey driver"],
+    "log": "bootstrap",
+    "signatures": ["bootstrap FAILED stage=Some\\(\"venv\"\\) error=Cannot find path '[^']*pm[\\\\/]+lock\\.json' because it does not exist"],
+    "explanation": "The published Hermes-Setup.exe bootstrap is pm-era: it drives the vendored package manager against the checkout it lands, and pre-pm release trees (v2026.9.24 and earlier) do not ship pm/lock.json, so the venv stage fails before any update runs. The Setup.exe comes from the release asset server, so the update target cannot repair it; the class resolves when a pm-bearing release is adopted.",
+    "evidence": "https://github.com/codeo1io/hermes-agent/actions/runs/37838134784/job/113368750282"
+  },
+  {
+    "id": "pre-pm-macos-setup-pm-install-failed",
+    "title": "Pre-PM release trees cannot satisfy the published Hermes-Setup.dmg (pm install fails at python-deps)",
+    "platforms": ["macos"],
+    "phases": ["install"],
+    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f"],
+    "cases": [
+      ["desktop-installer@latest", "hermes-update"],
+      ["desktop-installer@latest", "installer-script"],
+      ["desktop-installer@latest", "installer-script+desktop"],
+      ["desktop-installer@latest", "open-app-update"],
+      ["desktop-installer@latest", "hermes-desktop-app-update"]
+    ],
+    "errors": ["^E2E ASSERTION FAILED: dmg bootstrap exited [1-9][0-9]*; transcript above$"],
+    "log": "bootstrap",
+    "signatures": ["bootstrap FAILED stage=Some\\(\"python-deps\"\\) error=pm install failed"],
+    "explanation": "The published Hermes-Setup.dmg bootstrap is pm-era: its python-deps stage runs the vendored package manager, which cannot install pre-pm release trees (v2026.9.24 and earlier ship no pm/lock.json). The dmg comes from the release asset server, so the update target cannot repair it; the class resolves when a pm-bearing release is adopted.",
+    "evidence": "https://github.com/codeo1io/hermes-agent/actions/runs/37838134784/job/113368746422"
+  },
+  {
+    "id": "pre-pm-linux-app-update-self-relaunch",
+    "title": "Pre-PM desktop app replaces itself during first launch, before Playwright's inspection pipe settles",
+    "platforms": ["linux"],
+    "phases": ["update"],
+    "commits": ["f97608f178d1ffeca59860195ab7da295f7c8e5f"],
+    "cases": [
+      ["installer-script", "hermes-desktop-app-update"],
+      ["installer-script+desktop", "hermes-desktop-app-update"]
+    ],
+    "errors": ["^E2E ASSERTION FAILED: app-driven update exited [1-9][0-9]*; transcript above$"],
+    "log": "app-update",
+    "signatures": ["electron\\.launch: Timeout 180000ms exceeded\\.", "<ws connected> ws://127\\.0\\.0\\.1:[0-9a-f-]+"],
+    "explanation": "The pre-pm desktop app's first non-metadata startup may replace the packaged app and relaunch itself (bundle swap / update hand-off), which tears down the debugging port Playwright had just connected to: the process stays alive and prints its install stamp, but the electron.launch handshake never completes. Driving this reliably needs the launcher to settle the source runtime BEFORE attaching and isolate the update-window user data — a post-v2026.9.24 driver/product series this tree does not carry. Resolves at the next adoption.",
+    "evidence": "https://github.com/codeo1io/hermes-agent/actions/runs/37838134784/job/113520492457"
   }
 ]

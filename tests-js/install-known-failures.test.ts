@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-const { matchKnownFailure, rules } = createRequire(import.meta.url)('../tests/install/e2e-assets/known-failures.cjs')
+const { matchKnownFailure, classifyWorkRoot, rules } = createRequire(import.meta.url)('../tests/install/e2e-assets/known-failures.cjs')
 const classifier = path.resolve(import.meta.dirname, '../tests/install/e2e-assets/known-failures.cjs')
 
 const lockedLog = [
@@ -49,6 +49,88 @@ describe('known install failures', () => {
     expect(matchKnownFailure({ ...sample, installMethod: 'desktop-installer@latest' })).toBeNull()
     expect(matchKnownFailure({ ...sample, error: 'onboarding timed out' })).toBeNull()
     expect(matchKnownFailure({ ...sample, logs: { desktop: '[updates] manual: hermes update' } })).toBeNull()
+  })
+
+  // The pre-pm release classes (fix-queue item 226): the published
+  // pm-era Setup.exe/dmg cannot install a pre-pm OLD tree, and the pre-pm
+  // app self-replaces during first launch out from under Playwright.
+  const PRE_PM = 'f97608f178d1ffeca59860195ab7da295f7c8e5f'
+
+  const pmLockLog = [
+    '2026-10-08T14:56:08.706006Z  INFO bootstrap.log: -> downloading uv 0.12.3 (win32-x64) stage=venv',
+    "2026-10-08T14:56:10.675867Z  INFO bootstrap.log: [X] Cannot find path 'D:\\a\\hermes-agent\\hermes-desktop-gui-e2e\\hermes-home\\hermes-agent\\pm\\lock.json' because it does not exist. stage=venv",
+    '2026-10-08T14:56:10.724851Z ERROR hermes_bootstrap_lib::bootstrap: bootstrap FAILED stage=Some("venv") error=Cannot find path \'D:\\a\\hermes-agent\\hermes-desktop-gui-e2e\\hermes-home\\hermes-agent\\pm\\lock.json\' because it does not exist.',
+  ].join('\r\n')
+
+  it('classifies the pre-pm Windows Setup.exe pm/lock.json install failure', () => {
+    const sample = {
+      platform: 'windows', phase: 'install', commit: PRE_PM,
+      installMethod: 'desktop-installer@latest', updateMethod: 'hermes-update',
+      error: 'E2E ASSERTION FAILED: AutoHotkey driver exited 0 (Install clicked, Launch clicked, app window seen)',
+      logs: { bootstrap: pmLockLog },
+    }
+    expect(matchKnownFailure(sample)?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
+    // Update-phase re-runs of the Setup.exe classify too
+    expect(matchKnownFailure({ ...sample, phase: 'update', installMethod: 'installer-script', updateMethod: 'desktop-installer@latest' })?.id).toBe('pre-pm-windows-setup-needs-pm-lock')
+    // Fail-closed: a different OLD commit, a different stage, a different
+    // filename, or a different method pair must NOT classify
+    expect(matchKnownFailure({ ...sample, commit: 'a'.repeat(40) })).toBeNull()
+    expect(matchKnownFailure({ ...sample, logs: { bootstrap: pmLockLog.replaceAll('"venv"', '"repository"') } })).toBeNull()
+    expect(matchKnownFailure({ ...sample, logs: { bootstrap: pmLockLog.replaceAll('lock.json', 'other.json') } })).toBeNull()
+    expect(matchKnownFailure({ ...sample, installMethod: 'installer-script', updateMethod: 'hermes-update' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, logs: { bootstrap: 'unrelated failure' } })).toBeNull()
+  })
+
+  it('classifies the pre-pm macOS dmg pm install failure', () => {
+    const sample = {
+      platform: 'macos', phase: 'install', commit: PRE_PM,
+      installMethod: 'desktop-installer@latest', updateMethod: 'hermes-update',
+      error: 'E2E ASSERTION FAILED: dmg bootstrap exited 1; transcript above',
+      logs: { bootstrap: '2026-10-08T14:40:01.228057Z ERROR hermes_bootstrap_lib::bootstrap: bootstrap FAILED stage=Some("python-deps") error=pm install failed' },
+    }
+    expect(matchKnownFailure(sample)?.id).toBe('pre-pm-macos-setup-pm-install-failed')
+    expect(matchKnownFailure({ ...sample, platform: 'windows' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, logs: { bootstrap: 'bootstrap FAILED stage=Some("products") error=pm install failed' } })).toBeNull()
+    expect(matchKnownFailure({ ...sample, phase: 'update' })).toBeNull()
+  })
+
+  it('classifies the pre-pm linux app-update Playwright launch hang', () => {
+    const hangLog = [
+      '[+02:56] [launch-from-spec] launching /home/runner/work/_temp/hermes-installer-script-e2e/home/.hermes/hermes-agent/apps/desktop/release/linux-unpacked/Hermes (shape: packaged)',
+      '[+05:56] electron.launch: Timeout 180000ms exceeded.',
+      '[+05:56]   - <ws connecting> ws://127.0.0.1:46701/8dd906ea-127e-4166-a48b-5c017d2fdae8',
+      '[+05:56]   - <ws connected> ws://127.0.0.1:46701/8dd906ea-127e-4166-a48b-5c017d2fdae8',
+      '[+05:56]   - [pid=5934][out] [hermes] install stamp: 39a374d35288 (main) from ci',
+    ].join('\n')
+    const sample = {
+      platform: 'linux', phase: 'update', commit: PRE_PM,
+      installMethod: 'installer-script', updateMethod: 'hermes-desktop-app-update',
+      error: 'E2E ASSERTION FAILED: app-driven update exited 1; transcript above',
+      logs: { 'app-update': hangLog },
+    }
+    expect(matchKnownFailure(sample)?.id).toBe('pre-pm-linux-app-update-self-relaunch')
+    // Fail-closed: a firstWindow timeout (window appeared, different class) or
+    // a different OS/method must NOT classify
+    expect(matchKnownFailure({ ...sample, logs: { 'app-update': hangLog.replace('electron.launch: Timeout 180000ms exceeded.', 'firstWindow: Timeout 120000ms') } })).toBeNull()
+    expect(matchKnownFailure({ ...sample, platform: 'macos' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, updateMethod: 'hermes-update' })).toBeNull()
+  })
+
+  it('classifyWorkRoot reads posix state from an explicit OLD sha and logs dir', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'known-install-'))
+    try {
+      mkdirSync(path.join(root, 'logs'), { recursive: true })
+      writeFileSync(path.join(root, 'logs', 'app-update.log'), 'electron.launch: Timeout 180000ms exceeded.\n<ws connected> ws://127.0.0.1:46701/8dd906ea\n')
+      const receipt = classifyWorkRoot(root, 'installer-script', 'hermes-desktop-app-update',
+        'E2E ASSERTION FAILED: app-driven update exited 1; transcript above',
+        'linux', 'update', PRE_PM, path.join(root, 'logs'))
+      expect(receipt?.id).toBe('pre-pm-linux-app-update-self-relaunch')
+      // No explicit sha -> falls back to shas.json (absent here -> throw, the
+      // posix drivers always pass the sha)
+      expect(() => classifyWorkRoot(root, 'installer-script', 'hermes-desktop-app-update', 'x', 'linux', 'update')).toThrow()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('CLI writes a receipt and exits zero only on a confirmed match', () => {
