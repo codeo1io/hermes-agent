@@ -1273,8 +1273,8 @@ class QQAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
             self._unlink_quiet(src_path)
 
         try:
-            wav_data = Path(wav_path).read_bytes()
-            os.unlink(wav_path)
+            wav_data = await asyncio.to_thread(Path(wav_path).read_bytes)
+            await asyncio.to_thread(os.unlink, wav_path)
             return await cache_document_from_bytes_async(wav_data, "qq_voice.wav")
         except Exception as exc:
             logger.debug("[%s] Failed to read converted wav: %s", self._log_tag, exc)
