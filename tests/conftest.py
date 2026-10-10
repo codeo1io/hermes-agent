@@ -1374,11 +1374,13 @@ _OS_MARKS = {
 def _relocate_basetemp_outside_operator_home(config) -> None:
     """Move pytest's basetemp out of the operator's platform-native Hermes home.
 
-    Every per-test sandbox is ``<basetemp>/.../hermes_test``. ``get_default_hermes_root()``
-    prefers the platform-native home whenever ``HERMES_HOME`` sits *under* it, so a basetemp
-    inside ``~/.hermes`` (or ``%LOCALAPPDATA%\\hermes``, where ``TEMP`` commonly lives on
-    Windows) turns the sandbox back into the live install and ``get_profile_dir("default")``
-    writes fixtures over the operator's config.yaml / .env / MEMORY.md (#111101).
+    Every per-test sandbox is ``<basetemp>/.../hermes_test``. A basetemp inside ``~/.hermes``
+    (or ``%LOCALAPPDATA%\\hermes``, where ``TEMP`` commonly lives on Windows) sits inside the
+    live install: HOME-anchored resolution (``get_profile_dir("default")``) would write
+    fixtures over the operator's config.yaml / .env / MEMORY.md (#111101), and sandboxes must
+    not depend on the under-root carve-out ``get_default_hermes_root()`` grants non-profile
+    env homes (the 2026-09-17 kanban-wave fix) — root-relative readers other than the kanban
+    resolver still collapse an under-native-home HERMES_HOME onto the live root.
     """
     from hermes_constants import _get_platform_default_hermes_home
 

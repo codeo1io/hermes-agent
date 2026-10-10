@@ -1,8 +1,11 @@
 """pytest's basetemp must never sit inside the operator's platform-native Hermes home.
 
-Every per-test sandbox is ``<basetemp>/.../hermes_test`` and ``get_default_hermes_root()``
-prefers the platform-native home whenever ``HERMES_HOME`` sits *under* it — so a basetemp
-inside the home silently turns the sandbox back into the live install (#111101).
+Every per-test sandbox is ``<basetemp>/.../hermes_test`` and must never sit inside the
+operator's platform-native Hermes home: HOME-anchored resolution
+(``get_profile_dir("default")``) would turn the sandbox back into the live install
+(#111101), and while ``get_default_hermes_root()`` now keeps a non-profile env home
+under the native root as its own root (2026-09-17 kanban-wave fix), basetemp stays
+outside the home so no reader ever depends on that carve-out.
 """
 from __future__ import annotations
 
