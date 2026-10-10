@@ -1874,6 +1874,14 @@ def test_wedge_e2e_real_pi_client_durable_running_evidence(monkeypatch, tmp_path
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setattr(ds, "PiRPCClient", RealPiRPCClient)
     monkeypatch.setenv("HERMES_PI_BIN", str(script))
+    # The bare-parent shape must not inherit the deployment-wide assist
+    # model (HERMES_ASSIST_MODEL/PROVIDER) a production host exports —
+    # _pi_model_for_parent's last-resort branch would then derive a
+    # non-empty pi_model and the "" assertion below would fail on any
+    # host that runs the suite inside a configured Hermes deployment.
+    monkeypatch.delenv("HERMES_PI_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_ASSIST_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_ASSIST_PROVIDER", raising=False)
 
     parent = Parent()
     started = payload(
