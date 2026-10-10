@@ -71,27 +71,7 @@ jobs:
   tests:
     name: Python tests
     needs: detect
-    # Hosted-runner conductor variant — ONLY for conductor ephemeral
-    # validation PRs, fingerprinted by head_ref prefix + title prefix (the
-    # same shape review-labels.yml keys its exemption on). Every other
-    # event or PR falls through to `tests-standard` below, so the reroute
-    # can never silently absorb a lane an ordinary PR changed.
-    if: >-
-      ${{ needs.detect.outputs.python == 'true' &&
-      startsWith(github.head_ref, 'conductor/ci-') &&
-      startsWith(github.event.pull_request.title, 'Conductor CI validation') }}
-    uses: ./.github/workflows/conductor-tests.yml
-
-  tests-standard:
-    name: Python tests
-    needs: detect
-    # Complement of `tests`: every non-conductor event (human PRs, pushes)
-    # runs the exact workflow main ships — tests.yml. Both fingerprint
-    # signals are empty on push events, so pushes land here.
-    if: >-
-      ${{ needs.detect.outputs.python == 'true' &&
-      !(startsWith(github.head_ref, 'conductor/ci-') &&
-      startsWith(github.event.pull_request.title, 'Conductor CI validation')) }}
+    if: needs.detect.outputs.python == 'true'
     uses: ./.github/workflows/tests.yml
 
   # macOS + Windows lanes. The main `tests` lane above is Linux-only, and
@@ -161,27 +141,7 @@ jobs:
     needs: detect
     # The deterministic core suite (apps/desktop/e2e/core): transcript
     # integrity, boot/respawn/orphans, clarify+approval. Required; retries 0.
-    # The conductor variant is for conductor ephemeral-validation PRs only
-    # (head_ref prefix + title prefix, mirroring `tests` above); everything
-    # else falls through to `e2e-desktop-core-standard` and runs main's
-    # e2e-desktop-core.yml.
-    if: >-
-      ${{ (needs.detect.outputs.python_prod == 'true' ||
-      needs.detect.outputs.frontend == 'true') &&
-      startsWith(github.head_ref, 'conductor/ci-') &&
-      startsWith(github.event.pull_request.title, 'Conductor CI validation') }}
-    uses: ./.github/workflows/conductor-e2e-desktop-core.yml
-
-  e2e-desktop-core-standard:
-    name: Desktop core E2E
-    needs: detect
-    # Complement of `e2e-desktop-core`: non-conductor PRs and pushes run the
-    # workflow main ships.
-    if: >-
-      ${{ (needs.detect.outputs.python_prod == 'true' ||
-      needs.detect.outputs.frontend == 'true') &&
-      !(startsWith(github.head_ref, 'conductor/ci-') &&
-      startsWith(github.event.pull_request.title, 'Conductor CI validation')) }}
+    if: ${{ needs.detect.outputs.python_prod == 'true' || needs.detect.outputs.frontend == 'true' }}
     uses: ./.github/workflows/e2e-desktop-core.yml
 
   docs-site:
