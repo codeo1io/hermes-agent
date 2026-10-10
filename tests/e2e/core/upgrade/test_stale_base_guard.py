@@ -102,7 +102,10 @@ def test_module_fails_prereq_on_stale_base(monkeypatch, tmp_path):
     monkeypatch.setattr(up, "_git", lambda *a, **k: "v2026.9.24")
     reason = up._stale_base_reason()
     assert reason is not None
-    # The autouse fixture's fail path is one call away; prove the wiring reads the same verdict.
-    import inspect
-    src = inspect.getsource(up._upgrade_prerequisites)
-    assert "pytest.fail(stale)" in src, "prerequisite fixture does not fail on a stale base"
+    # Behavioral wiring proof: the autouse fixture is a plain zero-arg function —
+    # call it directly and assert it turns the same verdict into a hard FAIL.
+    with pytest.raises(pytest.fail.Exception, match="another series"):
+        # The module-level name is pytest's FixtureFunctionDefinition (direct calls
+        # are rejected); __wrapped__ (set by functools.update_wrapper) is the raw
+        # zero-arg prerequisite body the autouse wiring schedules for this module.
+        up._upgrade_prerequisites.__wrapped__()

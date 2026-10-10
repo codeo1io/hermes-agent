@@ -101,11 +101,24 @@ class RelayMediaClient:
             return None
         path = Path(file_path)
         try:
-            data = path.read_bytes()
+            size = path.stat().st_size
+        except OSError:
+            logger.warning("relay media upload: cannot stat %s", file_path)
+            return None
+        if size <= 0 or size > MEDIA_MAX_BYTES:
+            # Size verdict off stat BEFORE reading — mirrors the download side's
+            # Content-Length pre-check: an oversized file is refused unread.
+            logger.warning(
+                "relay media upload: %s size %d outside (0, %d]", file_path, size, MEDIA_MAX_BYTES
+            )
+            return None
+        try:
+            data = await asyncio.to_thread(path.read_bytes)
         except OSError:
             logger.warning("relay media upload: cannot read %s", file_path)
             return None
         if not data or len(data) > MEDIA_MAX_BYTES:
+            # Re-check post-read: the file may have grown between stat and read.
             logger.warning(
                 "relay media upload: %s size %d outside (0, %d]", file_path, len(data), MEDIA_MAX_BYTES
             )
