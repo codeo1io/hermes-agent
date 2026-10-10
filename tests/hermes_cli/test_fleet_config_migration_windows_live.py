@@ -7,14 +7,12 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 WORKTREE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(WORKTREE))
 
-# ``windows_only`` rather than ``skipif(sys.platform != "win32")``: the Windows CI job
-# selects ``-m windows_only``, so a bare skipif left this live E2E running on no host.
-pytestmark = pytest.mark.windows_only
+pytestmark = pytest.mark.platforms("windows")
 
 
 def test_fleet_config_migration_live_windows(tmp_path, monkeypatch):
