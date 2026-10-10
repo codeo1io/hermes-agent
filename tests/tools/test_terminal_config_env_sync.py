@@ -16,34 +16,11 @@ silently does nothing for that entry-point.  This bug already shipped once
 for ``docker_run_as_host_user`` (gateway and CLI maps) and once for
 ``docker_mount_cwd_to_workspace`` (gateway map).
 
-This test guards against future drift by extracting all three maps via source
-inspection and asserting they all bridge the same set of writable
-``terminal.*`` keys.  Source inspection (rather than importing the live
-dicts) keeps the test independent of the user's ~/.hermes/config.yaml and
-mirrors the pattern used in tests/hermes_cli/test_config_drift.py.
+This test guards against future drift by deriving all three maps BEHAVIORALLY
+from the live code paths and asserting they all bridge the same set of
+``terminal.*`` keys, keeping the test independent of the user's
+~/.hermes/config.yaml.
 """
-
-import ast
-import inspect
-
-
-def _extract_dict_keys(source: str, dict_name: str) -> set[str]:
-    """Return the set of *key* strings in `dict_name = { "KEY": "v", ... }`."""
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        targets = [t for t in node.targets if isinstance(t, ast.Name)]
-        if not any(t.id == dict_name for t in targets):
-            continue
-        if not isinstance(node.value, ast.Dict):
-            continue
-        out: set[str] = set()
-        for k in node.value.keys:
-            if isinstance(k, ast.Constant) and isinstance(k.value, str):
-                out.add(k.value)
-        return out
-    raise AssertionError(f"Could not find `{dict_name} = {{...}}` literal in source")
 
 
 def _cli_env_map_keys() -> set[str]:
@@ -53,12 +30,37 @@ def _cli_env_map_keys() -> set[str]:
 
 
 def _gateway_env_map_keys() -> set[str]:
-    """terminal config keys bridged by gateway/run.py at module load."""
-    # gateway/run.py builds the dict at module top-level (not inside a
-    # function), so inspect the whole module source.
+    """terminal config keys bridged by gateway/run.py's startup bridge (behavioral).
+
+    gateway/run.py builds ``_terminal_env_map`` inside
+    ``_bridge_terminal_config_to_env()`` and consumes it at module load, so
+    there is no live dict left to import — the old source-text probe was the
+    only way to read it. Instead feed a config carrying a distinct sentinel
+    value per key through the REAL bridge and observe which env vars carry
+    the sentinel: the returned set is exactly the keys gateway bridges, on
+    the true code path (a bridge that never runs can't pass).
+    """
+    import os
+
     import gateway.run as gr
-    source = inspect.getsource(gr)
-    return _extract_dict_keys(source, "_terminal_env_map")
+
+    sentinel_prefix = "__hermes_test_gateway_bridge_"
+    cfg = {key: f"{sentinel_prefix}{key}" for key in _cli_env_map_keys()}
+    snapshot = {k: v for k, v in os.environ.items() if k.startswith("TERMINAL_")}
+    for k in snapshot:
+        os.environ.pop(k, None)
+    try:
+        gr._bridge_terminal_config_to_env(cfg)
+        return {
+            value[len(sentinel_prefix):]
+            for value in os.environ.values()
+            if value.startswith(sentinel_prefix)
+        }
+    finally:
+        for k in [k for k in os.environ if k.startswith("TERMINAL_")]:
+            if k not in snapshot:
+                del os.environ[k]
+        os.environ.update(snapshot)
 
 
 def _save_config_env_sync_keys() -> set[str]:

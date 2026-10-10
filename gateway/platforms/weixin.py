@@ -55,6 +55,9 @@ LONG_POLL_TIMEOUT_MS, API_TIMEOUT_MS, CONFIG_TIMEOUT_MS, QR_TIMEOUT_MS = 35_000,
 MAX_CONSECUTIVE_FAILURES, RETRY_DELAY_SECONDS, BACKOFF_DELAY_SECONDS = 3, 2, 30
 SESSION_EXPIRED_ERRCODE, RATE_LIMIT_ERRCODE = -14, -2  # -2: iLink frequency limit — backoff and retry
 MESSAGE_DEDUP_TTL_SECONDS = 300
+# Outbound media ceiling: refuse locally instead of reading + AES-encrypting a huge
+# payload (in-family precedent: whatsapp_cloud._MEDIA_SIZE_LIMITS caps sends per type).
+MAX_OUTBOUND_MEDIA_BYTES = 100 * 1024 * 1024
 MEDIA_IMAGE, MEDIA_VIDEO, MEDIA_FILE, MEDIA_VOICE = 1, 2, 3, 4  # getuploadurl media_type
 ITEM_TEXT, ITEM_IMAGE, ITEM_VOICE, ITEM_FILE, ITEM_VIDEO = 1, 2, 3, 4, 5  # item_list entry types
 MSG_TYPE_BOT, MSG_STATE_FINISH = 2, 2
@@ -1131,15 +1134,25 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
 
     async def _send_file(self, chat_id: str, path: str, caption: str, force_file_attachment: bool = False) -> str:
         assert self._send_session is not None and self._token is not None
-        plaintext = Path(path).read_bytes()
+        file_path = Path(path)
+        size = file_path.stat().st_size
+        if size > MAX_OUTBOUND_MEDIA_BYTES:
+            # Refuse locally before any read: an oversized file becomes a clean
+            # SendResult error instead of a giant read + AES pass (even off-loop).
+            raise ValueError(
+                f"outbound file too large: {path} ({size} > {MAX_OUTBOUND_MEDIA_BYTES} bytes)"
+            )
+        plaintext = await asyncio.to_thread(file_path.read_bytes)
         media_type, item_builder = self._outbound_media_builder(path, force_file_attachment=force_file_attachment)
         filekey, aes_key = secrets.token_hex(16), secrets.token_bytes(16)
-        rawsize, rawfilemd5 = len(plaintext), hashlib.md5(plaintext).hexdigest()
+        rawsize = len(plaintext)
+        rawfilemd5 = (await asyncio.to_thread(hashlib.md5, plaintext)).hexdigest()
         upload_response = await _get_upload_url(
             self._send_session, base_url=self._base_url, token=self._token, to_user_id=chat_id, media_type=media_type, filekey=filekey,
             rawsize=rawsize, rawfilemd5=rawfilemd5, filesize=((rawsize + 16) // 16) * 16, aeskey_hex=aes_key.hex())
         upload_param = str(upload_response.get("upload_param") or "")
-        ciphertext = _aes128_ecb_encrypt(plaintext, aes_key)
+        # AES-ECB over real payloads is CPU-heavy — keep it off the event loop.
+        ciphertext = await asyncio.to_thread(_aes128_ecb_encrypt, plaintext, aes_key)
         # Prefer upload_full_url (direct CDN), else construct from upload_param. Both use POST — PUT 404s on the CDN.
         upload_url = str(upload_response.get("upload_full_url") or "") or (upload_param and (
             f"{self._cdn_base_url.rstrip('/')}/upload?encrypted_query_param={quote(upload_param, safe='')}&filekey={quote(filekey, safe='')}"))
