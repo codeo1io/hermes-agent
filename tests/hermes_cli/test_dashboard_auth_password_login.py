@@ -409,8 +409,13 @@ class TestRateLimit:
         assert allowed.status_code == 200
 
     def test_distinct_ip_buckets_are_capped(self, monkeypatch):
+        # Regression (upstream d59c736fcbb): one deque per distinct client IP
+        # used to be kept forever; a spoofed-source flood grew the limiter
+        # without limit. The bucket set is capped: past the cap, expired
+        # buckets are pruned first and then the least-recently-used bucket
+        # is evicted.
         _reset_password_rate_limit()
-        monkeypatch.setattr(auth_routes, "_PW_RATE_MAX_BUCKETS", 3)
+        monkeypatch.setattr(auth_routes, "_PW_RATE_MAX_BUCKETS", 3, raising=False)
 
         for i in range(5):
             assert auth_routes._password_rate_limited(f"192.0.2.{i}") is False
@@ -422,8 +427,10 @@ class TestRateLimit:
         ]
 
     def test_expired_buckets_pruned_before_evicting_live_bucket(self, monkeypatch):
+        # A bucket whose window fully expired is dropped first; a live bucket
+        # must not be evicted by LRU pressure to make room for it.
         _reset_password_rate_limit()
-        monkeypatch.setattr(auth_routes, "_PW_RATE_MAX_BUCKETS", 2)
+        monkeypatch.setattr(auth_routes, "_PW_RATE_MAX_BUCKETS", 2, raising=False)
         now = time.monotonic()
         auth_routes._pw_attempts["expired"] = auth_routes.deque([
             now - auth_routes._PW_RATE_WINDOW_SEC - 1,

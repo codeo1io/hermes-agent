@@ -787,7 +787,7 @@ DASHBOARD_HEALTH = DashboardHealth()
 
 @app.middleware("http")
 async def _dashboard_health_middleware(request: Request, call_next):
-    """Outermost non-CORS middleware: count unhandled exceptions and 5xx; re-raises, never alters."""
+    """Outermost non-CORS middleware (registered last): count unhandled exceptions and 5xx; re-raises, never alters."""
     try:
         response = await call_next(request)
     except Exception as exc:
@@ -798,12 +798,11 @@ async def _dashboard_health_middleware(request: Request, call_next):
     return response
 
 
-# CORS: restrict to localhost origins only.  The web UI is intended to run
-# locally; binding to 0.0.0.0 with allow_origins=["*"] would let any website
-# read/modify config and secrets.
-#
-# Registered AFTER all ``@app.middleware("http")`` decorators so it is the
-# *outermost* middleware (Starlette's onion: last-added runs first).
+# CORS: localhost origins only — allow_origins=["*"] on 0.0.0.0 would let any
+# website read/modify config and secrets. Registered AFTER the auth and health
+# middlewares above so it is the OUTERMOST layer (add_middleware inserts at
+# position 0 of the stack; last-added runs first): a cross-origin OPTIONS
+# preflight must be answered by CORS before the auth middleware can 401 it.
 # Without this, an OPTIONS preflight from a cross-origin SPA hits the auth
 # middlewares before CORS can answer, producing 401 instead of 204 + headers.
 app.add_middleware(
