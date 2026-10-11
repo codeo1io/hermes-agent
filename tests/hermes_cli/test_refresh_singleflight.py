@@ -199,20 +199,25 @@ def test_cookie_gate_burst_with_stale_rt_rotates_once(gated_web_app):
     register_provider(provider)
     cookies = {"hermes_session_at": "expired-at", "hermes_session_rt": "stale-rt",
                "hermes_session_provider": "stub"}
+    clients_ready = threading.Barrier(5)
 
     def call():
         # One TestClient per request: a shared jar would hand later requests the rotated RT.
         with TestClient(gated_web_app, base_url="http://gw.example.test") as client:
+            clients_ready.wait(timeout=60)
             return client.get("/api/auth/me", cookies=cookies)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(call) for _ in range(4)]
-        # 30s, not 3s: this is a scheduling gate (first of 4 gated requests
+        # 30s, not 10s: this is a scheduling gate (first of 4 gated requests
         # reaching the provider), not a latency contract — on a contended CI
-        # shard the TestClient app spin-up alone can exceed 3s. The invariant
-        # under test (exactly one rotation) is unaffected by waiting longer.
-        assert provider.entered.wait(30)
-        provider.release.set()
+        # shard the TestClient app spin-up alone can exceed the budget. The
+        # invariant under test (exactly one rotation) is unaffected by
+        # waiting longer.
+        try:
+            assert provider.entered.wait(30)
+        finally:
+            provider.release.set()
         statuses = sorted(f.result(timeout=10).status_code for f in futures)
     assert statuses == [200, 200, 200, 200]
     assert provider.calls == 1

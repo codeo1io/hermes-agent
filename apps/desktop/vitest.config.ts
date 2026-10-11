@@ -11,6 +11,13 @@ const reactUi: TestProjectConfiguration = {
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
     globals: true,
+    // React 19.1+ stubs `react`.act to undefined in the production build;
+    // @testing-library/react's act() delegates to it and throws
+    // "React.act is not a function" when NODE_ENV=production. Force the
+    // development build for the test worker so `act` resolves to a real
+    // function, regardless of any ambient NODE_ENV (e.g. a shell that
+    // inherited NODE_ENV=production from a desktop launch).
+    env: { NODE_ENV: 'development' },
     // The first test in each file pays jsdom env init + full module transform,
     // which can exceed vitest's 5000ms default under CI/load. 15s gives the
     // cold start headroom without masking genuinely hung tests.
@@ -28,17 +35,16 @@ const electronNative: TestProjectConfiguration = {
     include: ['electron/**/*.test.ts', 'scripts/**.test.{ts,mjs}', 'e2e/**/*.unit.test.ts'],
     // These use node:test and have dedicated npm scripts, not Vitest suites.
     exclude: ['scripts/run-short-session-hang-repro.test.mjs', 'scripts/tasks-scroll.test.mjs'],
-    // Same rationale as the ui project's 15s: on the shared self-hosted
-    // runner (sibling conductor suites hold load 40-100) the 5s default
-    // produced a rotating cast of timeout failures — a different random
-    // subset of tests each run, while the tree itself is unchanged. 15s
-    // gives contention headroom without masking genuinely hung tests.
-    testTimeout: 15_000
+    // Tests here shell out to real interpreters (python3, pwsh) over a 40+
+    // case corpus; pwsh alone takes several seconds to start on a loaded CI
+    // runner, so vitest's 5s default timed the Windows marker judge out.
+    testTimeout: 30_000
   }
 }
 
 export default defineConfig({
   test: {
+    globalSetup: ['./vitest.run-tmp.ts'],
     projects: [reactUi, electronNative]
   }
 })
