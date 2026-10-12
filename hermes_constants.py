@@ -229,6 +229,15 @@ def get_default_hermes_root(*, home: str | Path | None = None) -> Path:
             env_path.resolve().relative_to(native_home.resolve())  # under ~/.hermes (normal or profile mode)
         except ValueError:  # Docker/custom root: <root>/profiles/<name> -> <root>, else HERMES_HOME itself
             result = env_path.parent.parent if env_path.parent.name == "profiles" else env_path
+        else:
+            # Under the native home but NOT a ``<root>/profiles/<name>`` profile home
+            # (non-dot name): the env path is its own root. Sandboxes routinely park
+            # HERMES_HOME under the real ``~/.hermes`` (pytest --basetemp, conductor
+            # delegate TMPDIR); collapsing them onto the native root resolved those
+            # sandboxes to the PRODUCTION home (2026-09 kanban wave-9 leak class;
+            # re-derived from ephemeral CI snapshot 62edba01ce54, PR #421).
+            if not (env_path.parent.name == "profiles" and not env_path.name.startswith(".")):
+                result = env_path
     _default_hermes_root_memo = (*memo_key, result)
     return result
 

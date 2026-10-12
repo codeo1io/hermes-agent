@@ -664,3 +664,39 @@ class TestProjectVenvDirOutOfTree:
         assert hermes_constants.project_venv_dir(other) is None
         (checkout / ".venv").mkdir()
         assert hermes_constants.project_venv_dir(checkout) == checkout / ".venv"
+
+
+class TestNativeRootSubHomeIsolation:
+    """Wave-9 class: HERMES_HOME under the native root but not a ``profiles/<name>``
+    home resolves as its own root, never the production root. Pins the fix re-derived
+    from PR #421 snapshot 62edba01ce54 — the wave-9 E2E file cannot pin this in-suite:
+    the hermetic conftest redirects Path.home(), so its sandbox (under the REAL root)
+    is never under the in-suite native root and its assertion passes via the except
+    branch (vacuous). Here the native root is forced to a tmpdir and the sandbox is
+    created UNDER it, so the under-native branch is genuinely exercised."""
+
+    @pytest.fixture(autouse=True)
+    def _native(self, tmp_path, monkeypatch):
+        native = tmp_path / "native-home"
+        native.mkdir()
+        monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: native)
+        monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+        return native
+
+    def test_sandbox_under_native_root_is_its_own_root(self, _native, monkeypatch):
+        sandbox = _native / "tmp" / "delegate-abc"          # conductor/pytest sandbox shape
+        monkeypatch.setenv("HERMES_HOME", str(sandbox))
+        assert hermes_constants.get_default_hermes_root() == sandbox
+
+    def test_profile_home_under_native_root_keeps_native(self, _native, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(_native / "profiles" / "work"))
+        assert hermes_constants.get_default_hermes_root() == _native
+
+    def test_dot_dir_under_profiles_is_its_own_root(self, _native, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(_native / "profiles" / ".deleted"))
+        assert hermes_constants.get_default_hermes_root() == _native / "profiles" / ".deleted"
+
+    def test_native_home_itself_still_native(self, _native, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(_native))
+        assert hermes_constants.get_default_hermes_root() == _native
+
