@@ -36,7 +36,10 @@ from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_state_guard import _real_platform_state_root
 
-pytestmark = pytest.mark.dispatch_min_age_real
+pytestmark = [
+    pytest.mark.dispatch_min_age_real,
+    pytest.mark.allow_real_home_io,
+]
 
 
 def _seed_row(conn: sqlite3.Connection, tid: str, *, created_at: int, status: str = "ready") -> None:
