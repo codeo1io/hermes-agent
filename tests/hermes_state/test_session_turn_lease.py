@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 import hermes_state
+import hermes_state_pidns
 from hermes_state import SessionDB
 from hermes_state_errors import SessionTurnLeaseLostError
+from hermes_state_pidns import LocalPidNamespace
 
 
 def test_turn_lease_serializes_separate_session_db_instances(tmp_path):
@@ -725,3 +730,84 @@ def test_turn_lease_fence_walks_continuation_that_inherited_fork_markers(tmp_pat
     ]
     db.release_session_turn_lease("delegate-continuation", delegate_holder)
     db.release_session_turn_lease("branch-continuation", branch_holder)
+
+
+# --- Non-lazy sweep of expired lease rows -------------------------------------------
+
+
+def _pin_local_pidns(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Pin the local PID namespace id (the sibling test_lease_pid_namespace fixture pattern) so
+    holder stamps are checkable on any host; returns the pinned id for holder strings."""
+    monkeypatch.setattr(hermes_state_pidns, "_LOCAL_PID_NS", LocalPidNamespace("842341", True))
+    return "842341"
+
+
+def _reaped_pid() -> int:
+    """A genuinely dead, already-reaped local PID."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait(timeout=30)
+    assert not psutil.pid_exists(proc.pid), "reaped pid unexpectedly reused"
+    return proc.pid
+
+
+def _seed_turn_leases(raw: sqlite3.Connection, rows) -> None:
+    with raw:
+        raw.executemany(
+            "INSERT INTO session_turn_leases (conversation_id, holder, acquired_at, expires_at) "
+            "VALUES (?, ?, ?, ?)", rows)
+
+
+def test_sweep_retires_backstop_and_dead_holder_rows(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """sweep_expired_turn_leases() retires, in one call: a row expired past the sweep grace (any
+    holder — the TTL backstop) and a recently-expired row whose holder is a reaped PID of our
+    namespace. A killed holder's row is unrenewable — refresh and release match on holder — so the
+    lazy acquire-path grace alone kept it 24h and a quiescent store kept it forever."""
+    ours = _pin_local_pidns(monkeypatch)
+    dead = _reaped_pid()
+    db = SessionDB(tmp_path / "state.db")
+    now = time.time()
+    raw = sqlite3.connect(tmp_path / "state.db")
+    _seed_turn_leases(raw, [
+        ("backstop", "pid=1:turn=ancient", now - 86400 - 600, now - 86400 - 300),
+        ("killed", f"pid={dead}:pidns={ours}:turn=crashed", now - 400, now - 300)])
+
+    assert db.sweep_expired_turn_leases() == 2
+
+    rows = raw.execute("SELECT conversation_id FROM session_turn_leases").fetchall()
+    raw.close()
+    assert rows == []
+
+
+def test_sweep_keeps_revive_window_foreign_ns_and_unexpired_rows(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """What the sweep must never touch: a recently-expired row its LIVE owner may still revive
+    (test_turn_lease_revives_expired_row_still_owned_by_writer pins that contract), a dead-pid
+    holder of a FOREIGN PID namespace (STRICT: defer to the TTL backstop), an unexpired row of a
+    dead pid (a live turn holds it), and compression_locks rows (a different table)."""
+    ours = _pin_local_pidns(monkeypatch)
+    dead = _reaped_pid()
+    db = SessionDB(tmp_path / "state.db")
+    now = time.time()
+    raw = sqlite3.connect(tmp_path / "state.db")
+    _seed_turn_leases(raw, [
+        ("starved", f"pid={os.getpid()}:pidns={ours}:turn=starved", now - 60, now - 10),
+        ("foreign", f"pid={dead}:pidns=999999:turn=webui", now - 60, now - 10),
+        ("unexpired", f"pid={dead}:pidns={ours}:turn=live", now - 60, now + 300)])
+    with raw:
+        raw.execute(
+            "INSERT INTO compression_locks (session_id, holder, acquired_at, expires_at) "
+            "VALUES ('lock-1', 'pid=1:turn=x', ?, ?)", (now - 60, now + 60))
+
+    assert db.sweep_expired_turn_leases() == 0
+
+    kept = dict(raw.execute("SELECT conversation_id, holder FROM session_turn_leases").fetchall())
+    assert raw.execute("SELECT session_id FROM compression_locks").fetchall() == [("lock-1",)]
+    raw.close()
+    assert set(kept) == {"starved", "foreign", "unexpired"}
+
+
+def test_sweep_on_empty_store_is_zero_and_idempotent(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    assert db.sweep_expired_turn_leases() == 0
+    assert db.sweep_expired_turn_leases() == 0
