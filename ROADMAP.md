@@ -9,7 +9,6 @@
 ## Fleet context
 
 - upstreams (this repo builds on): .github, agent
-- dependents (changes here affect): (host), agent, dashboard, hermes-infra, hermes-stewardship-dashboard, jarvis, maestro, magic-hermes
 - graph: evidence-derived (imports/refs/deploy surfaces); advisory
 
 ## Open items
@@ -25,12 +24,6 @@
 - signals: reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1 (+15 more)
 - acceptance: Each flagged function is decomposed below the branch threshold with behavior locked by characterization tests
 - evidence: ast-based branch-count check passes at HEAD (full suite green; conductor validation digest validation:v1:<sha> recorded in the shipping PR)
-
-### Refresh stale top-level documentation
-- id: `rm-003` | track: reliability | priority: 43.0 | status: candidate
-- signals: reliability.stale_doc:README.md
-- acceptance: Docs regenerated/updated; staleness detector reports 0 signals
-- evidence: inference.stale_docs returns [] for the repo
 
 ## Closed items
 
