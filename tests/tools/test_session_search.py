@@ -11,7 +11,7 @@ All run zero LLM calls.
 import inspect
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 import pytest
 
@@ -1202,7 +1202,7 @@ class TestNewResetLineageBrowse:
 
 
 def _unix(year, month, day):
-    return int(datetime(year, month, day, tzinfo=timezone.utc).timestamp())
+    return int(datetime(year, month, day, tzinfo=UTC).timestamp())
 
 
 def _set_started(db, **started_at_by_sid):
