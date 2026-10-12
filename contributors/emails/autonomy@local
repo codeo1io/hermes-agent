@@ -1,1 +1,4 @@
-hermes-autonomy-bot
+codeo1io
+# fork automation actor (Hermes Autonomy campaign commits); same owner as
+# agent@local / fix-driver@local. Supersedes the 2026-09-15 hermes-autonomy-bot
+# mapping carried by 9d05cddd29 — that login does not exist on GitHub.
