@@ -75,6 +75,34 @@ def _claim_lease_row(conn, table: str, key_col: str, key: str, holder: str, now:
     return owner is not None and owner["holder"] == holder, reclaimed_holder
 
 
+def _retire_stale_turn_lease_rows_on_conn(conn, now: float) -> int:
+    """Retire expired ``session_turn_leases`` rows nobody can renew, inside the caller's txn;
+    returns rows removed. Shared by the lazy acquire path and the non-lazy maintenance sweep.
+
+    Two rules, one order. TTL backstop: expiry older than ``_TURN_LEASE_SWEEP_GRACE_S`` goes
+    whatever the holder — the grace is also the longest a still-live suspended holder can go
+    unrefreshed and still revive, so past it nobody may. Holder-aware: within the grace, an
+    expired row goes only when its holder is provably dead (kernel-proof local-pid death via
+    ``_compression_lock_holder_process_is_dead``; recycled pids read alive, foreign/unstamped
+    namespaces and unstructured holders defer to the backstop). A holder killed without
+    releasing leaves an unrenewable row — refresh and release match on holder — that a
+    quiescent store otherwise keeps forever."""
+    from hermes_state import _compression_lock_holder_process_is_dead
+    backstop = conn.execute(
+        "DELETE FROM session_turn_leases WHERE expires_at < ?",
+        (now - _TURN_LEASE_SWEEP_GRACE_S,)).rowcount
+    doomed = [
+        row["conversation_id"] for row in conn.execute(
+            "SELECT conversation_id, holder FROM session_turn_leases "
+            "WHERE expires_at < ? AND expires_at >= ?",
+            (now, now - _TURN_LEASE_SWEEP_GRACE_S))
+        if _compression_lock_holder_process_is_dead(row["holder"])]
+    for conversation_id in doomed:
+        conn.execute(
+            "DELETE FROM session_turn_leases WHERE conversation_id = ?", (conversation_id,))
+    return backstop + len(doomed)
+
+
 # Defensive bound on the forward compression-chain walk; ``seen`` guards cycles.
 # 100 truncated real compression lineages (~180 deep), stranding root→tip walks
 # on a stale mid id (#125041). Named so tests can simulate the REAL walk.
@@ -694,6 +722,22 @@ class SessionCompressionMixin:
                 "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                 (conversation_id, holder))
         self._execute_write(_do)
+
+    def sweep_expired_turn_leases(self, patience_s: Optional[float] = None) -> int:
+        """Maintenance sweep of expired turn leases (one write txn): rows past the sweep grace
+        (any holder) plus, within it, rows whose holder is provably dead — see
+        ``_retire_stale_turn_lease_rows_on_conn``. The non-lazy entry point: the gateway's
+        per-profile state.db maintenance (60s tick and startup) and CLI startup call it, so a
+        quiescent store retires dead-holder residue too; acquisitions sweep lazily as well.
+        Returns rows removed."""
+        def _do(conn):
+            # Retry-safe shape (``_do`` re-runs on write replay): ``now`` is derived per
+            # attempt and the doomed list is local to it.
+            return _retire_stale_turn_lease_rows_on_conn(conn, time.time())
+        removed = self._execute_write(_do, patience_s=patience_s)
+        if removed:
+            logger.debug("Turn-lease sweep retired %d expired row(s)", removed)
+        return removed
 
     def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
         """Current (non-expired) holder for ``session_id``, or None. Diagnostic only."""
