@@ -610,12 +610,11 @@ class SessionCompressionMixin:
         now = time.time()
         expires_at = now + max(0.1, float(ttl_seconds))
         def _do(conn):
-            # Sweep rows that expired long ago: a holder that died without releasing leaves its row
-            # behind, and nothing else revisits a conversation nobody resumes. The grace keeps the
-            # recent expiries a still-live owner can renew from a starved refresher; it is also the
-            # longest a suspended holder can go unrefreshed and still keep its lease.
-            conn.execute("DELETE FROM session_turn_leases WHERE expires_at < ?",
-                         (now - _TURN_LEASE_SWEEP_GRACE_S,))
+            # Holder-aware residue sweep, same txn: the TTL backstop retires long-expired rows
+            # whatever the holder, and within the grace only provably-dead holders' rows go — a
+            # holder killed without releasing leaves an unrenewable row (refresh and release match
+            # on holder). Recent expiries of live holders keep their revive window.
+            _retire_stale_turn_lease_rows_on_conn(conn, now)
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             return _claim_lease_row(
                 conn, "session_turn_leases", "conversation_id", conversation_id, holder, now, expires_at,

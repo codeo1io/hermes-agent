@@ -811,3 +811,28 @@ def test_sweep_on_empty_store_is_zero_and_idempotent(tmp_path):
     db = SessionDB(tmp_path / "state.db")
     assert db.sweep_expired_turn_leases() == 0
     assert db.sweep_expired_turn_leases() == 0
+
+
+def test_turn_lease_acquisition_retires_recently_expired_rows_of_dead_holders(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """The acquire path runs the shared holder-aware sweep, not just the blind 24h grace: an
+    acquisition for a fresh conversation retires a recently-expired (≪ grace) row whose holder
+    is a reaped local-ns PID, while a starved LIVE holder's recent expiry keeps its revive
+    window (test_turn_lease_revives_expired_row_still_owned_by_writer pins that half)."""
+    ours = _pin_local_pidns(monkeypatch)
+    dead = _reaped_pid()
+    db = SessionDB(tmp_path / "state.db")
+    for sid in ("killed", "starved", "fresh"):
+        db.create_session(sid, source="test")
+    now = time.time()
+    raw = sqlite3.connect(tmp_path / "state.db")
+    _seed_turn_leases(raw, [
+        ("killed", f"pid={dead}:pidns={ours}:turn=crashed", now - 400, now - 300),
+        ("starved", f"pid={os.getpid()}:pidns={ours}:turn=starved", now - 60, now - 10)])
+
+    assert db.try_acquire_session_turn_lease("fresh", f"pid={os.getpid()}:turn=next", ttl_seconds=5)
+
+    kept = dict(raw.execute("SELECT conversation_id, holder FROM session_turn_leases").fetchall())
+    raw.close()
+    assert set(kept) == {"starved", "fresh"}
