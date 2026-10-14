@@ -44,6 +44,14 @@ def _run_state_db_auto_maintenance(session_db) -> None:
             except Exception as _exc:
                 logger.debug(skip_msg, _exc)
 
+        # Unlatched and unconditional: turn-lease hygiene is not retention config, and lease
+        # churn is continuous (unlike the one-time repairs above). Isolated so a failing sweep
+        # cannot skip the archive/prune gates below it.
+        try:
+            session_db.sweep_expired_turn_leases()
+        except Exception as _exc:
+            logger.debug("Turn-lease sweep skipped: %s", _exc, exc_info=True)
+
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.
