@@ -8,22 +8,22 @@
 
 ## Fleet context
 
-- upstreams (this repo builds on): .github, agent
+- upstreams (this repo builds on): none
 - graph: evidence-derived (imports/refs/deploy surfaces); advisory
 
 ## Open items
 
-### Add test coverage for 20 untested module(s)
+### Add test coverage for 10 untested module(s)
 - id: `rm-002` | track: reliability | priority: 100.0 | status: candidate
-- signals: reliability.no_tests:.github/scripts/run-workspace-checks.mjs, reliability.no_tests:.worktrees/t_171b1032/.github/scripts/run-workspace-checks.mjs, reliability.no_tests:.worktrees/t_171b1032/acp_adapter/__main__.py, reliability.no_tests:.worktrees/t_171b1032/acp_adapter/auth.py, reliability.no_tests:.worktrees/t_171b1032/acp_adapter/commands.py (+15 more)
-- acceptance: Every module in ['.github/scripts/run-workspace-checks.mjs', '.worktrees/t_171b1032/.github/scripts/run-workspace-checks.mjs', '.worktrees/t_171b1032/acp_adapter/__main__.py', '.worktrees/t_171b1032/acp_adapter/auth.py', '.worktrees/t_171b1032/acp_adapter/commands.py', '.worktrees/t_171b1032/acp_adapter/content.py', '.worktrees/t_171b1032/acp_adapter/edit_approval.py', '.worktrees/t_171b1032/acp_adapter/entry.py', '.worktrees/t_171b1032/acp_adapter/events.py', '.worktrees/t_171b1032/acp_adapter/model_catalog.py', '.worktrees/t_171b1032/acp_adapter/permissions.py', '.worktrees/t_171b1032/acp_adapter/provenance.py', '.worktrees/t_171b1032/acp_adapter/server.py', '.worktrees/t_171b1032/acp_adapter/session.py', '.worktrees/t_171b1032/acp_adapter/tools.py', '.worktrees/t_171b1032/agent/account_usage.py', '.worktrees/t_171b1032/agent/acp_openai_bridge.py', '.worktrees/t_171b1032/agent/activity_tracking.py', '.worktrees/t_171b1032/agent/agent_init.py', '.worktrees/t_171b1032/agent/agent_runtime_helpers.py'] has a corresponding test file with at least one passing test
-- evidence: full suite green (python -m pytest -q) at HEAD; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+- signals: reliability.no_tests:.github/scripts/run-workspace-checks.mjs, reliability.no_tests:agent/api_request_hooks.py, reliability.no_tests:agent/auxiliary_health.py, reliability.no_tests:agent/chat_completion_stream_monitor.py, reliability.no_tests:agent/credential_pool_admin.py (+5 more)
+- acceptance: Every module in ['.github/scripts/run-workspace-checks.mjs', 'agent/api_request_hooks.py', 'agent/auxiliary_health.py', 'agent/chat_completion_stream_monitor.py', 'agent/credential_pool_admin.py', 'agent/lazy_forward.py', 'agent/transcript_repair.py', 'agent/turn_preflight_gate.py', 'agent/turn_response_intake.py', 'agent/turn_stop_gates.py'] has a corresponding test file with at least one passing test
+- evidence: pending — full suite green (python -m pytest -q) at HEAD; conductor validation digest recorded in the shipping PR on acceptance
 
 ### Refactor 20 high-complexity function(s)
 - id: `rm-001` | track: reliability | priority: 90.0 | status: candidate
-- signals: reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1 (+15 more)
+- signals: reliability.complexity_hot:agent/agent_runtime_helpers.py::anthropic_prompt_cache_policy, reliability.complexity_hot:agent/auxiliary_client.py::_resolve_task_provider_model, reliability.complexity_hot:agent/model_metadata.py::get_model_context_length, reliability.complexity_hot:agent/turn_usage.py::record_response_usage, reliability.complexity_hot:evals/desktop_bug_campaign/persistence_live.py::main (+15 more)
 - acceptance: Each flagged function is decomposed below the branch threshold with behavior locked by characterization tests
-- evidence: ast-based branch-count check passes at HEAD (full suite green; conductor validation digest validation:v1:<sha> recorded in the shipping PR)
+- evidence: pending — ast-based branch-count check passes at HEAD (full suite green; conductor validation digest recorded in the shipping PR on acceptance)
 
 ## Closed items
 
