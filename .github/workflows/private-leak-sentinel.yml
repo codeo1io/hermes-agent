@@ -13,9 +13,10 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read  # gitleaks ScanPullRequest lists PR commits via the pulls API
 
 jobs:
   private-leak:
     # SHA-pinned per the repo's dependency-pinning policy (#9801); @main here was the
     # last mutable ref in the tree (supply-chain control point on self-hosted runners).
-    uses: codeo1io/.github/.github/workflows/private-leak-sentinel.yaml@7d47ab484a937c5742ddcb3b69399495e8342beb # codeo1io/.github main @ 2026-09-22 (repo publishes no tags)
+    uses: codeo1io/.github/.github/workflows/private-leak-sentinel.yaml@fd802b9e9dfdf20beac23ab8ad519911119854dc # runner-labels input + PR-scan perms + stale gitleaks.tmp cleanup (2026-10-16)
