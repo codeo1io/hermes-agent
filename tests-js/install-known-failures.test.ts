@@ -139,6 +139,39 @@ describe('known install failures', () => {
     }
   })
 
+  // The June renderer-layout class (fix-queue item 226, run 38991331454):
+  // v2026.6.5's desktop packaging predates app.asar.unpacked/dist, so every
+  // +desktop leg fails read-only verification with one deterministic
+  // signature (source_driver.py verify_products).
+  it('classifies the pre-PM June desktop renderer-layout read-only failure', () => {
+    const verifyLog = [
+      '  OK checkout is OLD (3c231eb3979ab9c57d5cd6d02f1d577a3b718b43)',
+      'Traceback (most recent call last):',
+      '  File "tests/install/e2e-assets/source_driver.py", line 33, in verify_products',
+      '    raise RuntimeError("desktop packaged renderer is missing or incomplete")',
+      'RuntimeError: desktop packaged renderer is missing or incomplete',
+    ].join('\n')
+    const sample = {
+      platform: 'linux', phase: 'update', commit: PRE_PM_JUNE,
+      installMethod: 'installer-script+desktop', updateMethod: 'hermes-update',
+      error: 'E2E ASSERTION FAILED: read-only verification failed at OLD; no repair was attempted',
+      logs: { verify: verifyLog },
+    }
+    expect(matchKnownFailure(sample)?.id).toBe('pre-pm-june-desktop-renderer-layout')
+    // The macos dmg install-phase shape classifies too (same class, phase=install).
+    expect(matchKnownFailure({
+      ...sample, platform: 'macos', phase: 'install',
+      installMethod: 'desktop-installer@latest', updateMethod: 'installer-script',
+      error: 'E2E ASSERTION FAILED: read-only verification failed after install',
+    })?.id).toBe('pre-pm-june-desktop-renderer-layout')
+    // Fail-closed: a stranger failure on the same tree must stay red.
+    expect(matchKnownFailure({ ...sample, logs: { verify: verifyLog.replaceAll('desktop packaged renderer is missing or incomplete', 'desktop executable is missing or empty') } })).toBeNull()
+    expect(matchKnownFailure({ ...sample, platform: 'windows' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, installMethod: 'installer-script' })).toBeNull()
+    expect(matchKnownFailure({ ...sample, commit: PRE_PM })).toBeNull()
+    expect(matchKnownFailure({ ...sample, error: 'E2E ASSERTION FAILED: read-only verification failed at HEAD; no repair was attempted' })).toBeNull()
+  })
+
   it('CLI writes a receipt and exits zero only on a confirmed match', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'known-install-'))
 

@@ -261,7 +261,9 @@ phase_install() {
   ok "checkout is OLD ($OLD_SHA)"
   local hermes
   hermes="$(source_hermes "$INSTALL_DIR")" || fail "no installed command after install"
+  # verify.log: the read-only verifier's stderr (renderer-contract signatures).
   python3 -B "$ASSETS/source_driver.py" --root "$INSTALL_DIR" --launcher "$hermes" --desktop present \
+    2> >(tee "$LOG_DIR/verify.log" >&2) \
     || fail "read-only verification failed after install"
   HERMES_DISABLE_LAZY_INSTALLS=1 PYTHONDONTWRITEBYTECODE=1 source_build_env "$hermes" --version 2>&1 | ts_prefix > "$LOG_DIR/version-old.log" || fail "hermes --version failed after install"
   ok "hermes --version works: $(head -c 120 "$LOG_DIR/version-old.log" | tr -d '\n')"
@@ -445,7 +447,9 @@ PYEOF
 
   local command
   command="$(source_hermes "$INSTALL_DIR")" || fail "no installed command after update"
+  # verify.log: the read-only verifier's stderr (renderer-contract signatures).
   python3 -B "$ASSETS/source_driver.py" --root "$INSTALL_DIR" --launcher "$command" --desktop present \
+    2> >(tee "$LOG_DIR/verify.log" >&2) \
     || fail "read-only verification failed after update; no repair was attempted"
   HERMES_DISABLE_LAZY_INSTALLS=1 PYTHONDONTWRITEBYTECODE=1 source_build_env "$command" --version 2>&1 | ts_prefix > "$LOG_DIR/version-head.log" \
     || fail "hermes --version failed after update"

@@ -28,7 +28,9 @@ function readOptional(file) {
 // Log keys the rules may reference: the windows update-phase logs (update,
 // desktop) plus the bootstrap/install transcripts every OS driver captures
 // (bootstrap = the GUI installer's stage log surfaced through the driver,
-// app-update = the Playwright app-driven update transcript on linux/macos).
+// app-update = the Playwright app-driven update transcript on linux/macos),
+// and verify = the read-only source_driver.py transcript (its stderr is the
+// only place the packaged-renderer contract failure is visible).
 // <logsDir> is the driver's transcript dir: the drivers honor
 // HERMES_E2E_LOG_DIR, which in CI points OUTSIDE the workroot.
 function collectLogs(root, logsDir = path.join(root, 'logs')) {
@@ -41,6 +43,7 @@ function collectLogs(root, logsDir = path.join(root, 'logs')) {
     desktop: readOptional(path.join(root, 'hermes-home', 'logs', 'desktop.log')),
     bootstrap,
     'app-update': readOptional(path.join(logsDir, 'app-update.log')),
+    verify: readOptional(path.join(logsDir, 'verify.log')),
   }
 }
 
