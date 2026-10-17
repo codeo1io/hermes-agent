@@ -57,6 +57,7 @@ def _run_runner(probe: Path, parent_home: str, env_hermes: str) -> int:
         timeout=300,
         env=env,
         cwd=str(REPO_ROOT),
+        check=False,
     ).returncode
 
 

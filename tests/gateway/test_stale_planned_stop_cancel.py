@@ -21,7 +21,7 @@ import asyncio
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -41,7 +41,7 @@ def _write_marker(path: Path, stopper_pid: int) -> None:
             "target_pid": os.getpid(),
             "target_start_time": None,
             "stopper_pid": stopper_pid,
-            "written_at": datetime.now(timezone.utc).isoformat(),
+            "written_at": datetime.now(UTC).isoformat(),
         })
     )
 

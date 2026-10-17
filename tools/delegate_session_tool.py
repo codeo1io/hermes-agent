@@ -53,7 +53,7 @@ _SESSION_CONDITION = threading.Condition(_SESSION_LOCK)
 # regress past a terminal state. Composes with #431's per-record
 # _persist_seq claim below.
 _PERSIST_IO_LOCK = threading.Lock()
-_SESSIONS: Dict[str, Dict[str, Any]] = {}
+_SESSIONS: dict[str, dict[str, Any]] = {}
 _MAX_TEXT = 12_000
 _MAX_DURABLE_SESSIONS = 500
 
@@ -137,7 +137,7 @@ def _client_last_activity_at(client: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def _metadata_snapshot(record: Dict[str, Any]) -> dict[str, Any]:
+def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
     client = record.get("client")
     activity = getattr(client, "last_turn_activity_at", None)
     return {
@@ -228,7 +228,7 @@ def _prune_durable_metadata(root: Path) -> None:
             )
 
 
-def _persist_metadata(record: Dict[str, Any]) -> None:
+def _persist_metadata(record: dict[str, Any]) -> None:
     """Persist enough metadata to reopen the native Pi session after restart."""
     session_id = str(record.get("session_id") or "").strip()
     if not session_id:
@@ -288,7 +288,7 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
 
 def _load_metadata(session_id: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(_metadata_path(session_id).read_text(encoding="utf-8"))
+        data = json.loads(_metadata_path(session_id).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or data.get("session_id") != session_id:
@@ -343,7 +343,7 @@ def _durable_rows_for_caller(
     rows: list[dict[str, Any]] = []
     for path in _metadata_files_newest(root)[:_MAX_DURABLE_SESSIONS]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if (
@@ -407,7 +407,7 @@ def _last_line_of(text: Any) -> Optional[str]:
 
 
 def _bank_durable_progress(
-    record: Dict[str, Any], outcome: str, result: Optional[Dict[str, Any]] = None
+    record: dict[str, Any], outcome: str, result: Optional[dict[str, Any]] = None
 ) -> None:
     """Stamp durable forward-progression evidence for one terminal turn.
 
@@ -430,7 +430,7 @@ def _bank_durable_progress(
     record["last_line"] = _bounded(_last_line_of(result.get("text")), 400) or None
 
 
-def _restore_durable_progress(record: Dict[str, Any], meta: Dict[str, Any]) -> None:
+def _restore_durable_progress(record: dict[str, Any], meta: dict[str, Any]) -> None:
     """Carry persisted progression evidence into a reopened session record.
 
     Without this, resume would rewrite the durable file with zeroed counters
@@ -556,7 +556,7 @@ def _pi_provider_exists(provider_id: str) -> bool:
         Path.home() / ".pi" / "agent" / "models-store.json",
     ):
         try:
-            data = _json.loads(candidates.read_text(encoding="utf-8"))
+            data = _json.loads(candidates.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         providers = data.get("providers") if isinstance(data, dict) else None
@@ -574,7 +574,7 @@ def _pi_provider_serving_model(model: str) -> str:
         Path.home() / ".pi" / "agent" / "models-store.json",
     ):
         try:
-            data = _json.loads(candidates.read_text(encoding="utf-8"))
+            data = _json.loads(candidates.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         providers = data.get("providers") if isinstance(data, dict) else None
@@ -676,7 +676,7 @@ def _auto_answer_delegate_question(
     return _bounded(answer, 2000)
 
 
-def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
+def _pending_payload(record: dict[str, Any]) -> dict[str, Any] | None:
     client = record["client"]
     backend = record.get("backend") or "pi"
     if backend == "opencode":
@@ -703,7 +703,7 @@ def _pending_payload(record: Dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
+def _summary(record: dict[str, Any], *, include_result: bool = True) -> dict[str, Any]:
     client = record.get("client")
     last_activity_at = getattr(client, "last_turn_activity_at", None)
     # U9: turn-liveness truth. `status` alone can lie — a turn thread that
@@ -783,7 +783,7 @@ def _summary(record: Dict[str, Any], *, include_result: bool = True) -> dict[str
 
 
 def _record_authorized(
-    record: Dict[str, Any], parent_agent: Any, caller_scope: str | None = None
+    record: dict[str, Any], parent_agent: Any, caller_scope: str | None = None
 ) -> bool:
     """Authorize a live record: conversation owner or profile/workspace scope.
 
@@ -870,7 +870,7 @@ def _authorized_durable_meta(
     return data
 
 
-def _dead_client_error(record: Dict[str, Any], backend: str) -> Optional[str]:
+def _dead_client_error(record: dict[str, Any], backend: str) -> Optional[str]:
     """Mark a live record whose native process died; return an actionable error.
 
     Without this, a supervisor reading a stale in-memory record gets either a
@@ -896,7 +896,7 @@ def _dead_client_error(record: Dict[str, Any], backend: str) -> Optional[str]:
     )
 
 
-def _lookup(session_id: str, parent_agent: Any) -> Dict[str, Any] | None:
+def _lookup(session_id: str, parent_agent: Any) -> dict[str, Any] | None:
     with _SESSION_LOCK:
         record = _SESSIONS.get(session_id)
         if record is None or not _record_authorized(record, parent_agent):
@@ -904,12 +904,12 @@ def _lookup(session_id: str, parent_agent: Any) -> Dict[str, Any] | None:
         return record
 
 
-def _notify_state_locked(record: Dict[str, Any]) -> None:
+def _notify_state_locked(record: dict[str, Any]) -> None:
     record["state_generation"] = int(record.get("state_generation") or 0) + 1
     _SESSION_CONDITION.notify_all()
 
 
-def _transition_status_locked(record: Dict[str, Any], new_status: str) -> bool:
+def _transition_status_locked(record: dict[str, Any], new_status: str) -> bool:
     if record.get("status") == new_status:
         return False
     record["status"] = new_status
@@ -926,7 +926,7 @@ def _delegate_dead(client: Any) -> bool:
     return callable(is_dead) and bool(is_dead())
 
 
-def _mark_dead_delegate(record: Dict[str, Any]) -> bool:
+def _mark_dead_delegate(record: dict[str, Any]) -> bool:
     client = record.get("client")
     if client is None or record.get("status") in {"closed", "error"}:
         return False
@@ -1013,7 +1013,7 @@ def _ledger_record_failure(key: tuple[str, str], error_class: str, ledger=None) 
         logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
 
 
-def _observer_loop(record: Dict[str, Any]) -> None:
+def _observer_loop(record: dict[str, Any]) -> None:
     """Rate-capped in-turn durable refresh — the liveness-blindness fix.
 
     While the turn is open, persist metadata whenever the client's activity
@@ -1044,7 +1044,7 @@ def _observer_loop(record: Dict[str, Any]) -> None:
             _persist_metadata(record)
 
 
-def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
+def _run_turn(record: dict[str, Any], message: str, timeout: float) -> None:
     client = record["client"]
     ledger_key = (
         str(record.get("backend") or "pi"),
@@ -1095,7 +1095,7 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         # (backend, model) pair — providers recover, and a stale open
         # circuit would fail-fast future turns against a working provider.
         _ledger_record_success(ledger_key, ledger=record.get("_scope_ledger"))
-    except Exception as exc:  # noqa: BLE001 - surfaced as bounded session state
+    except Exception as exc:
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
         error_class, retry_after = _classify_turn_exception(exc)
         # Bank WHAT the dying turn produced (bounded transcript tail)
@@ -1149,7 +1149,7 @@ def _run_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
         observer.join(timeout=2.0)
 
 
-def _dispatch_turn(record: Dict[str, Any], message: str, timeout: float) -> None:
+def _dispatch_turn(record: dict[str, Any], message: str, timeout: float) -> None:
     # Pin the dispatching profile's scope onto the record BEFORE the thread
     # hop: plain threading.Thread does not inherit contextvars, so the turn
     # and observer threads would otherwise resolve the launch/default home
@@ -1431,7 +1431,7 @@ def delegate_session(
             state = client.start(
                 timeout=handshake_ceiling, stages=handshake_stages
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             try:
                 client.close()
             except Exception:
@@ -1474,7 +1474,7 @@ def delegate_session(
                         handle,
                         _bounded(exc, 400),
                     )
-                except Exception as retry_exc:  # noqa: BLE001
+                except Exception as retry_exc:
                     try:
                         retry_client.close()
                     except Exception:
@@ -1500,7 +1500,7 @@ def delegate_session(
                         state = client.start(
                             timeout=handshake_ceiling, stages=handshake_stages
                         )
-                    except Exception as recovery_exc:  # noqa: BLE001
+                    except Exception as recovery_exc:
                         try:
                             client.close()
                         except Exception:
@@ -1533,7 +1533,7 @@ def delegate_session(
                 )
         native_id = str(state.get("sessionId") or handle)
         now = time.time()
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "session_id": handle,
             "backend": backend_name,
             "model": model_arg,
@@ -1661,7 +1661,7 @@ def delegate_session(
             messages = client.get_messages(
                 timeout=handshake_ceiling, stages=handshake_stages
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return tool_error(
                 f"Could not read {session_backend} session messages: {_bounded(exc, 1000)}"
             )
@@ -1762,7 +1762,7 @@ def delegate_session(
             response = client.steer(
                 text, timeout=handshake_ceiling, stages=handshake_stages
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return tool_error(
                 f"Could not steer {session_backend} session: {_bounded(exc, 1000)}"
             )

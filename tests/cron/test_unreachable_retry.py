@@ -156,7 +156,7 @@ def test_empty_stream_death_is_unreachable_and_climbs_the_ladder(tmp_cron_home):
     assert mark_job_run(job["id"], False, str(exc), model_unreachable=True)
     j = get_job(job["id"])
     assert j[ur.STATE_KEY]["attempt"] == 1
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     nxt = datetime.fromisoformat(j["next_run_at"])
     assert timedelta(0) < nxt - now <= timedelta(seconds=ur.RETRY_DELAYS_SECONDS[0] + 120)
 

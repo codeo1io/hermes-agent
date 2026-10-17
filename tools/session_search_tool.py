@@ -176,7 +176,7 @@ def _in_time_window(started_ts: Optional[int], after_ts: Optional[int], before_t
     return (after_ts is None or started_ts >= after_ts) and (before_ts is None or started_ts < before_ts)
 
 
-def _normalize_exclude_session_ids(raw: Any) -> Tuple[List[str], Optional[str]]:
+def _normalize_exclude_session_ids(raw: Any) -> tuple[list[str], Optional[str]]:
     """Deduped, stripped session ids from a str or list, capped at ``_EXCLUDE_SESSION_IDS_CAP``.
 
     Returns ``(ids, note)``; ``note`` is set only when the input carried more distinct
@@ -362,7 +362,7 @@ def _hydrate_hit(db, lineage_root: str, match_info: dict[str, Any], result_detai
 def _discover(db, query: str, role_filter: Optional[list[str]], limit: int, sort: Optional[str],
               detail: str, current_session_id: str | None = None, link_profile: str | None = None,
               after_ts: Optional[int] = None, before_ts: Optional[int] = None,
-              exclude_session_ids: Optional[List[str]] = None,
+              exclude_session_ids: Optional[list[str]] = None,
               exclude_note: Optional[str] = None) -> str:
     """Discovery shape: FTS5 plus adaptive or full result hydration."""
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None

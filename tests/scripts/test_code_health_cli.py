@@ -86,16 +86,21 @@ def _init(path: Path) -> Path:
 
 def _add_engine(repo: Path, checker: bool = True) -> list[str]:
     """What the checker's jobs read (guard scripts, policy, a tests/ dir) and, with ``checker``,
-    scripts/check + scripts/code_health themselves; returns the top-level paths to stage."""
+    scripts/check + scripts/code_health themselves; returns the top-level paths to stage.
+
+    ruff.toml rides along so scratch ruff runs under this checkout's rule set, exactly as in a
+    clone: without it ruff falls back to its defaults, whose rule set drifts between pins (0.17
+    added I001/UP to the defaults while 0.15 had only E4/E7/E9/F)."""
     for rel in _SUPPORT:
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO / rel, repo / rel)
+    shutil.copy2(REPO / "ruff.toml", repo / "ruff.toml")
     _write(repo, {"tests/README.md": "os-marker-fakes scans tests/\n"})
     if checker:
         shutil.copy2(REPO / "scripts/check", repo / "scripts/check")
         shutil.copytree(REPO / "scripts/code_health", repo / "scripts/code_health",
                         ignore=shutil.ignore_patterns("__pycache__"), dirs_exist_ok=True)
-    return ["agent", "scripts", "tests"]
+    return ["agent", "scripts", "tests", "ruff.toml"]
 
 
 def _engine_repo(tmp_path: Path) -> Path:

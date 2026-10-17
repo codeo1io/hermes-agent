@@ -178,6 +178,7 @@ def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
     assert result.returncode == 0, (
         f"wave-9 files failed under the incident topology\n"

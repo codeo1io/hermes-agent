@@ -1159,7 +1159,7 @@ def _read_text(path) -> Optional[str]:
     """File content, or None — an unreadable file means "no truth", never
     an error: each term of the worker bound is independently optional."""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             return fh.read()
     except OSError:
         return None
@@ -1199,7 +1199,7 @@ def _parse_cpu_max(content: str) -> Optional[float]:
     return quota / period
 
 
-def _scan_cgroup_node(node: Path) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+def _scan_cgroup_node(node: Path) -> tuple[Optional[float], Optional[int], Optional[int]]:
     """One cgroup dir's (cpu cores, pids.max, pids.current), each fail-open.
 
     v1 quota files are read alongside v2 ``cpu.max`` because a node only
@@ -1242,7 +1242,7 @@ def _resolve_self_cgroup_dir(
 def _cgroup_chain_limits(
     proc_self_cgroup: Optional[str] = None,
     mount_root: Optional[str] = None,
-) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+) -> tuple[Optional[float], Optional[int], Optional[int]]:
     """The most-binding (cpu cores, pids.max, pids.current) over this
     process's cgroup dir and every ancestor up to the mount root.
 
@@ -1291,7 +1291,7 @@ def _cgroup_chain_limits(
 
 def _derive_default_workers(
     cpu_count: Optional[int] = None,
-    limits: Optional[Tuple[Optional[float], Optional[int], Optional[int]]] = None,
+    limits: Optional[tuple[Optional[float], Optional[int], Optional[int]]] = None,
     proc_self_cgroup: Optional[str] = None,
     mount_root: Optional[str] = None,
 ) -> int:
@@ -1314,7 +1314,7 @@ def _derive_default_workers(
     return max(1, min(candidates))
 
 
-def _env_workers_override(env: Optional[Dict[str, str]] = None) -> Optional[int]:
+def _env_workers_override(env: Optional[dict[str, str]] = None) -> Optional[int]:
     """HERMES_TEST_WORKERS as a positive int, or None (unset, malformed, or
     non-positive — tolerant so one bad value can't crash main() at
     argparse-default time; mirrors agent/pi_rpc_client._env_float)."""
@@ -1340,9 +1340,9 @@ def _env_workers_override(env: Optional[Dict[str, str]] = None) -> Optional[int]
 
 
 def _default_jobs(
-    env: Optional[Dict[str, str]] = None,
+    env: Optional[dict[str, str]] = None,
     cpu_count: Optional[int] = None,
-    limits: Optional[Tuple[Optional[float], Optional[int], Optional[int]]] = None,
+    limits: Optional[tuple[Optional[float], Optional[int], Optional[int]]] = None,
     proc_self_cgroup: Optional[str] = None,
     mount_root: Optional[str] = None,
 ) -> int:

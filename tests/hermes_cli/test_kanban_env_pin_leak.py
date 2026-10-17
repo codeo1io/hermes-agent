@@ -214,6 +214,7 @@ def test_subprocess_pytest_with_inherited_pin_is_refused(pinned_live_env, tmp_pa
         capture_output=True,
         text=True,
         timeout=60,
+        check=False,
     )
     assert result.returncode == 0, (
         f"child accepted the pinned live path (rc={result.returncode})\n"

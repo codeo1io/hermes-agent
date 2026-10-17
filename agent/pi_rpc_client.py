@@ -68,13 +68,13 @@ _DEFAULT_QUESTION_TIMEOUT = _env_float("HERMES_PI_QUESTION_TIMEOUT", 600.0)
 # Module-level registry of live questions from all running pi children.
 # Key: unique question id. Value: PendingQuestion.
 _registry_lock = threading.Lock()
-pending_questions: dict[str, "PendingQuestion"] = {}
+pending_questions: dict[str, PendingQuestion] = {}
 
 
 class PendingQuestion:
     """One unanswered extension_ui_request from a pi child."""
 
-    def __init__(self, method: str, title: str, options: list[str] | None, owner: "PiRPCClient | None" = None):
+    def __init__(self, method: str, title: str, options: list[str] | None, owner: PiRPCClient | None = None):
         self.id = f"q_{int(time.time() * 1000)}_{id(self):x}"
         self.method = method
         self.title = title
@@ -163,7 +163,7 @@ def answer_oldest_pending_question(text: str) -> bool:
     return True
 
 
-def pending_question_for_owner(owner: "PiRPCClient") -> PendingQuestion | None:
+def pending_question_for_owner(owner: PiRPCClient) -> PendingQuestion | None:
     """Return the oldest live question owned by one persistent Pi client."""
     with _registry_lock:
         matches = [
@@ -174,7 +174,7 @@ def pending_question_for_owner(owner: "PiRPCClient") -> PendingQuestion | None:
     return min(matches, key=lambda question: question.created_at) if matches else None
 
 
-def answer_pending_question_for_owner(owner: "PiRPCClient", text: str) -> bool:
+def answer_pending_question_for_owner(owner: PiRPCClient, text: str) -> bool:
     """Answer only a question belonging to *owner*; never steal another session's input."""
     with _registry_lock:
         matches = [
@@ -209,7 +209,7 @@ def _resolve_acp_command(kwargs_command: str | None) -> str:
 
 
 class _PiChatCompletions:
-    def __init__(self, client: "PiRPCClient"):
+    def __init__(self, client: PiRPCClient):
         self._client = client
 
     def create(self, **kwargs: Any) -> Any:
@@ -217,7 +217,7 @@ class _PiChatCompletions:
 
 
 class _PiChatNamespace:
-    def __init__(self, client: "PiRPCClient"):
+    def __init__(self, client: PiRPCClient):
         self.completions = _PiChatCompletions(client)
 
 
@@ -1051,6 +1051,7 @@ class PiRPCClient:
                 capture_output=True,
                 text=True,
                 timeout=15,
+                check=False,
             )
         except Exception:
             return None

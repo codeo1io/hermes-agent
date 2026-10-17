@@ -208,5 +208,5 @@ def bank_turn_salvage(
             "messages": messages,
             "last_tool_calls": tool_calls,
         }
-    except Exception:  # noqa: BLE001 - salvage must never mask the failure path
+    except Exception:
         return None
