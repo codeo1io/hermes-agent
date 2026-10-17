@@ -251,8 +251,12 @@ assert_checkout() {
   ok "checkout is $2 ($1)"
   local hermes
   hermes="$(source_hermes "$INSTALL_DIR")" || fail "no usable installed command at $2"
+  # The read-only verifier's stderr carries the packaged-renderer contract
+  # failure signature; persist it so known-failure rules can match on it
+  # (verify.log — the classifier's verify key).
   python3 -B "$REPO_ROOT/tests/install/e2e-assets/source_driver.py" \
     --root "$INSTALL_DIR" --launcher "$hermes" --desktop "$EXPECT_DESKTOP" \
+    2> >(tee "$LOG_DIR/verify.log" >&2) \
     || fail "read-only verification failed at $2; no repair was attempted"
   HERMES_DISABLE_LAZY_INSTALLS=1 PYTHONDONTWRITEBYTECODE=1 source_build_env "$hermes" --version 2>&1 | ts_prefix > "$LOG_DIR/version-$2.log" \
     || fail "hermes --version failed after $2; log in $LOG_DIR/version-$2.log"

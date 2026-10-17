@@ -77,5 +77,31 @@
     "signatures": ["electron\\.launch: Timeout 180000ms exceeded\\.", "<ws connected> ws://127\\.0\\.0\\.1:[0-9a-f-]+"],
     "explanation": "The pre-pm desktop app's first non-metadata startup may replace the packaged app and relaunch itself (bundle swap / update hand-off), which tears down the debugging port Playwright had just connected to: the process stays alive and prints its install stamp, but the electron.launch handshake never completes. Driving this reliably needs the launcher to settle the source runtime BEFORE attaching and isolate the update-window user data — a post-v2026.9.24 driver/product series this tree does not carry. Resolves at the next adoption.",
     "evidence": "https://github.com/codeo1io/hermes-agent/actions/runs/37838134784/job/113520492457"
+  },
+  {
+    "id": "pre-pm-june-desktop-renderer-layout",
+    "title": "Pre-PM June desktop builds ship a renderer layout the current driver contract rejects",
+    "platforms": ["linux", "macos"],
+    "phases": ["install", "update"],
+    "commits": ["3c231eb3979ab9c57d5cd6d02f1d577a3b718b43"],
+    "cases": [
+      ["installer-script+desktop", "hermes-update"],
+      ["installer-script+desktop", "installer-script"],
+      ["installer-script+desktop", "installer-script+desktop"],
+      ["installer-script+desktop", "hermes-desktop-app-update"],
+      ["installer-script+desktop", "open-app-update"],
+      ["installer-script+desktop", "desktop-installer@latest"],
+      ["desktop-installer@latest", "hermes-update"],
+      ["desktop-installer@latest", "installer-script"],
+      ["desktop-installer@latest", "installer-script+desktop"],
+      ["desktop-installer@latest", "open-app-update"],
+      ["desktop-installer@latest", "hermes-desktop-app-update"],
+      ["desktop-installer@latest", "desktop-installer@latest"]
+    ],
+    "errors": ["^E2E ASSERTION FAILED: read-only verification failed (?:at OLD|after install); no repair was attempted$", "^E2E ASSERTION FAILED: read-only verification failed after install$"],
+    "log": "verify",
+    "signatures": ["RuntimeError: desktop packaged renderer is missing or incomplete", "in verify_products"],
+    "explanation": "The June tree's desktop packaging emits its renderer without the app.asar.unpacked/dist/index.html product the current read-only source contract requires (source_driver.py verify_products), so every +desktop leg that installs v2026.6.5 fails read-only verification with the same deterministic signature before any update runs. The installed tree cannot repair its own historical packaging; the class resolves when a release with the current layout is the OLD sample.",
+    "evidence": "https://github.com/codeo1io/hermes-agent/actions/runs/38991331454/job/117274357981"
   }
 ]
