@@ -21,11 +21,11 @@
 
 <table>
 <tr><td><b>حقیقی ٹرمینل انٹرفیس</b></td><td>مکمل TUI جس میں ملٹی لائن ایڈیٹنگ، سلیش-کمانڈ آٹو کمپلیٹ، بات چیت کی ہسٹری، انٹرپٹ اور ری ڈائریکٹ، اور سٹریمنگ ٹول آؤٹ پٹ شامل ہے۔</td></tr>
-<tr><td><b>یہ وہاں موجود ہے جہاں آپ ہیں</b></td><td>ٹیلی گرام، ڈسکارڈ (Discord)، سلیک (Slack)، واٹس ایپ (WhatsApp)، سگنل (Signal)، اور CLI — سب ایک ہی گیٹ وے پروسیس سے کام کرتے ہیں۔ وائس میمو (Voice memo) ٹرانسکرپشن، کراس پلیٹ فارم بات چیت کا تسلسل۔</td></tr>
+<tr><td><b>یہ وہاں موجود ہے جہاں آپ ہیں</b></td><td>ٹیلی گرام، ڈسکارڈ (Discord)، سلیک (Slack)، واٹس ایپ (WhatsApp)، سگنل (Signal)، وی چیٹ/WeChat (Weixin)، QQ، ٹینسینٹ یوان باؤ (Tencent Yuanbao)، iMessage (BlueBubbles)، ڈنگ ٹاک (DingTalk)، فی شو/Feishu (Lark)، WeCom، Matrix، IRC، LINE، Google Chat، Mattermost، Microsoft Teams، SimpleX، SMS، ntfy، ای میل (Email) اور CLI — سب ایک ہی گیٹ وے پروسیس سے کام کرتے ہیں، نیز مزید بلٹ اِن پلیٹ فارم پلگ اِنز۔ وائس میمو ٹرانسکرپشن، کراس پلیٹ فارم بات چیت کا تسلسل۔</td></tr>
 <tr><td><b>سیکھنے کا ایک مکمل عمل</b></td><td>ایجنٹ کی اپنی ترتیب دی گئی میموری، جس میں وہ خود کو وقتاً فوقتاً یاد دہانی کرواتا ہے۔ پیچیدہ کاموں کے بعد خود کار طریقے سے مہارت (skill) کی تخلیق۔ استعمال کے دوران مہارتوں میں بہتری۔ LLM سمرائزیشن کے ساتھ FTS5 سیشن سرچ تاکہ پرانے سیشنز کی یاددہانی کی جا سکے۔ <a href="https://github.com/plastic-labs/honcho">Honcho</a> کے ذریعے صارف کی ماڈلنگ۔ <a href="https://agentskills.io">agentskills.io</a> اوپن سٹینڈرڈ کے ساتھ مکمل مطابقت۔</td></tr>
 <tr><td><b>شیڈول کی گئی خودکار کارروائیاں</b></td><td>بلٹ ان (Built-in) کرون (cron) شیڈیولر جو کسی بھی پلیٹ فارم پر ڈیلیوری کے لیے استعمال ہو سکتا ہے۔ روزانہ کی رپورٹس، رات کے بیک اپس، ہفتہ وار آڈٹس — یہ سب کچھ قدرتی زبان (natural language) میں اور بغیر کسی نگرانی کے کام کرتا ہے۔</td></tr>
 <tr><td><b>کام کی تقسیم اور متوازی عمل</b></td><td>متوازی (parallel) کاموں کے لیے الگ سے ذیلی ایجنٹس (subagents) بنائیں۔ پائتھون (Python) سکرپٹس لکھیں جو RPC کے ذریعے ٹولز کو استعمال کریں، تاکہ کئی مراحل پر مشتمل کاموں کو بغیر کسی سیاق و سباق (context) کے خرچ کے، ایک ہی باری میں انجام دیا جا سکے۔</td></tr>
-<tr><td><b>کہیں بھی چلائیں، صرف اپنے لیپ ٹاپ پر نہیں</b></td><td>چھ (Six) ٹرمینل بیک اینڈز — لوکل، Docker، SSH، Singularity، Modal، اور Daytona۔ ڈیٹونا (Daytona) اور موڈل (Modal) سرور لیس (serverless) فعالیت پیش کرتے ہیں — جب آپ کا ایجنٹ فارغ ہوتا ہے تو اس کا ماحول سلیپ (hibernate) ہو جاتا ہے اور ضرورت پڑنے پر خود بخود جاگ جاتا ہے، جس کی وجہ سے سیشنز کے درمیان لاگت تقریباً صفر رہتی ہے۔ اسے $5 والے VPS یا GPU کلسٹر پر چلائیں۔</td></tr>
+<tr><td><b>کہیں بھی چلائیں، صرف اپنے لیپ ٹاپ پر نہیں</b></td><td>سات (Seven) ٹرمینل بیک اینڈز — لوکل، Docker، SSH، Singularity، Modal، Daytona، اور Vercel Sandbox۔ ڈیٹونا (Daytona) اور موڈل (Modal) سرور لیس (serverless) فعالیت پیش کرتے ہیں — جب آپ کا ایجنٹ فارغ ہوتا ہے تو اس کا ماحول سلیپ (hibernate) ہو جاتا ہے اور ضرورت پڑنے پر خود بخود جاگ جاتا ہے، جس کی وجہ سے سیشنز کے درمیان لاگت تقریباً صفر رہتی ہے۔ اسے $5 والے VPS یا GPU کلسٹر پر چلائیں۔</td></tr>
 <tr><td><b>تحقیق کے لیے تیار</b></td><td>بیچ (Batch) ٹریجیکٹری (trajectory) جنریشن، اگلی نسل کے ٹول کالنگ ماڈلز کی تربیت کے لیے ٹریجیکٹری کمپریشن۔</td></tr>
 </table>
 
@@ -88,6 +88,7 @@ hermes              # انٹرایکٹو CLI — بات چیت شروع کریں
 hermes model        # اپنا LLM پرووائیڈر اور ماڈل منتخب کریں
 hermes tools        # کنفیگر کریں کہ کون سے ٹولز ایکٹو ہیں
 hermes config set   # انفرادی کنفگ (config) ویلیوز سیٹ کریں
+hermes config get   # انفرادی کنفگ (config) ویلیوز دیکھیں
 hermes gateway      # میسجنگ گیٹ وے شروع کریں (ٹیلی گرام، ڈسکارڈ، وغیرہ)
 hermes setup        # مکمل سیٹ اپ وزرڈ چلائیں (یہ سب کچھ ایک ساتھ کنفیگر کر دے گا)
 hermes claw migrate # OpenClaw سے مائیگریٹ کریں (اگر آپ OpenClaw سے آ رہے ہیں)
@@ -126,7 +127,7 @@ hermes setup --portal
 
 ## CLI بمقابلہ میسجنگ فوری حوالہ
 
-ہرمیس کے دو بنیادی انٹر فیس ہیں: آپ ٹرمینل UI کو `hermes` کے ساتھ شروع کریں، یا گیٹ وے چلا کر اس کے ساتھ ٹیلی گرام، ڈسکارڈ، سلیک، واٹس ایپ، سگنل، یا ای میل کے ذریعے بات کریں۔ جب آپ کسی بات چیت میں ہوتے ہیں، تو بہت سی سلیش (slash) کمانڈز دونوں انٹرفیسز میں ایک جیسی ہوتی ہیں۔
+ہرمیس کے دو بنیادی انٹر فیس ہیں: آپ ٹرمینل UI کو `hermes` کے ساتھ شروع کریں، یا گیٹ وے چلا کر اس کے ساتھ ٹیلی گرام، ڈسکارڈ، سلیک، واٹس ایپ، سگنل، یا ای میل کے ذریعے بات کریں — اور بہت سے مزید بلٹ اِن پلیٹ فارم ایڈاپٹرز۔ جب آپ کسی بات چیت میں ہوتے ہیں، تو بہت سی سلیش (slash) کمانڈز دونوں انٹرفیسز میں ایک جیسی ہوتی ہیں۔
 
 <div dir="ltr">
 
@@ -159,7 +160,7 @@ hermes setup --portal
 | [فوری آغاز (Quickstart)](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)     | انسٹالیشن → سیٹ اپ → 2 منٹ میں پہلی بات چیت شروع کریں       |
 | [CLI کا استعمال](https://hermes-agent.nousresearch.com/docs/user-guide/cli)                         | کمانڈز، کی بائنڈنگز (keybindings)، پرسنلٹیز (personalities)، سیشنز |
 | [کنفیگریشن (Configuration)](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)    | کنفگ فائل، پرووائیڈرز، ماڈلز، اور تمام آپشنز               |
-| [میسجنگ گیٹ وے](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)                    | ٹیلی گرام، ڈسکارڈ، سلیک، واٹس ایپ، سگنل، ہوم اسسٹنٹ         |
+| [میسجنگ گیٹ وے](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)                    | ٹیلی گرام، ڈسکارڈ، سلیک، واٹس ایپ، سگنل — 30+ پلیٹ فارم گائیڈز |
 | [سیکیورٹی (Security)](https://hermes-agent.nousresearch.com/docs/user-guide/security)              | کمانڈ کی منظوری، DM پیئرنگ (pairing)، کنٹینر آئسولیشن       |
 | [ٹولز اور ٹول سیٹس](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools)          | 40 سے زائد ٹولز، ٹول سیٹ سسٹم، ٹرمینل بیک اینڈز             |
 | [مہارتوں کا سسٹم (Skills System)](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)| پروسیجرل (Procedural) میموری، سکلز ہب، نئی مہارتیں بنانا    |
@@ -225,7 +226,7 @@ PM اور Python 3.14 کے ٹیسٹ ماحول اور تصدیقی کمانڈز 
 - 📚 [سکلز ہب (Skills Hub)](https://agentskills.io)
 - 🐛 [مسائل (Issues)](https://github.com/NousResearch/hermes-agent/issues)
 - 🔌 [computer-use-linux](https://github.com/avifenesh/computer-use-linux) — ہرمیس اور دیگر MCP ہوسٹس کے لیے لینکس (Linux) ڈیسک ٹاپ کنٹرول MCP سرور، جس میں AT-SPI ایکسیسیبلٹی ٹریز، Wayland/X11 ان پٹ، سکرین شاٹس، اور کمپوزیٹر ونڈو ٹارگیٹنگ شامل ہے۔
-- 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — کمیونٹی وی چیٹ (WeChat) برج: ہرمیس ایجنٹ اور OpenClaw کو ایک ہی وی چیٹ اکاؤنٹ پر چلائیں۔
+- 🔌 [HermesClaw](https://github.com/AaronWong1999/hermesclaw) — کمیونٹی وی چیٹ (WeChat) برج: ہرمیس ایجنٹ اور OpenClaw کو ایک ہی وی چیٹ اکاؤنٹ پر چلائیں۔ نوٹ: وی چیٹ (Weixin) کا نیٹو ایڈاپٹر ہرمیس میں ہی شامل ہے، اس لیے یہ برج صرف OpenClaw کے ساتھ ساتھ چلانے (co-residency) کے لیے درکار ہے۔
 
 ---
 
