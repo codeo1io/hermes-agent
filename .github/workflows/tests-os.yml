@@ -184,7 +184,7 @@ jobs:
           FILES="$(tr -d '\r' < "$LIST" | paste -sd "$SEPARATOR" -)"
           scripts/run_tests.sh --files "$FILES" -- \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} \
-            -m "platforms and not integration" \
+            -m "platforms and not integration and not live" \
             -v --tb=short
         env:
           # These files spawn nested PowerShell trees. CPU-count parallelism

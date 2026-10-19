@@ -161,7 +161,7 @@ class DelegateHealthLedger:
         self._loaded = True
         try:
             data = json.loads(
-                self._resolve_state_path().read_text(encoding="utf-8")
+                self._resolve_state_path().read_text(encoding="utf-8-sig")
             )
         except (OSError, ValueError):
             return

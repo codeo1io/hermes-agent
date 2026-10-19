@@ -437,12 +437,17 @@ def _require_own_dependencies(project_root: Path) -> None:
 
     PM's store Python boots with none, so for it there is nothing to keep: refuse instead of
     running on whatever PYTHONPATH it inherited (historically the pre-PM in-tree venv).
+    PM's runtime bootstrap venv is a venv that owns no application packages either (only
+    PM's own tools — ``pm/runtime.py``), so it refuses like the store Python instead of
+    passing as a developer venv (run dac96a824, 2026-10-11).
     """
     import sys
 
-    if sys.prefix != sys.base_prefix:
+    pm_runtime = (Path(sys.prefix) / "pm-runtime.json").is_file()
+    if sys.prefix != sys.base_prefix and not pm_runtime:
         return  # a venv interpreter (developer .venv, test env) carries its own packages
-    if Path(sys.base_prefix).resolve().is_relative_to(store_root(project_root).resolve()):
+    if pm_runtime or Path(sys.base_prefix).resolve().is_relative_to(
+            store_root(project_root).resolve()):
         raise RuntimeError("no dependency environment is committed for this install")
 
 

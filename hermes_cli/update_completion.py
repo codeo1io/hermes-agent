@@ -429,6 +429,17 @@ def _complete_selected(request: dict) -> bool:
         record_stage("restart", "skipped")
         print("→ Gateway restart deferred (--no-gateway-restart); restart gateways separately.")
         return complete
+    if (request.get("no_change") and not update_cmd._pending_fleet_restart_needed()
+            and update_cmd._fleet_restart_skip_reason(plan)):
+        # A no-op run (no checkout move, no parked stash) changed nothing the fleet could
+        # pick up, so it skips only when no standing debt exists AND the evidence-based
+        # guard agrees: a pending obligation or a gateway still on pre-update code still
+        # restarts below.
+        update_cmd._resume_windows_gateways_after_update(request["windows_resume"])
+        record_skip("gateway_restart", "no-change update: same commit, same recorded selection")
+        record_stage("restart", "skipped")
+        print("✓ Gateway restart skipped: nothing changed (same commit, recorded selection current).")
+        return complete
     skip = update_cmd._fleet_restart_skip_reason(plan)
     if skip and update_cmd._pending_fleet_restart_needed():
         # A host already stamped "restarted" for this SHA whose fleet is still off the checkout

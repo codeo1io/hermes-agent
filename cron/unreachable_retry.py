@@ -23,7 +23,14 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from cron.constants import is_recurring
+try:
+    from cron.constants import is_recurring
+except ImportError:  # a live gateway mid self-update imports this file while sys.modules
+    # still holds the pre-#501 cron.constants (no is_recurring): the worker's own failure
+    # must still be recorded instead of dying on the skew (run dac96a824, 2026-10-11).
+    def is_recurring(job: dict) -> bool:  # mirrors cron.constants.is_recurring
+        """A cron/interval job (vs a one-shot); a null ``schedule`` counts as not recurring."""
+        return (job.get("schedule") or {}).get("kind") in {"cron", "interval"}
 from hermes_time import now as _hermes_now
 
 logger = logging.getLogger("cron.scheduler")

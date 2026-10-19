@@ -32,7 +32,10 @@ import pytest
 
 from tests.live_process_fixtures import sleeper_script_path
 
-pytestmark = pytest.mark.platforms("windows")  # live Windows named-pipe E2E
+pytestmark = [pytest.mark.platforms("windows"), pytest.mark.live]  # live Windows named-pipe E2E
+# fork: `live` keeps this on the wine2e/** on-demand lane and out of every PR run —
+# the named-pipe identify probe has a 5s deadline that starves on the 4-vCPU hosted
+# image (upstream runs it on 32-vCPU Blacksmith runners).
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 

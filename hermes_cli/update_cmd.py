@@ -792,8 +792,11 @@ def _complete_source_update(request: dict | None) -> None:
     if current is not None:
         request["receipt"] = deepcopy(current.data)
     # A head capture that came back empty must not arm an SHA-less record: it names no code the
-    # fleet can be proven current on, so the warning could never clear (#125952).
-    _write_fleet_restart_pending_marker(expected_sha=request.get("expected_sha") or _current_checkout_sha() or "")
+    # fleet can be proven current on, so the warning could never clear (#125952). A no-change
+    # update never arms: the marker it would write is the only thing that overrides the
+    # completion tail's own no-op skip and re-kills gateways already serving this checkout.
+    if not request.get("no_change"):
+        _write_fleet_restart_pending_marker(expected_sha=request.get("expected_sha") or _current_checkout_sha() or "")
     # Pre-swap module (imported with run_completion above): never the replacement tree's.
     from hermes_cli.update_completion import settle_lost_completion
     lost = False
@@ -1750,6 +1753,11 @@ def _finish_already_up_to_date(
         completion_request["completion_message"] = (
             "✓ Already up to date!" if _plan.upstream_checked
             else "✓ Up to date with your fork (official repo not checked).")
+        # No checkout move and no parked local patches: this run changed nothing a restart
+        # could pick up. Mark it so the completion arm skips the fleet-restart obligation —
+        # arming here is what overrides the tail's own no-op guard (#117051) and re-kills
+        # gateways already serving this checkout on every no-op update.
+        completion_request["no_change"] = not _plan.parked_branch_switched and _plan.auto_stash_ref is None
     _complete_source_update(completion_request)
 
 

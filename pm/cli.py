@@ -314,12 +314,12 @@ def _install_python_environments(extras: list[str], *, sync: bool, test_environm
         from pm.install import sync_venv
 
         try:
-            # Default the venv to the [all] feature set — the same thing
-            # `hermes update` force-syncs on every run (update_cmd.py) and
-            # the installers' old `--extra all` did. sync_venv unions, so
-            # any lazy extras already recorded survive this; it only makes
-            # a fresh bootstrap match what the first update would do.
-            sync_venv(extras or ["all"], explicit=True)
+            # A bare `pm sync` names no selection: sync_venv's one default
+            # then carries a recorded selection, or the main-era venv's extras
+            # when nothing is recorded yet. Defaulting to ['all'] here used
+            # to alternate against that carry, rebuilding the venv on every
+            # flip. sync_venv unions, so lazy extras already recorded survive.
+            sync_venv(extras, explicit=True)
             print(f"✓ venv{' +' + ' +'.join(extras) if extras else ''}")
         except InstallError as e:
             print(f"✗ {e}")

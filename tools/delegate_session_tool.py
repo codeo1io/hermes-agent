@@ -288,7 +288,7 @@ def _persist_metadata(record: Dict[str, Any]) -> None:
 
 def _load_metadata(session_id: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(_metadata_path(session_id).read_text(encoding="utf-8"))
+        data = json.loads(_metadata_path(session_id).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict) or data.get("session_id") != session_id:
@@ -343,7 +343,7 @@ def _durable_rows_for_caller(
     rows: list[dict[str, Any]] = []
     for path in _metadata_files_newest(root)[:_MAX_DURABLE_SESSIONS]:
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         if (
@@ -556,7 +556,7 @@ def _pi_provider_exists(provider_id: str) -> bool:
         Path.home() / ".pi" / "agent" / "models-store.json",
     ):
         try:
-            data = _json.loads(candidates.read_text(encoding="utf-8"))
+            data = _json.loads(candidates.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         providers = data.get("providers") if isinstance(data, dict) else None
@@ -574,7 +574,7 @@ def _pi_provider_serving_model(model: str) -> str:
         Path.home() / ".pi" / "agent" / "models-store.json",
     ):
         try:
-            data = _json.loads(candidates.read_text(encoding="utf-8"))
+            data = _json.loads(candidates.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):
             continue
         providers = data.get("providers") if isinstance(data, dict) else None

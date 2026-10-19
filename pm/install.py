@@ -746,7 +746,8 @@ def _publish_inactive(change) -> None:
     receipt.record_venv_rebuild(False, "inactive plugin")
 
 
-def _target_selection(package, fact: dict, *, extras, inputs: dict, repair: bool, shipped, frozen):
+def _target_selection(package, fact: dict, *, extras, inputs: dict, repair: bool, shipped, frozen,
+                      project_root=None):
     """Return (enabled extras, expected stamp, package inputs) this sync must reach."""
     if repair:
         if fact and (not isinstance(fact.get("extras"), list)
@@ -758,6 +759,13 @@ def _target_selection(package, fact: dict, *, extras, inputs: dict, repair: bool
         return enabled, stamp, {"repair": True}
     # The first writable generation replaces, rather than layers on,
     # the payload. Retain its extras until a recorded selection owns them.
+    if extras is None and not fact.get("extras"):
+        # One default at every entry point: with nothing recorded, a checkout
+        # carries its main-era venv's extras instead of alternating ['all']
+        # against that carry between bare `pm sync` and the update/launch tails.
+        from pm.extras import legacy_selection
+
+        extras = legacy_selection(project_root or paths.repo_root())
     enabled = sorted(set(_still_declared(package, fact.get("extras", shipped or []))) | set(extras or []))
     return enabled, package.expected_stamp(enabled, **inputs), inputs
 
