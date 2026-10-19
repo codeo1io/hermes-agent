@@ -238,3 +238,47 @@ a28890a4c829e06ad65ff84ece8d0079d05a0fbe:tests/agent/test_transform_llm_output_p
 # is the finding's start line - a literal *** only matches a secret that is itself
 # redacted to ***). Numeric form proven live both-ways 2026-10-07 (8.28.0 + 8.30.1).
 cc51f8785e336aa6bae1035a12f466794ab60d9f:tests/agent/test_concurrent_transform_once.py:generic-api-key:63
+
+# 2026-10-19 v0.21.6 adoption tail (CI-health audit, fix via PR): the
+# 2026-10-11 merge 980a38e (+ 8 upstream commits it carried) reintroduced
+# 15 findings on the scheduled full-history sentinel scan — red on main
+# 3 consecutive days (10-17/18/19). All triaged synthetic, same classes
+# as the 2026-09-24 205-entry triage: "test-key-1234567890" AIAgent
+# fixtures, redaction-engine PEM straddle tests (github-app-private-key
+# firing on "[REDACTED PRIVATE KEY]" templates), "acme-internal-secret-v2"
+# attribution fixture, gpg "correct-horse-battery-staple" passphrase test.
+# Fingerprints verified locally: pinned gitleaks 8.30.1 + fleet config
+# d04d86d, per-commit --log-opts scans matching CI SARIF (both *** and
+# numeric 4th fields reproduced). New commits remain fail-closed.
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_context_compressor.py:github-app-private-key:2523
+fb86bc708d24b5c636498fbbc593479aed3852ec:tests/agent/test_context_compressor.py:github-app-private-key:2327
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_fallback_restore_codex_early_reopen.py:generic-api-key:***
+c4f2aaf11ae21f36ededff7dae139d2ad24eb616:tests/agent/test_fallback_restore_codex_early_reopen.py:generic-api-key:***
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_memory_sync_redaction.py:generic-api-key:***
+88704223d2deea76b28f142c855718c664369a66:tests/agent/test_memory_sync_redaction.py:generic-api-key:***
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_read_dedup_rewrite_boundaries.py:generic-api-key:***
+22127999be10e66cb0171dc1178b42b0f38e3326:tests/agent/test_read_dedup_rewrite_boundaries.py:generic-api-key:***
+995bc1c0e7de9a7825113e55a1984f0a9ad9793f:tests/agent/test_turn_user_intervened.py:generic-api-key:***
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_turn_user_intervened.py:generic-api-key:***
+7606b014f56cf2a18b047e7e3f0cabbe3f7785ed:tests/test_stage_apt_repo.py:generic-api-key:***
+139876e727553025a856a21447dde1c12f544147:tests/hermes_cli/test_debug.py:generic-api-key:***
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/hermes_cli/test_debug.py:generic-api-key:***
+093c10a2eef90348f545c97f3b2097b3e204c6d3:tests/hermes_cli/test_shared_metrics_model_attribution.py:generic-api-key:***
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/hermes_cli/test_shared_metrics_model_attribution.py:generic-api-key:***
+# Numeric startline variants for the same 15 (both-ways doctrine, cf. the
+# 2026-10-04 block above; proven with/without --redact on 8.30.1):
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_context_compressor.py:github-app-private-key:2523
+fb86bc708d24b5c636498fbbc593479aed3852ec:tests/agent/test_context_compressor.py:github-app-private-key:2327
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_fallback_restore_codex_early_reopen.py:generic-api-key:48
+c4f2aaf11ae21f36ededff7dae139d2ad24eb616:tests/agent/test_fallback_restore_codex_early_reopen.py:generic-api-key:48
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_memory_sync_redaction.py:generic-api-key:13
+88704223d2deea76b28f142c855718c664369a66:tests/agent/test_memory_sync_redaction.py:generic-api-key:13
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_read_dedup_rewrite_boundaries.py:generic-api-key:83
+22127999be10e66cb0171dc1178b42b0f38e3326:tests/agent/test_read_dedup_rewrite_boundaries.py:generic-api-key:83
+995bc1c0e7de9a7825113e55a1984f0a9ad9793f:tests/agent/test_turn_user_intervened.py:generic-api-key:44
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/agent/test_turn_user_intervened.py:generic-api-key:44
+7606b014f56cf2a18b047e7e3f0cabbe3f7785ed:tests/test_stage_apt_repo.py:generic-api-key:389
+139876e727553025a856a21447dde1c12f544147:tests/hermes_cli/test_debug.py:generic-api-key:450
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/hermes_cli/test_debug.py:generic-api-key:545
+093c10a2eef90348f545c97f3b2097b3e204c6d3:tests/hermes_cli/test_shared_metrics_model_attribution.py:generic-api-key:19
+980a38e64694bb2dcc98875e3778ccf004dcf856:tests/hermes_cli/test_shared_metrics_model_attribution.py:generic-api-key:20
