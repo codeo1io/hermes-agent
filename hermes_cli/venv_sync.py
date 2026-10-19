@@ -7,9 +7,12 @@ remain build-owned. ``--check`` is passive and never provisions tools.
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from hermes_cli.steward import UPDATE_MECHANISMS
@@ -587,6 +590,189 @@ def _sync_source_dependencies(root: Path, *, arm: bool, borrowed_from: Path | No
         (root / name).unlink(missing_ok=True)
 
 
+# Set by relaunch_command's minted child before the entry runs, so the child's
+# own hermes_bootstrap knows it is a Hermes-owned process (own_process_entry).
+RELAUNCH_FLAG = "_hermes_relaunch"
+# Canonical home of the launcher stamp (set by minted launchers before
+# ``import hermes_bootstrap``): ``hermes_cli/_launchers.py`` imports it from
+# here because it must stay importable pre-activation — a lazy import of
+# _launchers inside own_process_entry drags pm.environments into isolated
+# cold probes and fail-closes the gate (found by the cold-runtime corpus).
+PIN_DEFAULT_HOME_FLAG = "_hermes_pin_default_home"
+
+
+def _path_under(path: str | Path, root: Path) -> bool:
+    """True when *path* resolves inside *root*; never raises."""
+    try:
+        return Path(path).resolve().is_relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _script_operand(original: list[str]) -> str | None:
+    """The script path this interpreter invocation names, or None for -c/-m/stdin.
+
+    Mirrors the option scan in :func:`relaunch_command` (interpreter options
+    kept, ``-W``/``-X`` consume one value) so minted and hand launches are
+    read the same way. argv[0] can be rewritten by running code (the update
+    takeover does), so the original invocation stays the structural truth.
+    """
+    if not original:
+        return None
+    index = 1
+    while index < len(original):
+        option = original[index]
+        if option in ("-c", "-m", "-"):
+            return None
+        if option == "--":
+            index += 1
+            continue
+        if not option.startswith("-"):
+            return option
+        index += 1
+        if option in ("-W", "-X") and index < len(original):
+            index += 1
+    return None
+
+
+def _imports_bootstrap(body: str) -> bool:
+    """True when a ``python -c`` *body* imports hermes_bootstrap at top level.
+
+    Comments, strings and nested lazy imports do not count: only a real
+    top-level import is a deliberate request for Hermes' launch machinery.
+    """
+    try:
+        tree = ast.parse(body)
+    except (SyntaxError, ValueError):
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.Import) and any(
+            alias.name == "hermes_bootstrap" for alias in node.names
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and node.module == "hermes_bootstrap":
+            return True
+    return False
+
+
+def _code_body(original: list[str]) -> str | None:
+    """The ``python -c`` body from an original interpreter invocation, if any.
+
+    ``sys.argv`` for ``-c`` is ``['-c', *args]`` — the body never appears in
+    it — so the only structural source is ``sys.orig_argv`` (option scan as in
+    :func:`_script_operand`; the first non-option ``-c`` owns the body).
+    """
+    if not original:
+        return None
+    index = 1
+    while index < len(original):
+        option = original[index]
+        if option == "-c":
+            return original[index + 1] if index + 1 < len(original) else None
+        if not option.startswith("-"):
+            return None
+        index += 1
+        if option in ("-W", "-X") and index < len(original):
+            index += 1
+    return None
+
+
+def _body_names_entry_module(body: str, root: Path) -> bool:
+    """Does a ``python -c`` *body* deliberately (re-)enter a Hermes entry?
+
+    True when its top level imports hermes_bootstrap itself, or a checkout
+    module whose own top level imports hermes_bootstrap (an entry module or a
+    launch probe — the corpus shape ``-c "import launch_probe"`` with the
+    checkout on sys.path). One level deep and read-only: ordinary Hermes
+    helper modules never top-level-import hermes_bootstrap, so a foreign
+    ``-c "import tools.something"`` stays a foreign importer and keeps its
+    process (the spool-server outage class must never be re-execed).
+    """
+    if _imports_bootstrap(body):
+        return True
+    try:
+        tree = ast.parse(body)
+    except (SyntaxError, ValueError):
+        return False
+    names: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names.append(node.module)
+    for name in names:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, AttributeError, ValueError):
+            continue
+        origin = getattr(spec, "origin", None)
+        if not origin or not _path_under(origin, root):
+            continue
+        try:
+            source = Path(origin).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _imports_bootstrap(source):
+            return True
+    return False
+
+
+def own_process_entry(
+    argv: list[str], original: list[str] | None, main_spec_name: str | None, root: Path,
+) -> bool:
+    """Is THIS process a Hermes-owned entry point the bootstrap may re-exec?
+
+    The launch-time relaunch replaces the process with the managed
+    interpreter under the same PID. That is only safe for processes Hermes
+    itself launched: a foreign importer (the spool-server outage class, finding
+    fdb46706cd30) must keep its identity, its site-packages and its arguments.
+    The predicate is structural, never a name match: minted launchers stamp
+    ``sys`` before importing hermes_bootstrap, ``-m`` entries resolve through
+    the module spec, checkout scripts by path, venv console shims by living
+    beside the running interpreter, and a top-level ``import hermes_bootstrap``
+    in a ``python -c`` body is an explicit opt-in. Anything else — including
+    any unexpected error while deciding — is NOT own-process (fail closed:
+    no takeover).
+    """
+    root = Path(root).resolve()
+    try:
+        if getattr(sys, RELAUNCH_FLAG, False):
+            return True
+        # Minted launchers (store launcher, published launcher script, the
+        # Windows updater's re-entry) all set this flag before importing
+        # hermes_bootstrap, with or without an explicit home literal.
+        if getattr(sys, PIN_DEFAULT_HOME_FLAG, False):
+            return True
+        if main_spec_name and main_spec_name != "__main__":
+            try:
+                spec = importlib.util.find_spec(main_spec_name)
+                origin = getattr(spec, "origin", None)
+            except (ImportError, AttributeError, ValueError):
+                origin = None
+            if origin and _path_under(origin, root):
+                return True
+        def _is_entry_path(candidate: str | None) -> bool:
+            # "-c"/"-m"/options are interpreter sentinels, not paths: resolved
+            # cwd-relative they can land inside the root and masquerade as a
+            # checkout script. A genuine script path never starts with "-".
+            return bool(candidate) and not candidate.startswith("-")
+
+        for candidate in (argv[0] if argv else None, _script_operand(original or [])):
+            if _is_entry_path(candidate) and _path_under(candidate, root):
+                return True
+        if argv and _is_entry_path(argv[0]) and _path_under(argv[0], Path(sys.executable).parent):
+            return True
+        # Deliberate reuse: a python -c re-entering hermes_bootstrap or a
+        # checkout entry module (launch-probe corpus shape). The body lives in
+        # the original invocation only — sys.argv drops it.
+        body = _code_body(original or [])
+        if body is not None and _body_names_entry_module(body, root):
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def relaunch_command(
     python: Path, root: Path, argv: list[str], original: list[str], module: str | None,
 ) -> list[str]:
@@ -607,7 +793,10 @@ def relaunch_command(
         if option in ("-W", "-X") and index < len(original):
             options.append(original[index])
             index += 1
-    prefix = f"import sys, runpy; sys.path.insert(0, {str(root)!r}); sys.argv = {argv!r}; "
+    prefix = (
+        f"import sys, runpy; sys.path.insert(0, {str(root)!r}); "
+        f"sys.argv = {argv!r}; sys.{RELAUNCH_FLAG} = True; "
+    )
     if argv[0] == "-c":
         body = f"exec({original[index + 1]!r})"
     elif module and module != "__main__":

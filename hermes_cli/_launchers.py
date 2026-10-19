@@ -21,10 +21,11 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pm.environments import owning_home_root, store_root
+from hermes_cli.venv_sync import PIN_DEFAULT_HOME_FLAG
 
 # ``sys`` attribute a launcher sets before ``import hermes_bootstrap``: pin HERMES_HOME to the
 # install's default root once the launch-time repair ran (``hermes_bootstrap._pin_launcher_home``).
-PIN_DEFAULT_HOME_FLAG = "_hermes_pin_default_home"
+# The constant lives in venv_sync (stdlib-only, importable pre-activation).
 
 
 def _inline_string_literal(value: str) -> str:
@@ -51,11 +52,15 @@ def runtime_command(repo_root: Path, args=(), *, module: str = "hermes_cli.main"
     # A literal home is pinned up front; the default one needs ``hermes_constants`` from the
     # checkout, so it is pinned only after ``hermes_bootstrap``'s launch-time repair (see
     # ``_launcher_script``), here again for a bootstrap that predates that hook.
+    # The flag is set for BOTH branches: besides pinning the default home it is the
+    # own-process marker hermes_bootstrap's relaunch gate reads — a minted launcher
+    # process may be re-execed, an explicit-home launcher no less than a default one.
+    pin = f"sys.{PIN_DEFAULT_HOME_FLAG} = True; "
     if home is not None:
-        pin, settle = (f"os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or "
-                       f"{_inline_string_literal(str(home))}; "), ""
+        pin += (f"os.environ['HERMES_HOME'] = os.environ.get('HERMES_HOME') or "
+                f"{_inline_string_literal(str(home))}; ")
+        settle = ""
     else:
-        pin = f"sys.{PIN_DEFAULT_HOME_FLAG} = True; "
         settle = ("os.environ.get('HERMES_HOME') or os.environ.__setitem__('HERMES_HOME', "
                   "str(__import__('hermes_constants').get_default_hermes_root())); ")
     bootstrap = (

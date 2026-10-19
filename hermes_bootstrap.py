@@ -582,21 +582,34 @@ from hermes_cli._parser import command_argv
 # Repair needs only stdlib. Do not activate the damaged tree to reach it.
 _pm_repair = command_argv(sys.argv[1:])[:2] == ["pm", "repair"]
 if not _pm_repair:
-    from hermes_cli.venv_sync import prepare_launch, relaunch_command
+    from hermes_cli.venv_sync import own_process_entry, prepare_launch, relaunch_command
 
     try:
-        _launch_python = prepare_launch(_root, sys.argv[1:])
-        if _launch_python is not None:
-            _main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
-            _command = relaunch_command(
-                _launch_python, _root, sys.argv, sys.orig_argv,
-                getattr(_main_spec, "name", None),
-            )
-            if os.name == "nt":
-                import subprocess
+        _main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+        # Own-process gate (finding fdb46706cd30): only a process Hermes itself
+        # launched may be re-execed into the managed interpreter — same PID,
+        # different site-packages. A foreign importer keeps its identity and
+        # arguments; the pending update tail stays armed for the next genuine
+        # launch or `hermes update` (nothing is synced here, so custody holds).
+        if own_process_entry(
+            sys.argv, sys.orig_argv, getattr(_main_spec, "name", None), _root,
+        ):
+            _launch_python = prepare_launch(_root, sys.argv[1:])
+            if _launch_python is not None:
+                _command = relaunch_command(
+                    _launch_python, _root, sys.argv, sys.orig_argv,
+                    getattr(_main_spec, "name", None),
+                )
+                if os.name == "nt":
+                    import subprocess
 
-                raise RelaunchExit(subprocess.call(_command))
-            os.execv(str(_launch_python), _command)
+                    raise RelaunchExit(subprocess.call(_command))
+                os.execv(str(_launch_python), _command)
+        elif any(
+            (_root / name).exists() for name in (".update-incomplete", ".lazy-refresh-incomplete")
+        ):
+            print("hermes: pending source-update relaunch skipped: this process is not a "
+                  "Hermes entry point; run `hermes update` to finish it", file=sys.stderr)
     except Exception as exc:
         if isinstance(exc, PermissionError) and (message := install_state_permission_message(_root, exc)):
             print(f"hermes: {message}", file=sys.stderr)

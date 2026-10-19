@@ -47,6 +47,12 @@ from tools.environments.local import hermes_subprocess_env
 
 PI_RPC_MARKER_BASE_URL = "pi://rpc"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
+# Ceiling for the zero-activity phase of a turn: how long a prompt may sit with
+# NO unsolicited Pi turn event at all. Module-level so tests can patch it small.
+# This is not an absolute turn cap: once the first event arrives the caller's
+# full inactivity budget applies and productive turns stay uncapped (the
+# no-absolute-wall-clock doctrine stands).
+_FIRST_OBSERVATION_BOUND_S = 900.0
 def _env_float(name: str, default: float) -> float:
     """Parse a float env var defensively so one bad value can't crash import."""
     raw = os.getenv(name, "").strip()
@@ -924,11 +930,15 @@ class PiRPCClient:
             self._settled = threading.Event()
             self.text_streamed = False
             started = time.monotonic()
-            # There is deliberately no absolute wall-clock turn deadline.
-            # timeout_seconds is the maximum inactivity window. Any
-            # unsolicited Pi turn event refreshes _last_turn_activity, so a
-            # productive multi-hour turn remains alive while a genuinely
-            # wedged turn is still bounded.
+            # There is deliberately no absolute wall-clock turn deadline for
+            # productive turns. timeout_seconds is the maximum inactivity
+            # window. Any unsolicited Pi turn event refreshes
+            # _last_turn_activity, so a productive multi-hour turn remains
+            # alive while a genuinely wedged turn is still bounded. The one
+            # additionally bounded phase is the wait for the FIRST unsolicited
+            # event (_FIRST_OBSERVATION_BOUND_S): a prompt that never produced
+            # anything is the dispatch-accepted-nothing-produced signature of a
+            # dead upstream and must not burn the caller's full order budget.
             stall_timeout = max(0.05, float(timeout_seconds or _DEFAULT_TIMEOUT_SECONDS))
             with self._turn_activity_lock:
                 self._turn_active = True
@@ -954,8 +964,24 @@ class PiRPCClient:
                 while not self._settled.wait(poll_interval):
                     if self._process_exited_error:
                         raise RuntimeError(self._process_exited_error)
+                    # First-observation bound (finding fdb46706cd30): while the
+                    # turn has produced no unsolicited event since the prompt
+                    # went out, the effective window is the tighter of the
+                    # caller's inactivity budget and _FIRST_OBSERVATION_BOUND_S
+                    # — recomputed each iteration so the 0->1 event transition
+                    # restores the caller's full budget mid-turn. Only the
+                    # zero-activity phase is bounded; a dead upstream holding
+                    # the first model call open no longer starves the lane for
+                    # the whole order budget.
+                    with self._turn_activity_lock:
+                        zero_activity_now = self._turn_event_count == 0
+                    effective_stall = (
+                        min(stall_timeout, _FIRST_OBSERVATION_BOUND_S)
+                        if zero_activity_now
+                        else stall_timeout
+                    )
                     inactive_for = self._turn_inactive_for()
-                    if inactive_for < stall_timeout:
+                    if inactive_for < effective_stall:
                         continue
                     # Snapshot the stall evidence BEFORE aborting: the abort
                     # handshake and its settle events are recovery noise, not
@@ -1000,7 +1026,7 @@ class PiRPCClient:
                     )
                     detail = (
                         "pi session turn timed out: "
-                        f"stalled after {stall_timeout:.0f}s without observable progress"
+                        f"stalled after {effective_stall:.0f}s without observable progress"
                     )
                     if provider_signal:
                         detail += f" (provider signal: {provider_signal})"
