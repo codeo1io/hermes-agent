@@ -326,7 +326,8 @@ DANGEROUS_PATTERNS = [
     (r'\bfind\b.*-exec(?:dir)?\s+(/\S*/)?rm\b', "find -exec/-execdir rm"),
     # Unquoted brace/glob spellings the shell can expand into the flags above at run time
     # (`find . -{delete,print}`, `find . -del*`). Additive: catches these spellings only; approval is
-    # still decided from source text, so `$var`/`$(...)`-built words are not covered here. `find` must
+    # still decided from source text, so `$(...)`-built words are not covered here (`$var` words ARE:
+    # the assignment-substitution projection expands them before matching). `find` must
     # be the command word and the dynamic word a whitespace-delimited token; both rules are matched
     # against the quote-masked variant (_QUOTE_MASKED_DANGEROUS_DESCRIPTIONS) because a quoted glob
     # (`find . -name 'log-del*'`) is a literal predicate argument the shell never expands.
@@ -1118,6 +1119,77 @@ def _strip_shell_word_syntax(word: str) -> str:
     )
 
 
+# Bounds for the assignment-substitution projection below: a bounded count of bounded,
+# expansion-free scalar values keeps the projection O(command) and never recursive.
+_MAX_TRACKED_ASSIGNMENTS = 16
+_MAX_ASSIGNMENT_VALUE_LEN = 128
+_VARIABLE_ASSIGNMENT_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)", re.DOTALL)
+_VARIABLE_REFERENCE_RE = re.compile(r"\$(\{?)([A-Za-z_][A-Za-z0-9_]*)(\}?)")
+# Any expansion-free single-line scalar may be tracked — including multi-word values with
+# braces/semicolons (`V='-exec rm {} ;'`), which are precisely how destructive find payloads
+# hide in assignments. Quotes and `$`/backtick are rejected so substitution cannot re-quote or
+# re-expand; the projected value is re-lexed as plain words downstream, which is the point.
+_ASSIGNMENT_VALUE_RE = re.compile(r"^[^$\"'`\n]+$")
+
+
+def _expand_shell_variable_assignments(command: str) -> str | None:
+    """Project simple ``NAME=value`` assignments into their later ``$NAME`` references.
+
+    ``F=-delete; find . $F`` runs ``find . -delete`` while keeping every literal destructive
+    word out of the text the approval gate scans. This walks the RAW command left to right,
+    records assignment words in command position, drops them, and substitutes the value into
+    later unquoted or double-quoted ``$NAME`` / ``${NAME}`` references — the same simulation
+    role ``_replace_simple_command_substitutions`` plays for ``$(...)``.
+
+    Deliberately narrow: assignments only count in command position (``grep F=1 file`` is
+    data), values must be bounded expansion-free single-line scalars (multi-word values with
+    spaces, braces or semicolons included — the projection re-lexes them as plain words),
+    single-quoted words are literal and never substituted, and the projection is emitted as
+    an EXTRA detection variant — the literal command is always scanned first, unchanged.
+    """
+    assignments: dict[str, str] = {}
+    out: list[str] = []
+    substituted = False
+    pos, length = 0, len(command)
+    at_command_start = True
+    while pos < length:
+        word_start, word_end, word = _read_shell_word(command, pos)
+        if word_start == word_end:
+            out.append(command[pos])
+            pos += 1
+            continue
+        if word_start > pos:
+            out.append(command[pos:word_start])
+            for kind, i, _, quote in _scan_shell(command, pos, word_start):
+                if kind == "char" and quote is None and command[i] in ";&|\n":
+                    at_command_start = True
+        assignment = _VARIABLE_ASSIGNMENT_RE.fullmatch(word) if at_command_start else None
+        if assignment is not None and len(assignments) < _MAX_TRACKED_ASSIGNMENTS:
+            value = _strip_shell_word_syntax(assignment.group(2))
+            if (0 < len(value) <= _MAX_ASSIGNMENT_VALUE_LEN
+                    and _ASSIGNMENT_VALUE_RE.fullmatch(value)):
+                assignments[assignment.group(1)] = value
+                # Drop the assignment word (keep one space) — the projection reads as if
+                # the prefix-assignment or `NAME=...;` segment never existed.
+                out.append(" ")
+                pos = word_end
+                continue
+        if assignments and "'" not in word:
+            def _substitute(match: re.Match) -> str:
+                nonlocal substituted
+                opener, name, closer = match.group(1), match.group(2), match.group(3)
+                value = assignments.get(name)
+                if value is None or (opener and not closer):
+                    return match.group(0)
+                substituted = True
+                return value
+            word = _VARIABLE_REFERENCE_RE.sub(_substitute, word)
+        out.append(word)
+        pos = word_end
+        at_command_start = False
+    return "".join(out) if substituted else None
+
+
 def _deobfuscate_shell_word_for_detection(word: str) -> str:
     """Approximate how shell syntax can spell a command word: collapses quoting/escaping plus
     simple literal command substitutions in the word itself. Intentionally narrow and non-executing."""
@@ -1411,6 +1483,18 @@ def _command_detection_variants(command: str):
             return False
         seen.add(variant)
         return True
+
+    # Variable-substituted projection: `F=-delete; find . $F` builds its destructive words
+    # from the assignment, so the literal-text patterns never see them. Extra variant only —
+    # the literal command is scanned first, so existing matches and their reasons are unchanged.
+    expanded = _expand_shell_variable_assignments(_mask_quoted_newlines(command))
+    if expanded is not None:
+        for variant in (
+            _normalize_command_for_detection(expanded),
+            _normalize_command_for_detection(_mark_command_starts(expanded, marker=" \n")),
+        ):
+            if fresh(variant):
+                yield variant
 
     # Windows-path variant: normalization strips backslashes as shell escapes, so `del C:\Users\me\.ssh\id_rsa`
     # reaches the patterns as `del C:Usersme.sshid_rsa`. When the RAW command has a drive-letter or UNC backslash
