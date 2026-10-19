@@ -189,7 +189,14 @@ jobs:
         env:
           # These files spawn nested PowerShell trees. CPU-count parallelism
           # starves cold child startup before the fixture's idle deadline.
-          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}
+          # Fork: 4-vCPU hosted windows-latest starves under upstream's 16-worker
+          # setting (tuned for 32-vCPU Blacksmith runners) — PowerShell stage tests
+          # spawn 3-deep process trees and their 60-90s subprocess deadlines blow
+          # (17 failures on run 39278857722, all timeouts). The 2026-10-08 green run
+          # used the default (= CPU count = 4) before the knob arrived with the
+          # v0.21.6/7 adoption. Pin 4 on the hosted x64 lane; ARM64 keeps 16
+          # (windows-latest-32-arm-core upstream behavior, unused on the fork).
+          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '4') || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
