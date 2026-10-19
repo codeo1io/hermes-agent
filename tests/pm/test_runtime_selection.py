@@ -147,11 +147,14 @@ def test_manual_repair_bypasses_damaged_generation_activation(tmp_path, monkeypa
     assert "hermes pm repair" in result.stdout
 
 
-@pytest.mark.parametrize("interpreter", ["store", "venv"])
+@pytest.mark.parametrize("interpreter", ["store", "venv", "pm_runtime"])
 @pytest.mark.parametrize("with_state", [True, False])
 def test_boot_never_activates_the_pre_pm_venv(tmp_path, monkeypatch, interpreter, with_state):
     """Nothing committed must not mean "load the in-tree venv": it was built for another
-    interpreter, so PM's store Python lost every compiled module from it after an update."""
+    interpreter, so PM's store Python lost every compiled module from it after an update.
+    PM's runtime bootstrap venv is refused like the store Python (run dac96a824, 2026-10-11):
+    it is a venv that owns no application packages, and its silent exemption is what let a
+    relaunched cron worker die at ``No module named 'ruamel'`` instead of exiting loudly."""
     import os
     import subprocess
     import sys
@@ -174,6 +177,11 @@ def test_boot_never_activates_the_pre_pm_venv(tmp_path, monkeypatch, interpreter
     if interpreter == "venv":
         subprocess.run([base_python, "-m", "venv", "--without-pip", str(tmp_path / "dev")], check=True, timeout=60)
         python = str(runtime_paths.venv_python(tmp_path / "dev"))
+    if interpreter == "pm_runtime":
+        subprocess.run([base_python, "-m", "venv", "--without-pip", str(tmp_path / "pmrt")], check=True, timeout=60)
+        # pm/runtime.py's marker for "this venv is PM's own bootstrap, not a developer's".
+        (tmp_path / "pmrt" / "pm-runtime.json").write_text("{}", encoding="utf-8")
+        python = str(runtime_paths.venv_python(tmp_path / "pmrt"))
     repo = Path(__file__).resolve().parents[2]
     code = (
         "import sys, importlib.util; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
@@ -185,8 +193,8 @@ def test_boot_never_activates_the_pre_pm_venv(tmp_path, monkeypatch, interpreter
     result = subprocess.run([python, "-I", "-c", code, str(repo), str(root)], env=dict(os.environ),
                             capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
-    expected = ("refused: no dependency environment is committed" if interpreter == "store"
-                else "legacy importable: False")
+    expected = ("refused: no dependency environment is committed"
+                if interpreter in ("store", "pm_runtime") else "legacy importable: False")
     assert result.stdout.strip().startswith(expected), result.stdout
 
 

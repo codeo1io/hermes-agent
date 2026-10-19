@@ -47,12 +47,34 @@ WORKER_MARKER = "_HERMES_CRON_WORKER_BOOT"
 
 
 def worker_bootstrap() -> None:
-    """Run PM's dependency boot in the marked external worker (again after a relaunch)."""
+    """Run PM's dependency boot in the marked external worker (again after a relaunch).
+
+    A boot that no-ops is not a boot: an ``-I`` relaunch drops the pinned ``PYTHONPATH``,
+    and when ``activate_dependencies`` has nothing to activate for this interpreter it
+    returns normally -- the worker would then die at its first dependency import
+    (``No module named 'ruamel'``) after pre-ack exit bookkeeping already started
+    (run dac96a824, 2026-10-11). The docstring's promise "exits the worker if it cannot"
+    holds only if this call checks the one import the package init makes first.
+    """
     if not os.environ.get(WORKER_MARKER):
         return
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
     from pm.environments import activate_dependencies
 
-    activate_dependencies(Path(__file__).resolve().parent.parent)
+    activate_dependencies(root)
+    import importlib.util
+
+    # Top-level probe: a dotted find_spec raises on the missing parent instead of
+    # returning None, and hermes_yaml's own failure is the top-level ``ruamel``.
+    if importlib.util.find_spec("ruamel") is None:
+        raise RuntimeError(
+            f"cron worker dependency boot failed: {sys.executable} cannot import "
+            "ruamel.yaml after activate_dependencies (no dependency environment is "
+            "committed for this interpreter); re-sync with `hermes pm repair` or restart "
+            "the gateway"
+        )
 
 
 def finish_worker_boot() -> None:

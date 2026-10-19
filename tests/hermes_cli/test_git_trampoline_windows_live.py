@@ -20,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.platforms("windows")  # live Windows trampoline E2E
+pytestmark = [pytest.mark.platforms("windows"), pytest.mark.live]  # live Windows trampoline E2E
+# fork: `live` keeps this on the wine2e/** on-demand lane and out of every PR run —
+# the probes drive the runner's real Git-for-Windows install and time out on the
+# 4-vCPU hosted image (upstream runs them on 32-vCPU Blacksmith runners).
 
 _FORK_BOMB_BAT = (
     "@echo off\r\n"

@@ -27,6 +27,30 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def test_import_survives_a_stale_cron_constants_from_a_live_gateway(monkeypatch):
+    """Run dac96a824 (2026-10-11): a live gateway that records a worker failure right after
+    its tree advanced past #501 still holds the OLD ``cron.constants`` in ``sys.modules``
+    (no ``is_recurring``), so the module-level import raised ImportError and masked the
+    worker's real stderr. Importing this module under that skew must succeed and answer
+    ``is_recurring`` with cron.constants' semantics."""
+    import importlib
+    import sys
+
+    import cron.constants as constants
+
+    assert hasattr(constants, "is_recurring")  # the guard the skew removes
+    monkeypatch.delattr(constants, "is_recurring")
+    monkeypatch.delitem(sys.modules, "cron.unreachable_retry")
+
+    fresh = importlib.import_module("cron.unreachable_retry")
+
+    assert fresh.is_recurring({"schedule": {"kind": "cron"}}) is True
+    assert fresh.is_recurring({"schedule": {"kind": "interval"}}) is True
+    assert fresh.is_recurring({"schedule": {"kind": "once"}}) is False
+    assert fresh.is_recurring({"schedule": None}) is False
+    assert fresh.is_recurring({}) is False
+
+
 def test_unreachable_failure_pulls_next_run_earlier_then_ladder_exhausts(
     tmp_cron_home, monkeypatch,
 ):

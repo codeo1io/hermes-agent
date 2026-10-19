@@ -928,6 +928,46 @@ def test_marked_worker_exits_before_cron_jobs_when_activation_fails():
     assert result["jobs"] is False
 
 
+_SILENT_NOOP_BOOT_PROBE = """
+import json, sys
+try:
+    import cron
+except RuntimeError as exc:
+    print(json.dumps({"error": str(exc), "jobs": "cron.jobs" in sys.modules}))
+    sys.exit(3)
+except ModuleNotFoundError as exc:
+    print(json.dumps({"unhandled": str(exc), "jobs": "cron.jobs" in sys.modules}))
+    sys.exit(4)
+print(json.dumps({"booted": True, "jobs": "cron.jobs" in sys.modules}))
+"""
+
+
+def test_marked_worker_exits_before_cron_jobs_when_activation_silently_no_ops(tmp_path):
+    """Run dac96a824 (2026-10-11): with nothing committed, ``activate_dependencies`` can
+    no-op (a venv/runtime interpreter it exempts, or a store outside the resolved root) and
+    return normally -- the ``-I`` relaunch had already dropped the pinned PYTHONPATH, so the
+    worker died at ``No module named 'ruamel'`` for 100 minutes while the gateway recorded
+    only masking ImportErrors. The dependency boot must verify the one import the package
+    init makes first and exit loudly instead."""
+    import cron.worker_bootstrap as worker_bootstrap
+
+    repo_root = Path(worker_bootstrap.__file__).resolve().parent.parent
+    # The deps-free base interpreter: no ruamel anywhere, exactly the relaunched worker.
+    python = getattr(sys, "_base_executable", sys.executable)
+    env = dict(os.environ, PYTHONPATH=str(repo_root), HERMES_HOME=str(tmp_path / "home"))
+    env[worker_bootstrap.WORKER_MARKER] = "1"
+    child = subprocess.run(
+        [python, "-c", _SILENT_NOOP_BOOT_PROBE], cwd=repo_root, env=env,
+        capture_output=True, text=True, timeout=60,
+    )
+    assert child.returncode == 3, f"exit {child.returncode}: {child.stderr}"
+    result = json.loads(child.stdout.strip().splitlines()[-1])
+    assert "dependency boot failed" in result["error"]
+    assert "ruamel" in result["error"]
+    assert "pm repair" in result["error"]
+    assert result["jobs"] is False
+
+
 def test_shared_run_path_hands_gateway_fire_to_external_worker(monkeypatch):
     from cron import scheduler
 
