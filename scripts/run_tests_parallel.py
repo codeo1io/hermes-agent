@@ -1159,7 +1159,7 @@ def _read_text(path) -> Optional[str]:
     """File content, or None — an unreadable file means "no truth", never
     an error: each term of the worker bound is independently optional."""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             return fh.read()
     except OSError:
         return None
