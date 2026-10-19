@@ -696,6 +696,17 @@ def _run_one_file_once(
     home_root = tempfile.mkdtemp(prefix="hermes-pytest-home-")
     env["HOME"] = home_root
     env["HERMES_HOME"] = os.path.join(home_root, ".hermes")
+    # tests/conftest.py's real-home tripwire (v0.21.6+) treats ANY pre-set
+    # non-production HERMES_HOME as a guarded "real" root unless it is
+    # flagged test-owned via HERMES_TEST_SANDBOX_HOME (the same seam the
+    # conftest uses for its own session sandbox). Without this marker,
+    # modules that freeze the home path at import (gateway voice-mode
+    # state, generated-media cache) trip the tripwire and fail every
+    # fork CI run since the 2026-10-10 v0.21.6 adoption (main red
+    # 10-16..19: test_base_warning_owner_scope,
+    # test_completion_admission_compression_race,
+    # test_generated_media_durable).
+    env["HERMES_TEST_SANDBOX_HOME"] = env["HERMES_HOME"]
     env["PYTEST_DEBUG_TEMPROOT"] = temproot
     # Every tempfile.* call inside the test process lands in the same per-run root, so the
     # parent's cleanup of ``temproot`` removes them too instead of leaving them in /tmp.
