@@ -427,8 +427,25 @@ function Test-HermesRuns([string]$Label) {
         Write-Host "  first startup after the update ran (exit $startupExit); the checks below assert the launcher it must have published"
         $hermesExe = Get-SourceHermes $InstallDir
     }
-    & $DriverPython -B (Join-Path $AssetsDir 'source_driver.py') --root $InstallDir --launcher $hermesExe --desktop $script:ExpectedDesktop
-    Assert-True ($LASTEXITCODE -eq 0) "$Label -- read-only install verification (no repair)"
+    # The read-only verifier's stderr carries the packaged-renderer contract
+    # failure signature; persist it so known-failure rules can match on it
+    # (verify.log -- the classifier's verify key; PR #505 wired the posix
+    # drivers, this is the windows twin). Same idiom as installer-script-e2e.sh
+    # `2> >(tee ...)`: the transcript stays on the console AND lands in the
+    # workroot logs the classifier reads. Under "Stop" a native command's
+    # stderr is a terminating NativeCommandError, so widen the preference
+    # around the invocation only.
+    New-Item -ItemType Directory -Path (Join-Path $WorkRoot "logs") -Force | Out-Null
+    $verifyLog = Join-Path $WorkRoot "logs\verify.log"
+    $prevVerifyEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $DriverPython -B (Join-Path $AssetsDir 'source_driver.py') --root $InstallDir --launcher $hermesExe --desktop $script:ExpectedDesktop 2>&1 |
+            ForEach-Object { Write-Host "    verify| $_"; $_ } | Out-File -Encoding UTF8 $verifyLog
+        $verifyExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevVerifyEap }
+    Write-LogGroup "read-only verification transcript (verify.log)" $verifyLog
+    Assert-True ($verifyExit -eq 0) "$Label -- read-only install verification (no repair)"
     $prevLazy = $env:HERMES_DISABLE_LAZY_INSTALLS
     $prevBytecode = $env:PYTHONDONTWRITEBYTECODE
     $prevEap = $ErrorActionPreference
