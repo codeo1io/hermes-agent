@@ -34,6 +34,7 @@ jobs:
         run: |
           sudo apt-get install -y zsh xvfb \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
+            libx11-dev libxi-dev \
             xdg-utils libatspi2.0-0 libdrm2 libgbm1 libasound2t64
 
       # setup-pm caches npm downloads, not the installed workspace tree.

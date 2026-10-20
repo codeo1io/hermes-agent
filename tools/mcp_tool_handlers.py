@@ -695,7 +695,7 @@ _make_list_resources_handler = _make_utility_handler(
 _make_read_resource_handler = _make_utility_handler(
     "resources/read", "read_resource",
     lambda session, args, sn: session.read_resource(args["uri"]), _render_read_resource, required="uri")
-def _coerce_prompt_arguments(raw: Any) -> Dict[str, str]:
+def _coerce_prompt_arguments(raw: Any) -> dict[str, str]:
     """``prompts/get`` arguments are ``dict[str, string]`` in the MCP spec, but models send
     JSON scalars (numbers, bools) that the SDK's pydantic validation rejects with a raw
     ValidationError. Coerce scalars to their string form; structured values stay a caller
@@ -704,7 +704,7 @@ def _coerce_prompt_arguments(raw: Any) -> Dict[str, str]:
         return {}
     if not isinstance(raw, dict):
         raise ValueError("prompt 'arguments' must be an object of string values")
-    coerced: Dict[str, str] = {}
+    coerced: dict[str, str] = {}
     for key, value in raw.items():
         if isinstance(value, bool):  # before int: bool is an int subclass
             coerced[key] = "true" if value else "false"

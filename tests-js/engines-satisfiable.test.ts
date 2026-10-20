@@ -116,13 +116,24 @@ function engines(label: string): Engines {
 const rootEngines = engines('root package.json')
 
 function managedNodeMajor(): number {
-  const installSh = readText('scripts/install.sh')
-  for (const line of installSh.split('\n')) {
-    if (line.startsWith('NODE_VERSION=')) {
-      return Number.parseInt(line.split('=')[1].trim().replace(/["']/g, ''), 10)
+  // pm owns node provisioning (pm/packages.py resolves the newest LTS from
+  // nodejs.org at install time), so there is no static pin to read: the
+  // managed runtime is "the current LTS line". The contract that keeps the
+  // manifest honest is the open >=major.0.0 arm — its major is what a fresh
+  // pm install lands on, and it must dominate every caret arm.
+  const openArms = rootEngines.node!.split('||').map(arm => arm.trim()).filter(arm => arm.startsWith('>='))
+  assert.ok(openArms.length > 0, `engines.node ${rootEngines.node} has no open >=major arm for pm-managed LTS installs`)
+  const major = parseVersion(openArms[openArms.length - 1].replace(/^>=/, ''))[0]
+  for (const arm of rootEngines.node!.split('||').map(a => a.trim())) {
+    if (arm.startsWith('^')) {
+      const caretMajor = parseVersion(arm.replace(/^\^/, ''))[0]
+      assert.ok(
+        caretMajor <= major,
+        `engines arm ${arm} outgrows the open ${openArms[openArms.length - 1]} arm a pm-managed install satisfies`
+      )
     }
   }
-  assert.fail('install.sh does not define NODE_VERSION')
+  return major
 }
 
 describe('Engines are satisfiable', () => {
@@ -136,12 +147,12 @@ describe('Engines are satisfiable', () => {
   })
 
   test('node floor is met by the managed runtime', () => {
-    // install.sh fetches latest-v{major}.x, not {major}.0.0; use a high
+    // pm provisions the newest LTS line, not {major}.0.0; use a high
     // representative release so ranges enumerating LTS lines check correctly.
     const major = managedNodeMajor()
     assert.ok(
       satisfiesRange(`${major}.999.999`, rootEngines.node!),
-      `engines.node is ${rootEngines.node} but install.sh provisions Node ${major}.x`
+      `engines.node is ${rootEngines.node} but pm provisions the Node ${major}.x LTS line`
     )
   })
 
@@ -150,10 +161,10 @@ describe('Engines are satisfiable', () => {
     // fresh Hermes-managed installs die at `npm ci` with EBADENGINE.
     const major = managedNodeMajor()
     const stockNpm = STOCK_NPM_BY_NODE_MAJOR[major]
-    assert.ok(stockNpm, `install.sh NODE_VERSION=${major} is not in the known stock map`)
+    assert.ok(stockNpm, `managed Node major ${major} is not in the known stock map`)
     assert.ok(
       satisfiesRange(stockNpm, rootEngines.npm!),
-      `install.sh provisions Node ${major}.x (stock npm ${stockNpm}) but engines.npm is ${rootEngines.npm}`
+      `pm provisions Node ${major}.x (stock npm ${stockNpm}) but engines.npm is ${rootEngines.npm}`
     )
   })
 
@@ -215,21 +226,19 @@ describe('Declared floors clear the locked tree', () => {
     assert.deepEqual(violations, [])
   })
 
-  test('installer gates match the manifest arms', () => {
-    // install.sh's node_satisfies_build and install.ps1's Test-NodeVersionOk
-    // must encode the same floors as engines.node — a laxer gate accepts a
-    // Node that npm then rejects.
+  test('installers delegate node provisioning to pm', () => {
+    // The class of drift this pins (Oct 2026): the manifest grew a ^22.22.0
+    // arm while node provisioning moved from the installers to `pm` — the old
+    // NODE_VERSION pin and the per-arm gates went away by design (install.sh
+    // and install.ps1 both say heavy dependencies "are pm's job"). What must
+    // NOT come back: a static installer pin or a laxer hand-maintained gate
+    // that accepts a Node the manifest then rejects.
     const installSh = readText('scripts/install.sh')
     const installPs1 = readText('scripts/install.ps1')
-    for (const arm of rootEngines.node!.split('||')) {
-      const trimmed = arm.trim()
-      const [major, minor] = parseVersion(trimmed.replace(/^(\^|>=|=)/, ''))
-      if (trimmed.startsWith('^') && minor > 0) {
-        const shGate = `[ "$major" -eq ${major} ] && [ "$minor" -ge ${minor} ]`
-        const ps1Gate = `if ($v.Major -eq ${major}) { return ($v.Minor -ge ${minor}) }`
-        assert.ok(installSh.includes(shGate), `engines arm ${trimmed} has no matching install.sh gate`)
-        assert.ok(installPs1.includes(ps1Gate), `engines arm ${trimmed} has no matching install.ps1 gate`)
-      }
-    }
+    assert.ok(!/^NODE_VERSION=/m.test(installSh), 'install.sh must not pin NODE_VERSION (pm owns node)')
+    assert.ok(!/node_satisfies_build\s*\(\s*\)/.test(installSh), 'install.sh must not re-grow node gates')
+    assert.ok(!/function Test-NodeVersionOk/.test(installPs1), 'install.ps1 must not re-grow node gates')
+    assert.match(installSh, /are pm's job/, 'install.sh must keep the pm delegation marker')
+    assert.match(installPs1, /are pm's job/, 'install.ps1 must keep the pm delegation marker')
   })
 })

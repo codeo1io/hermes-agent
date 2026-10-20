@@ -40,7 +40,7 @@ def _capture_urlopen(monkeypatch):
     """Fake ``urllib.request.urlopen`` that records request headers; never hits the network."""
     seen: list[dict] = []
 
-    def _fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def _fake_urlopen(req, timeout=None):
         seen.append(dict(req.headers))
         return _Resp()
 

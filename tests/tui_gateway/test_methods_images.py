@@ -57,7 +57,7 @@ def test_image_to_data_url_caps_remote_body(monkeypatch):
 
 
 class _ImageHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         if self.path == "/ok.png":
             self.send_response(200)
             self.send_header("Content-Type", "image/png")

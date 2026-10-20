@@ -42,7 +42,7 @@ import json
 import sqlite3
 import subprocess
 import sys
-import unittest.mock as mock
+from unittest import mock
 from pathlib import Path
 
 import pytest
@@ -50,7 +50,7 @@ import pytest
 
 @pytest.fixture
 def execution_ledger(tmp_path, monkeypatch):
-    import cron.executions as executions
+    from cron import executions
 
     monkeypatch.setattr(executions, "EXECUTIONS_FILE", tmp_path / "executions.db")
     return executions
@@ -87,7 +87,7 @@ def test_adopt_retry_absorbs_transient_busy(execution_ledger, tmp_path, monkeypa
     OLD behavior: the exception escaped _run_external_worker_payload, the
     worker died with no log line, and the tick was lost.
     """
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     payload = tmp_path / "payload.json"
     ack = tmp_path / "ready.json"
@@ -124,7 +124,7 @@ def test_adopt_retry_gives_up_after_budget_and_logs(
     """Persistent OperationalError: worker logs + exits 1, never a silent crash."""
     import logging
 
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     payload = tmp_path / "payload.json"
     ack = tmp_path / "ready.json"
@@ -155,7 +155,7 @@ def test_adopt_refusal_is_immediate_not_retried(
     execution_ledger, tmp_path, monkeypatch
 ):
     """A None refusal (lost adoption race) must not consume retry budget."""
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     payload = tmp_path / "payload.json"
     ack = tmp_path / "ready.json"
@@ -166,7 +166,6 @@ def test_adopt_refusal_is_immediate_not_retried(
 
     def refuses(execution_id):
         calls.append(execution_id)
-        return None
 
     monkeypatch.setattr("cron.executions.adopt_claimed_execution", refuses)
     run = mock.Mock()
@@ -193,7 +192,7 @@ def test_real_worker_process_logs_and_exits_cleanly_on_busy_adopt(
     """
     import os
 
-    import cron.executions as executions
+    from cron import executions
 
     # Same path the worker resolves: <home>/cron/executions.db (no
     # EXECUTIONS_FILE override in production; the worker lands here via
@@ -245,6 +244,7 @@ def test_real_worker_process_logs_and_exits_cleanly_on_busy_adopt(
             capture_output=True,
             text=True,
             timeout=300,
+            check=False,
         )
     finally:
         blocker.rollback()
@@ -356,7 +356,7 @@ def test_gateway_retries_once_when_worker_never_adopted(tmp_path, monkeypatch):
     run_one_job caught it, terminalized the attempt failed, and the tick was
     lost (job blind until its next schedule slot).
     """
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     job = _gateway_job(tmp_path, monkeypatch, scheduler)
     spawned, statuses = _install_worker_scenarios(
@@ -381,7 +381,7 @@ def test_gateway_trusts_terminal_outcome_over_waiter_race(tmp_path, monkeypatch)
     exit before reading the ack. OLD code books a second failure over the
     worker's honest success; NEW code reads the ledger first.
     """
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     job = _gateway_job(tmp_path, monkeypatch, scheduler)
     spawned, statuses = _install_worker_scenarios(
@@ -399,7 +399,7 @@ def test_gateway_trusts_terminal_outcome_over_waiter_race(tmp_path, monkeypatch)
 
 def test_gateway_retry_is_bounded(tmp_path, monkeypatch):
     """Both attempts die pre-adoption → the handoff error stands, no loop."""
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     job = _gateway_job(tmp_path, monkeypatch, scheduler)
     spawned, statuses = _install_worker_scenarios(
@@ -416,7 +416,7 @@ def test_gateway_retry_is_bounded(tmp_path, monkeypatch):
 
 def test_gateway_does_not_retry_when_worker_adopted_then_died(tmp_path, monkeypatch):
     """Row shows adoption (running, started_at) → side effects possible → no retry."""
-    import cron.scheduler as scheduler
+    from cron import scheduler
 
     job = _gateway_job(tmp_path, monkeypatch, scheduler)
     spawned, statuses = _install_worker_scenarios(

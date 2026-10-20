@@ -27,7 +27,7 @@ ROOT_PREFIX = r"c:\proj" + "\\"
 def holder(tokens, *, cwd=None, venv_prefix=VENV_PREFIX, root_prefix=ROOT_PREFIX):
     get_cwd = None
     if cwd is not None:
-        get_cwd = lambda: cwd() if callable(cwd) else cwd  # noqa: E731
+        get_cwd = lambda: cwd() if callable(cwd) else cwd
     return _cmdline_indicates_venv_holder(
         tokens, venv_prefix=venv_prefix, root_prefix=root_prefix, get_cwd=get_cwd
     ), get_cwd

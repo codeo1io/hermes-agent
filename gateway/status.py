@@ -2031,7 +2031,7 @@ def planned_stop_stopper_alive() -> bool:
     """
     try:
         parsed = _read_live_pid_marker(_get_planned_stop_marker_path(), _PLANNED_STOP_MARKER_TTL_S)
-    except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+    except Exception:
         return True
     if parsed is None:
         return True
@@ -2058,7 +2058,7 @@ def live_planned_stop_marker_present() -> bool:
             )
             is not None
         )
-    except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+    except Exception:
         return False
 
 

@@ -24,8 +24,8 @@ from __future__ import annotations
 import re
 
 __all__ = [
-    "DelegateTurnStalled",
     "PROVIDER_FAILURE_CLASSES",
+    "DelegateTurnStalled",
     "classify_delegate_failure",
 ]
 

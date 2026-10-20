@@ -796,7 +796,7 @@ async def test_ws_discovery_loop_subscribes_newly_discovered_conversation(monkey
             # runner's file-timeout. The lifecycle contract — discovery task
             # dying with its connection — is asserted by the test below.
             await asyncio.wait_for(task, 5.0)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+        except (TimeoutError, asyncio.CancelledError):
             pass
 
     assert new_dm in subscriptions.values(), "sweep did not subscribe the new conversation"

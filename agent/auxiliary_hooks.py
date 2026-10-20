@@ -58,7 +58,7 @@ def _system_prompt(messages: Any, kwargs: dict[str, Any]) -> str:
     return ""
 
 
-def _message_list(kwargs: Dict[str, Any]) -> list:
+def _message_list(kwargs: dict[str, Any]) -> list:
     """The request's ``messages`` (chat) or ``input`` (Responses) as a list.
 
     A bare-string ``input`` is ONE message; ``len()`` applied to it directly

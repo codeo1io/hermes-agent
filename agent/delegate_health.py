@@ -48,12 +48,12 @@ from agent.delegate_errors import PROVIDER_FAILURE_CLASSES
 from hermes_constants import get_hermes_home, hermes_home_key
 
 __all__ = [
-    "CircuitOpen",
-    "DelegateHealthLedger",
     "FAILURE_THRESHOLD",
     "INITIAL_COOLDOWN_S",
     "MAX_COOLDOWN_S",
     "WINDOW_S",
+    "CircuitOpen",
+    "DelegateHealthLedger",
     "get_delegate_health_ledger",
     "reset_delegate_health_ledger",
 ]
@@ -140,7 +140,7 @@ class DelegateHealthLedger:
     def __init__(
         self,
         now: Callable[[], float] = time.monotonic,
-        state_path: "Path | Callable[[], Path] | None" = None,
+        state_path: Path | Callable[[], Path] | None = None,
     ) -> None:
         self._now = now
         self._state_path = state_path  # None => default per-home path, lazily

@@ -2471,7 +2471,11 @@ jobs:
           name=$(cd verified 2>/dev/null && ls Store-*.msixbundle 2>/dev/null | head -1)
           base="${CLOUDFLARE_R2_PUBLIC_URL%/}/releases/tag/$HERMES_ARCHIVE_TAG"
           url="$base/${name:-handoff-windows-universal.json}"
-          msg="Store submission failed; the release is still publishable. Upload this package in Partner Center: $url"
+          if [ -n "$name" ]; then
+            msg="Store submission failed; the release is still publishable. Upload this package in Partner Center: $url"
+          else
+            msg="Store submission failed and no Store-*.msixbundle was verified. Build/upload a package manually in Partner Center; the handoff manifest for this tag is: $url"
+          fi
           echo "::warning title=Microsoft Store::$msg"
           { echo "## Microsoft Store: manual upload needed"; echo; echo "$msg"; } >> "$GITHUB_STEP_SUMMARY"
 

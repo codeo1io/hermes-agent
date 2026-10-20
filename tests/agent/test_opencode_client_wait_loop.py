@@ -46,13 +46,13 @@ class _ScriptedTransport:
     becomes current. The final entry repeats forever.
     """
 
-    def __init__(self, script: "list[tuple[list[dict], float]]"):
+    def __init__(self, script: list[tuple[list[dict], float]]):
         self._script = list(script)
         self._t0: Optional[float] = None
         self._prompted = False
-        self.requests: "list[tuple[str, str]]" = []
+        self.requests: list[tuple[str, str]] = []
 
-    def _current(self) -> "list[dict]":
+    def _current(self) -> list[dict]:
         if self._t0 is None:
             # Pre-prompt: the baseline fetch always sees the first state.
             return self._script[0][0]
@@ -63,7 +63,7 @@ class _ScriptedTransport:
             elapsed -= hold
         return self._script[-1][0]
 
-    def request(self, method: str, path: str, body: Optional[dict] = None) -> "tuple[int, str]":
+    def request(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, str]:
         import json as _json
 
         self.requests.append((method, path))
@@ -90,7 +90,7 @@ class _ScriptedTransport:
         return 200, "{}"
 
 
-def _client(script: "list[tuple[list[dict], float]]") -> OpenCodeClient:
+def _client(script: list[tuple[list[dict], float]]) -> OpenCodeClient:
     transport = _ScriptedTransport(script)
     client = OpenCodeClient(
         session_id="sess-test",
