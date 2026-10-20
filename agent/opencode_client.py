@@ -36,7 +36,7 @@ from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
 logger = logging.getLogger(__name__)
 
 # Answerer contract shared with the Pi backend: (method, question, options) -> str | None
-QuestionAnswerer = Callable[[str, str, List[str]], Optional[str]]
+QuestionAnswerer = Callable[[str, str, list[str]], Optional[str]]
 
 _DEFAULT_READY_TIMEOUT = 30.0
 _DEFAULT_POLL_INTERVAL = 0.5
@@ -76,8 +76,8 @@ _server_lock = threading.Lock()
 # working directories do NOT need their own server process. The server is
 # spawned once, kept running for the life of the Hermes process, and each
 # delegate_session client creates its own session inside it.
-_servers: Dict[str, "_ServerHandle"] = {}
-_retired_servers: List["_ServerHandle"] = []
+_servers: dict[str, _ServerHandle] = {}
+_retired_servers: list[_ServerHandle] = []
 
 _SINGLETON_KEY = "__opencode_singleton__"
 
@@ -91,7 +91,7 @@ class _ServerHandle:
         self.retired = False
 
 
-def _server_state() -> Dict[str, "_ServerHandle"]:
+def _server_state() -> dict[str, _ServerHandle]:
     return dict(_servers)
 
 
@@ -108,7 +108,7 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _opencode_command() -> List[str]:
+def _opencode_command() -> list[str]:
     raw = os.environ.get("HERMES_OPENCODE_BIN", "").strip()
     if raw:
         return raw.split()
@@ -135,7 +135,7 @@ def _opencode_config_fingerprint() -> tuple:
     if not config_home:
         config_home = os.path.join(Path_home(), ".config")
     root = os.path.join(config_home, "opencode")
-    signatures: List[tuple] = []
+    signatures: list[tuple] = []
     try:
         names = sorted(os.listdir(root))
     except OSError:
@@ -181,7 +181,7 @@ def _wait_ready(base_url: str, timeout: float) -> None:
             status, _text = transport.request("GET", "/session")
             if status == 200:
                 return
-        except Exception as exc:  # noqa: BLE001 - readiness polling
+        except Exception as exc:
             last_error = exc
         time.sleep(0.25)
     raise RuntimeError(f"opencode server not ready at {base_url}: {last_error or 'no response'}")
@@ -261,8 +261,7 @@ def release_opencode_server(handle: _ServerHandle) -> None:
     terminate = False
     with _server_lock:
         handle.refcount -= 1
-        if handle.refcount < 0:
-            handle.refcount = 0
+        handle.refcount = max(handle.refcount, 0)
         if handle.retired and handle.refcount == 0:
             if handle in _retired_servers:
                 _retired_servers.remove(handle)
@@ -358,7 +357,7 @@ class OpenCodeClient:
 
     def start(
         self, timeout: float = 30.0, stages: list[float] | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         # `stages` is call-shape parity with PiRPCClient's staged start
         # handshake (agent/delegate_start_budget.py): the opencode transport
         # is one bounded HTTP wait with no ladder semantics, so it is
@@ -385,13 +384,13 @@ class OpenCodeClient:
         parts = message.get("parts") or []
         return "\n".join(str(p.get("text") or "") for p in parts if p.get("type") == "text").strip()
 
-    def _baseline_messages(self) -> List[dict]:
+    def _baseline_messages(self) -> list[dict]:
         path = f"/session/{self.native_session_id}/message{self._qdir()}"
         _status, data = self._request("GET", path)
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         return sorted(messages, key=self._message_sort_key)
 
-    def _pending_questions(self) -> List[dict]:
+    def _pending_questions(self) -> list[dict]:
         # NOTE: /question requires the ?directory= scope; without it OpenCode
         # silently returns [] even when a question is pending for the session.
         _status, data = self._request("GET", f"/question{self._qdir()}")
@@ -404,7 +403,7 @@ class OpenCodeClient:
             if not request_id or request_id in self._answered_questions:
                 continue
             questions = request.get("questions") or []
-            answers: List[List[str]] = []
+            answers: list[list[str]] = []
             reject = False
             for question in questions:
                 options = [str(opt.get("label")) for opt in (question.get("options") or []) if opt.get("label")]
@@ -437,7 +436,7 @@ class OpenCodeClient:
             self._answered_questions.add(request_id)
 
     @staticmethod
-    def _match_label(answer: str, options: List[str]) -> Optional[str]:
+    def _match_label(answer: str, options: list[str]) -> Optional[str]:
         low = answer.strip().strip(" \"'`.,!\t\n").casefold()
         for option in options:
             if option.strip().casefold() == low:
@@ -448,7 +447,7 @@ class OpenCodeClient:
                 return options[index - 1]
         return None
 
-    def _event_stream_idle(self, timeout: float, idle_flag: "threading.Event") -> None:
+    def _event_stream_idle(self, timeout: float, idle_flag: threading.Event) -> None:
         """Watch the SSE ``/event`` stream; set ``idle_flag`` on ``session.idle``.
 
         Also answers questions immediately when a ``question.asked`` event for
@@ -514,7 +513,7 @@ class OpenCodeClient:
         message: str,
         timeout_seconds: float = 900.0,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         started = time.monotonic()
         if not self.native_session_id:
             self.start(timeout=min(30.0, timeout_seconds))
@@ -679,7 +678,7 @@ class OpenCodeClient:
 
     def steer(
         self, message: str, timeout: float = 30.0, stages: list[float] | None = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         # OpenCode prompt_async has no native live-steer injection; the tool
         # layer degrades steer to a queued follow-up turn when no turn is
         # running.  Reaching this method means the caller chose to send anyway.
@@ -696,13 +695,13 @@ class OpenCodeClient:
 
     def get_messages(
         self, timeout: float = 30.0, stages: list[float] | None = None
-    ) -> List[dict]:
+    ) -> list[dict]:
         # `stages`: accepted-and-ignored, see start().
         _status, data = self._request("GET", f"/session/{self.native_session_id}/message{self._qdir()}")
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         return sorted(messages, key=self._message_sort_key)
 
-    def _pending_payload_for(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def _pending_payload_for(self, session_id: str) -> Optional[dict[str, Any]]:
         _status, data = self._request("GET", f"/question{self._qdir()}")
         rows = data if isinstance(data, list) else (data or {}).get("data") or []
         for row in rows:
@@ -718,7 +717,7 @@ class OpenCodeClient:
             }
         return None
 
-    def pending_question_payload(self) -> Optional[Dict[str, Any]]:
+    def pending_question_payload(self) -> Optional[dict[str, Any]]:
         if not self.native_session_id:
             return None
         return self._pending_payload_for(self.native_session_id)

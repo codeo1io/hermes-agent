@@ -169,6 +169,7 @@ def _run_probe(live: Path, mode: str, tmp_path: Path) -> dict:
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     report_line = next(
         (l for l in result.stdout.splitlines() if l.startswith("__WAVE13_REPORT__")),
@@ -239,7 +240,7 @@ def test_subprocess_predicate_refuses_live_board(wave13_topology):
     """The choke predicate refuses the live board from a spawned pytest child
     (env signal only — PYTEST_VERSION, exactly what 3873947 carried). Runs on
     every host: the predicate needs no live file, only the path."""
-    root, live, tmp_path = wave13_topology
+    _root, live, tmp_path = wave13_topology
     report = _run_probe(live, "predicate", tmp_path)
     state, detail = report["ensure_test_isolation"]
     assert state == "refused" and "test-isolation guard" in detail, report
@@ -250,7 +251,7 @@ def test_subprocess_open_paths_refuse_live_board(wave13_topology):
     refuse the live board from a spawned pytest child, before any sqlite
     touch. Skips on hosts with no live board (or only a bare never-initialized
     file, e.g. GitHub runners)."""
-    root, live, tmp_path = wave13_topology
+    _root, live, tmp_path = wave13_topology
     if not _live_board_is_real(live):
         pytest.skip("no live board on this host (not the runner machine)")
     before = _live_probe_rows(live)
@@ -270,7 +271,7 @@ def test_subprocess_write_helpers_never_reach_live_board(wave13_topology):
     write helpers are unreachable. If connect() ever succeeds from a pytest
     child on the live board, the child reports CHOKED-MISSING and this fails
     WITHOUT the probe writing a single row."""
-    root, live, tmp_path = wave13_topology
+    _root, live, tmp_path = wave13_topology
     if not _live_board_is_real(live):
         pytest.skip("no live board on this host (not the runner machine)")
     before = _live_probe_rows(live)

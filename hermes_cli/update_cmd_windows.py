@@ -137,7 +137,7 @@ def _normalized_arg_tokens(tokens: list[str]) -> list[str]:
 
 
 def _token_is_path_under(tok: str, dir_prefix: str) -> bool:
-    """True when the WHOLE token is the directory itself or a path inside it (either separator).
+    r"""True when the WHOLE token is the directory itself or a path inside it (either separator).
 
     Prefix equality on a complete argv token — never a substring test: ``venv-backup`` must not
     claim to be ``venv\``, and a file merely named after the venv path must not match at all.

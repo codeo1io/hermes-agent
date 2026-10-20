@@ -813,8 +813,8 @@ def test_runtime_dispatch_passes_parent_agent(monkeypatch):
 
     agent = Parent("dispatch-agent")
     # Attributes the dispatch chain touches before reaching the tool.
-    setattr(agent, "_memory_manager", None)
-    setattr(agent, "_subagent_lifecycle", None)
+    agent._memory_manager = None
+    agent._subagent_lifecycle = None
 
     raw = invoke_tool(
         agent,
@@ -1874,7 +1874,7 @@ def test_wedge_e2e_real_pi_client_durable_running_evidence(monkeypatch, tmp_path
 
     script = tmp_path / "fake-pi-slow-turn"
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys, time\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"

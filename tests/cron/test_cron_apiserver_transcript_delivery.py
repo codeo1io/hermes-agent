@@ -89,7 +89,6 @@ class TestDeliveryLoopLane:
 
         def fake_transcript(job, chat_id, content):
             calls["args"] = (chat_id, content)
-            return None
 
         job = _job()
         with patch.object(sd, "_deliver_to_api_server_transcript",

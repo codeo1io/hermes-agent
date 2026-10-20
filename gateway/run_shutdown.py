@@ -1655,12 +1655,12 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             try:
                 if not live_planned_stop_marker_present():
                     return
-            except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+            except Exception:
                 return
         from gateway.status import planned_stop_stopper_alive
         try:
             gone = not planned_stop_stopper_alive()
-        except Exception:  # noqa: BLE001 - a probe failure must never cancel a live restart
+        except Exception:
             return
         if gone:
             logger.warning(

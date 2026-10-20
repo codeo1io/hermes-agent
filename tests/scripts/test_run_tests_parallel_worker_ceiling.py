@@ -71,10 +71,10 @@ def _node(
 def _v2_tree(
     tmp_path: Path,
     name: str,
-    unit: Optional[Dict[str, str]] = None,
-    ancestor: Optional[Dict[str, str]] = None,
+    unit: Optional[dict[str, str]] = None,
+    ancestor: Optional[dict[str, str]] = None,
     unit_rel: str = "unit.slice",
-) -> Tuple[Path, Path]:
+) -> tuple[Path, Path]:
     """A cgroup v2 fixture: a mount root (ancestor files at the root itself)
     with one unit dir below it, plus a /proc/self/cgroup lookalike naming
     the unit. Returns (proc_file, mount_root)."""

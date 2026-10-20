@@ -74,7 +74,7 @@ FAKE_PI = "\n".join([
 @pytest.fixture
 def fake_pi(tmp_path):
     p = tmp_path / "fake-pi"
-    p.write_text("#!%s\n%s" % (sys.executable, FAKE_PI))
+    p.write_text(f"#!{sys.executable}\n{FAKE_PI}")
     p.chmod(p.stat().st_mode | stat.S_IEXEC)
     return str(p)
 
@@ -101,7 +101,7 @@ def create(client, content, timeout=120):
 def test_run_session_prompt_fails_fast_when_pi_exits_before_settled(tmp_path):
     script = tmp_path / "fake-pi-exit"
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys\n"
         + "for line in sys.stdin:\n"
         + "    msg = json.loads(line)\n"
@@ -129,7 +129,7 @@ def test_run_session_prompt_fails_fast_when_pi_exits_before_settled(tmp_path):
 def test_run_session_prompt_reconciles_more_complete_final_assistant_text(tmp_path):
     script = tmp_path / "fake-pi-final-text"
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"
@@ -157,7 +157,7 @@ def test_run_session_prompt_reconciles_more_complete_final_assistant_text(tmp_pa
 def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continues(tmp_path):
     script = tmp_path / "fake-pi-progress"
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys, time\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"
@@ -198,7 +198,7 @@ def test_run_session_prompt_has_no_absolute_wall_clock_cap_when_progress_continu
 def test_run_session_prompt_fails_only_after_inactivity_stall(tmp_path):
     script = tmp_path / "fake-pi-stall"
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys, time\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"
@@ -233,7 +233,7 @@ def _stall_builder(tmp_path, name, after_ack):
     """Fake pi that acks the prompt, runs `after_ack`, then never settles."""
     script = tmp_path / name
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys, time\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"
@@ -370,7 +370,7 @@ def _triage_for(tmp_path, name, script_body):
     liveness_triage dict carried by the typed stall."""
     script = tmp_path / name
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, sys, time\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"
@@ -459,7 +459,7 @@ def test_terminated_stall_child_respawns_same_session_id(tmp_path):
     marker = tmp_path / "second-life"
     script = tmp_path / "fake-pi-two-lives"
     script.write_text(
-        "#!%s\n" % sys.executable
+        f"#!{sys.executable}\n"
         + "import json, os, sys, time\n"
         + "def send(o): print(json.dumps(o), flush=True)\n"
         + "send({'type':'ready'})\n"
@@ -468,11 +468,11 @@ def test_terminated_stall_child_respawns_same_session_id(tmp_path):
         + "    typ = msg.get('type')\n"
         + "    if typ == 'prompt':\n"
         + "        send({'type':'response','id':msg['id'],'success':True})\n"
-        + "        if os.path.exists(%r):\n" % str(marker)
+        + f"        if os.path.exists({str(marker)!r}):\n"
         + "            send({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':'recovered'}})\n"
         + "            send({'type':'agent_settled'})\n"
         + "        else:\n"
-        + "            open(%r, 'w').close()\n" % str(marker)
+        + f"            open({str(marker)!r}, 'w').close()\n"
         + "            time.sleep(30)\n"
         + "    elif typ == 'get_last_assistant_text':\n"
         + "        send({'type':'response','id':msg['id'],'success':True,'data':{'text':'recovered'}})\n"

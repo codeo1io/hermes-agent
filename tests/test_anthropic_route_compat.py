@@ -10,9 +10,9 @@ headers with third-party Anthropic-protocol endpoints never qualifying.
 
 from types import SimpleNamespace
 
-import agent.agent_init as agent_init
-import agent.anthropic_credentials as anthropic_credentials
-import agent.anthropic_adapter as anthropic_adapter
+from agent import agent_init
+from agent import anthropic_credentials
+from agent import anthropic_adapter
 
 
 def _agent(provider="anthropic"):

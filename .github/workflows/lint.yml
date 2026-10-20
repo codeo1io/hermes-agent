@@ -133,8 +133,9 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   ruff-blocking:
-    # Enforce the rules in pyproject.toml [tool.ruff.lint.select]. Currently
-    # PLW1514 (unspecified-encoding) — catches bare ``open()`` /
+    # Enforce the rules in the tracked ruff.toml [lint] config (the single
+    # authority; pyproject.toml carries no [tool.ruff] table). Preview-gated
+    # rules like PLW1514 (unspecified-encoding) catch bare ``open()`` /
     # ``read_text()`` / ``write_text()`` calls that default to locale
     # encoding on Windows. Failure here blocks merge; the advisory
     # ``lint-diff`` job above runs independently so reviewers still get
