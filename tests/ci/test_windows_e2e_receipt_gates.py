@@ -29,8 +29,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.ci import _gha_expr as gha
 import hermes_yaml
+from tests.ci import _gha_expr as gha
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/install-e2e-windows-run.yml"
@@ -53,13 +53,18 @@ def gate(steps: dict[str, dict], name: str, ctx: dict) -> bool:
     modelled here so the ``always()`` guards are actually pinned.
     """
     expr = steps[name].get("if")
-    if expr is not None and not re.search(r"\b(always|failure|cancelled)\s*\(", str(expr)):
-        if not ctx["__status__"]["success"]():
-            return False
+    if (
+        expr is not None
+        and not re.search(r"\b(always|failure|cancelled)\s*\(", str(expr))
+        and not ctx["__status__"]["success"]()
+    ):
+        return False
     return gha.condition(expr, ctx)
 
 
-def _ctx(install: str, update_ran: bool, update_known: str = "", failure: bool = False) -> dict:
+def _ctx(
+    install: str, update_ran: bool, update_known: str = "", failure: bool = False
+) -> dict:
     install_outputs = {"known_failure": install}
     update_outputs = {"known_failure": update_known} if update_ran else {}
     # Job status functions: always() is unconditionally true; failure() is
@@ -71,17 +76,26 @@ def _ctx(install: str, update_ran: bool, update_known: str = "", failure: bool =
         "cancelled": lambda: False,
     }
     return {
-        "steps": {"install": {"outputs": install_outputs, "outcome": "success" if not failure else "failure"},
-                  "update": {"outputs": update_outputs, "outcome": "success"}},
+        "steps": {
+            "install": {
+                "outputs": install_outputs,
+                "outcome": "success" if not failure else "failure",
+            },
+            "update": {"outputs": update_outputs, "outcome": "success"},
+        },
         "__status__": status,
     }
 
 
 SCENARIOS = {
     # install classified -> update SKIPPED (its outputs dict stays empty)
-    "install_classified": _ctx("pre-pm-june-desktop-renderer-layout", update_ran=False, failure=False),
+    "install_classified": _ctx(
+        "pre-pm-june-desktop-renderer-layout", update_ran=False, failure=False
+    ),
     # update classified -> install green, update output set
-    "update_classified": _ctx("", update_ran=True, update_known="pre-pm-june-desktop-renderer-layout"),
+    "update_classified": _ctx(
+        "", update_ran=True, update_known="pre-pm-june-desktop-renderer-layout"
+    ),
     # clean pass
     "clean_pass": _ctx("", update_ran=True),
     # install failed unclassified (rethrow) -> job already red
@@ -92,24 +106,35 @@ SCENARIOS = {
 def test_verify_stamp_skips_when_install_classified(steps):
     # THE regression: install classified, update skipped -> stamp verification
     # must not run against a tree that legitimately has no install-stamp.json.
-    assert not gate(steps, "Verify install stamps describe the updated checkout",
-                    SCENARIOS["install_classified"])
+    assert not gate(
+        steps,
+        "Verify install stamps describe the updated checkout",
+        SCENARIOS["install_classified"],
+    )
 
 
 def test_verify_stamp_skips_when_update_classified(steps):
-    assert not gate(steps, "Verify install stamps describe the updated checkout",
-                    SCENARIOS["update_classified"])
+    assert not gate(
+        steps,
+        "Verify install stamps describe the updated checkout",
+        SCENARIOS["update_classified"],
+    )
 
 
 def test_verify_stamp_runs_on_clean_pass(steps):
-    assert gate(steps, "Verify install stamps describe the updated checkout",
-                SCENARIOS["clean_pass"])
+    assert gate(
+        steps,
+        "Verify install stamps describe the updated checkout",
+        SCENARIOS["clean_pass"],
+    )
 
 
 def test_update_phase_gates_on_install_classification(steps):
     # Pre-existing contract (restored by fix-queue 339 / PR #509): a
     # classified install failure skips the update phase entirely.
-    update = next(s for s in steps.values() if str(s.get("name", "")).startswith("Update "))
+    update = next(
+        s for s in steps.values() if str(s.get("name", "")).startswith("Update ")
+    )
     assert not gha.condition(update.get("if"), SCENARIOS["install_classified"])
     assert gha.condition(update.get("if"), SCENARIOS["clean_pass"])
 
