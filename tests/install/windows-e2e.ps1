@@ -1631,6 +1631,34 @@ function Invoke-PhaseUpdate {
     }
 }
 
+function Invoke-CheckedPhaseInstall {
+    # Install-phase known failures (the June renderer-layout legs failing
+    # Test-HermesRuns' read-only verification against a pre-PM OLD tree)
+    # classify the same way as update-phase ones: the driver's transcripts
+    # (bootstrap/verify) ARE the evidence, nothing is rotated ahead of this
+    # phase. Fail-closed: an unmatched failure rethrows.
+    # Restored by fix-queue item 339 — the v0.21.6 adoption merge (#501)
+    # silently dropped #477's original wrapper along with its dispatch arms.
+    try {
+        Invoke-PhaseInstall
+    } catch {
+        $failure = $_
+        $node = $DriverNode
+        $classification = & $node (Join-Path $AssetsDir "known-failures.cjs") $WorkRoot $InstallMethod $Route $failure.Exception.Message windows install
+        $classificationExit = $LASTEXITCODE
+        if ($classificationExit -ne 0) { throw $failure }
+        $receipt = ($classification | Out-String) | ConvertFrom-Json
+        Write-Host "KNOWN FAILURE [$($receipt.id)]: $($receipt.title)"
+        Write-Host "  $($receipt.explanation)"
+        if ($env:GITHUB_OUTPUT) {
+            Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "known_failure=$($receipt.id)" -Encoding UTF8
+        }
+        if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8 -Value "Known historical failure: $($receipt.title). See the result chart footnote and uploaded known-failure.json."
+        }
+    }
+}
+
 function Invoke-CheckedPhaseUpdate {
     Remove-Item -LiteralPath (Join-Path $WorkRoot "known-failure.json") -Force -ErrorAction SilentlyContinue
     # Only evidence produced by this update attempt can match an exception.
@@ -1727,12 +1755,12 @@ Set-GitRedirect
 try {
 switch ($Phase) {
     "stage"   { Invoke-PhaseStage }
-    "install" { Invoke-SourceBuild { Invoke-PhaseInstall } }
+    "install" { Invoke-SourceBuild { Invoke-CheckedPhaseInstall } }
     "update"  { Invoke-SourceBuild { Invoke-CheckedPhaseUpdate } }
     "verify-stamp" { Invoke-PhaseVerifyStamp }
     "all" {
         Invoke-PhaseStage
-        Invoke-SourceBuild { Invoke-PhaseInstall }
+        Invoke-SourceBuild { Invoke-CheckedPhaseInstall }
         Invoke-SourceBuild { Invoke-CheckedPhaseUpdate }
         Invoke-PhaseVerifyStamp
     }
