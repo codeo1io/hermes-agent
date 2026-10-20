@@ -166,7 +166,36 @@ describe('known install failures', () => {
     })?.id).toBe('pre-pm-june-desktop-renderer-layout')
     // Fail-closed: a stranger failure on the same tree must stay red.
     expect(matchKnownFailure({ ...sample, logs: { verify: verifyLog.replaceAll('desktop packaged renderer is missing or incomplete', 'desktop executable is missing or empty') } })).toBeNull()
-    expect(matchKnownFailure({ ...sample, platform: 'windows' })).toBeNull()
+    // Windows shape (fix-queue item 339, run 39368643437): the same
+    // verify_products signature surfaces through Test-HermesRuns' read-only
+    // install assertion with a post-install-gui / post-install-script-desktop
+    // wrapper. Classifies on both wrapped install-phase variants...
+    expect(matchKnownFailure({
+      ...sample, platform: 'windows', phase: 'install',
+      installMethod: 'desktop-installer@latest', updateMethod: 'installer-script',
+      error: 'E2E ASSERTION FAILED: post-install-gui -- read-only install verification (no repair)',
+    })?.id).toBe('pre-pm-june-desktop-renderer-layout')
+    expect(matchKnownFailure({
+      ...sample, platform: 'windows', phase: 'install',
+      installMethod: 'installer-script+desktop', updateMethod: 'hermes-update',
+      error: 'E2E ASSERTION FAILED: post-install-script-desktop -- read-only install verification (no repair)',
+    })?.id).toBe('pre-pm-june-desktop-renderer-layout')
+    // ...and through the update phase (windows wrapper text, update timing).
+    expect(matchKnownFailure({
+      ...sample, platform: 'windows',
+      error: 'E2E ASSERTION FAILED: post-install-gui -- read-only install verification (no repair)',
+    })?.id).toBe('pre-pm-june-desktop-renderer-layout')
+    // Fail-closed: a stranger windows wrapper on the same tree stays red.
+    expect(matchKnownFailure({
+      ...sample, platform: 'windows', phase: 'install',
+      installMethod: 'desktop-installer@latest', updateMethod: 'installer-script',
+      error: 'E2E ASSERTION FAILED: post-install-gui -- read-only install verification (repaired)',
+    })).toBeNull()
+    expect(matchKnownFailure({
+      ...sample, platform: 'windows', phase: 'install',
+      installMethod: 'desktop-installer@latest', updateMethod: 'installer-script',
+      error: 'E2E ASSERTION FAILED: post-install-script -- read-only install verification (no repair)',
+    })).toBeNull()
     expect(matchKnownFailure({ ...sample, installMethod: 'installer-script' })).toBeNull()
     expect(matchKnownFailure({ ...sample, commit: PRE_PM })).toBeNull()
     expect(matchKnownFailure({ ...sample, error: 'E2E ASSERTION FAILED: read-only verification failed at HEAD; no repair was attempted' })).toBeNull()
