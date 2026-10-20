@@ -4,10 +4,12 @@ Applies on top of the root `AGENTS.md` (which carries the short form of the pinn
 
 ## Dependency pinning policy
 
-All dependencies carry upper bounds (litellm compromise #2796/#2810; Mini Shai-Hulud worm,
-May 2026). PyPI: `>=floor,<next_major` (`"httpx>=0.28.1,<1"`); pre-1.0: `<0.(minor+2)`
-(`>=0.29,<0.32`). Git URLs: 40-char commit SHA. GitHub Actions: SHA + `# vN` comment. CI-only
-Python requirements: `==exact`. A bare `>=X.Y.Z` is rejected by CI and reviewers.
+All core dependencies are exact-pinned (`==X.Y.Z`, no ranges — the tightened post-worm
+policy, 2026-05-12; see the rationale block in `pyproject.toml`). Exact pins mean a new
+package version reaches a user only via an intentional update on our side; a range needs a
+written justification (litellm compromise #2796/#2810; Mini Shai-Hulud worm). Git URLs:
+40-char commit SHA. GitHub Actions: SHA + `# vN` comment. CI-only Python requirements:
+`==exact`. A bare `>=X.Y.Z` is rejected by CI and reviewers.
 After changing `pyproject.toml`, run `hermes pm lock`, re-source `./activate`, and commit
 `pyproject.toml` with `uv.lock`. Reference: #2810 (bounds), #9801 (SHA pinning + audit CI).
 

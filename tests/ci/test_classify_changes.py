@@ -586,7 +586,9 @@ def _iter_if_expressions(job: object):
 # (caller workflow, job, called workflow, lane input) for every real-update
 # suite: each runs on a PR exactly when its lane fires and then gates the merge.
 _REAL_UPDATE_LANES = (
-    ("ci.yaml", "tests", "tests.yml", "e2e_upgrade"),
+    # Complement of `tests`: the standard lane runs the workflow main ships on
+    # human PRs and pushes, so it must gate the merge exactly like `tests`.
+    ("ci.yaml", "tests-standard", "tests.yml", "e2e_upgrade"),
     ("ci.yaml", "tests-os", "tests-os.yml", "e2e_upgrade"),
     ("ci.yaml", "e2e-desktop-update", "e2e-desktop-update.yml", "e2e_desktop_update"),
     ("tests-os.yml", "install-update-e2e", "windows-install-update-e2e.yml", "e2e_upgrade"),
