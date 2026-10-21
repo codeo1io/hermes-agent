@@ -281,6 +281,11 @@ class PiRPCClient:
         self._last_turn_activity = time.monotonic()
         self._last_turn_activity_at = time.time()
         self.text_streamed = False
+        # Final assistant text captured just before each prompt goes out
+        # (T1): the freshness anchor the stall-boundary harvest compares
+        # against, kept per-turn so the harvest can read it at the stall
+        # boundary of the same turn.
+        self._turn_baseline_text: str | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -709,16 +714,41 @@ class PiRPCClient:
 
         # Persistent delegate_session clients install a Hermes-side answerer.
         # Resolve those questions immediately with the supervising Hermes model
-        # instead of surfacing them to the human or waiting for steer().
+        # instead of surfacing them to the human or waiting for steer(). The
+        # answerer is a supervisor-side model call with no deadline of its own,
+        # so source it through a bounded worker: a wedged one must degrade to
+        # the conservative fallback within the existing question budget, not
+        # hold the pi dialog (and the delegate capacity behind it) open for
+        # the whole stall window. A late answerer result is discarded, never
+        # double-sent.
         if self._question_answerer is not None:
-            answer_text = ""
-            try:
-                answer_text = str(
-                    self._question_answerer(method, title, list(options)) or ""
-                ).strip()
-            except Exception as exc:
+            box: dict[str, Any] = {}
+            done = threading.Event()
+
+            def _ask() -> None:
+                try:
+                    box["text"] = str(
+                        self._question_answerer(method, title, list(options)) or ""
+                    ).strip()
+                except Exception as exc:
+                    box["exc"] = exc
+                finally:
+                    done.set()
+
+            threading.Thread(
+                target=_ask, daemon=True, name=f"pi-ui-answerer-{request_id}"
+            ).start()
+            answered = done.wait(_DEFAULT_QUESTION_TIMEOUT)
+            answer_text = str(box.get("text") or "") if answered else ""
+            if box.get("exc") is not None:
                 self._reasoning_parts.append(
-                    f"[pi-question:auto] Hermes answerer failed: {exc.__class__.__name__}\n"
+                    "[pi-question:auto] Hermes answerer failed: "
+                    f"{box['exc'].__class__.__name__}\n"
+                )
+            elif not answered:
+                self._reasoning_parts.append(
+                    "[pi-question:auto] answerer exceeded "
+                    f"{int(_DEFAULT_QUESTION_TIMEOUT)}s; conservative fallback\n"
                 )
             if answer_text:
                 payload = question.answer_with(answer_text)
@@ -906,6 +936,53 @@ class PiRPCClient:
                 pass
         return triage
 
+    def _deliver_turn_prompt(
+        self, message: str, *, stall_timeout: float
+    ) -> dict[str, Any]:
+        """Send the turn prompt, reconciling the abort-shaped rejection.
+
+        The prompt handshake can fail with "This operation was aborted" when
+        the child's RPC layer drains a request whose upstream provider call
+        died mid-flight — a transport artifact, not a verdict on this prompt.
+        Burning the whole delegated attempt on it re-entered the retry loop
+        that starved autonomy occupancy (A4). Reconcile before failing: a
+        child already running a turn is joined, never re-prompted (double-turn
+        risk); an idle child gets one resend after the abort drain. Every
+        other outcome returns the original response unchanged, so the caller's
+        terminal behavior — same exception, same wording — is preserved.
+        """
+        prompt_timeout = min(30.0, max(1.0, stall_timeout))
+        response = self._request_pi(
+            {"type": "prompt", "message": message}, timeout=prompt_timeout
+        )
+        if response.get("success"):
+            return response
+        error_text = str(response.get("error") or "pi prompt rejected")
+        if "abort" not in error_text.lower():
+            return response
+        try:
+            probe = self._request_pi(
+                {"type": "get_state"}, timeout=min(2.0, max(0.05, stall_timeout))
+            )
+        except Exception:
+            probe = None
+        data = probe.get("data") if isinstance(probe, dict) else None
+        if not isinstance(data, dict):
+            return response
+        if data.get("isStreaming") or data.get("isCompacting"):
+            # The rejected ack lied about a turn that is already running:
+            # proceed to the settle-wait loop instead of re-prompting. If the
+            # state lied too, the stall window still bounds the wait.
+            return {"success": True, "_reconciled": "turn-in-flight"}
+        time.sleep(min(1.0, max(0.05, stall_timeout / 10.0)))
+        try:
+            resent = self._request_pi(
+                {"type": "prompt", "message": message}, timeout=prompt_timeout
+            )
+        except Exception:
+            return response
+        return resent if resent.get("success") else response
+
     def run_session_prompt(
         self,
         message: str,
@@ -941,11 +1018,31 @@ class PiRPCClient:
                 self._last_turn_activity = time.monotonic()
                 self._last_turn_activity_at = time.time()
             try:
+                # Freshness anchor for the stall-boundary harvest: capture the
+                # child's last assistant text BEFORE this prompt goes out, so
+                # a harvest can only ever accept final text that did not exist
+                # when the turn started — never a stale previous-turn answer.
+                # Bounded and fail-open: a slow or missing answer costs a
+                # moment, never the turn (None disarms the anchor instead).
+                # The cap stays well under the fail-fast exit-detection
+                # budgets callers assert: a child that cannot answer a local
+                # pipe RPC in ~1s will not answer it at 2s either.
+                baseline_text: str | None = None
+                try:
+                    baseline_resp = self._request_pi(
+                        {"type": "get_last_assistant_text"},
+                        timeout=min(1.0, max(0.05, stall_timeout / 4.0)),
+                    )
+                    baseline_candidate = (baseline_resp.get("data") or {}).get("text")
+                    if isinstance(baseline_candidate, str):
+                        baseline_text = baseline_candidate
+                except Exception:
+                    baseline_text = None
+                self._turn_baseline_text = baseline_text
                 # Prompt acknowledgement is a transport operation, not the
                 # delegated turn itself. Keep that handshake bounded.
-                response = self._request_pi(
-                    {"type": "prompt", "message": message},
-                    timeout=min(30.0, max(1.0, stall_timeout)),
+                response = self._deliver_turn_prompt(
+                    message, stall_timeout=stall_timeout
                 )
                 if not response.get("success"):
                     raise RuntimeError(response.get("error") or "pi prompt rejected")

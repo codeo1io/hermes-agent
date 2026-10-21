@@ -503,6 +503,116 @@ def test_terminated_stall_child_respawns_same_session_id(tmp_path):
         client.close()
 
 
+# --------------------- abort-shaped prompt rejection reconcile (A4)
+# "This operation was aborted" on the prompt handshake is the drain
+# artifact of an upstream provider call that died mid-flight — a transport
+# event, not a verdict on this prompt. Failing the whole delegated attempt
+# on it re-entered the retry loop that starved autonomy occupancy (A4), so
+# the handshake now reconciles before failing: an idle child gets exactly
+# one resend; a child whose state probe shows a turn in flight is joined,
+# never re-prompted (double-turn risk).
+
+
+def _abort_rejection_pi(tmp_path, name, *, accept_resend, final_text):
+    """Fake pi that rejects the first prompt with the abort-shaped error.
+
+    Every received prompt is counted into `<name>.count` so tests can prove
+    resend counts out-of-band. `accept_resend=True` (idle shape) accepts the
+    second prompt and settles; `accept_resend=False` (in-flight shape)
+    rejects every prompt and instead settles a phantom running turn as soon
+    as the get_state probe reports it streaming.
+    """
+    counter = tmp_path / (name + ".count")
+    script = tmp_path / name
+    script.write_text(
+        "#!%s\n" % sys.executable
+        + "import json, sys\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type': 'ready'})\n"
+        + "last_text = 'previous turn final'\n"
+        + "settled = False\n"
+        + "prompts = 0\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    typ = msg.get('type')\n"
+        + "    if typ == 'prompt':\n"
+        + "        prompts += 1\n"
+        + "        with open(%r, 'a') as fh:\n" % str(counter)
+        + "            fh.write('p')\n"
+        + "        if %r and prompts >= 2 and not settled:\n" % bool(accept_resend)
+        + "            settled = True\n"
+        + "            last_text = %r\n" % final_text
+        + "            send({'type': 'response', 'id': msg['id'], 'success': True})\n"
+        + "            send({'type': 'message_update', 'assistantMessageEvent':"
+        " {'type': 'text_delta', 'delta': %r}})\n" % final_text
+        + "            send({'type': 'prompt_done', 'id': msg['id']})\n"
+        + "            send({'type': 'agent_settled'})\n"
+        + "        else:\n"
+        + "            send({'type': 'response', 'id': msg['id'], 'success': False,"
+        " 'error': 'This operation was aborted'})\n"
+        + "    elif typ == 'get_state':\n"
+        + "        if %r and not settled:\n" % (not accept_resend)
+        + "            settled = True\n"
+        + "            last_text = %r\n" % final_text
+        + "            send({'type': 'response', 'id': msg['id'], 'success': True,"
+        " 'data': {'isStreaming': True, 'isCompacting': False}})\n"
+        + "            send({'type': 'message_update', 'assistantMessageEvent':"
+        " {'type': 'text_delta', 'delta': %r}})\n" % final_text
+        + "            send({'type': 'agent_settled'})\n"
+        + "        else:\n"
+        + "            send({'type': 'response', 'id': msg['id'], 'success': True,"
+        " 'data': {'isStreaming': False}})\n"
+        + "    elif typ == 'get_last_assistant_text':\n"
+        + "        send({'type': 'response', 'id': msg['id'], 'success': True,"
+        " 'data': {'text': last_text}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def test_abort_shaped_prompt_rejection_resends_once_when_idle(tmp_path):
+    client = PiRPCClient(
+        acp_command=_abort_rejection_pi(
+            tmp_path,
+            "fake-pi-abort-idle",
+            accept_resend=True,
+            final_text="delivered on resend",
+        ),
+        base_url="pi://abort-idle",
+        persistent_session=True,
+    )
+    try:
+        result = client.run_session_prompt("go", timeout_seconds=5)
+        assert result["success"] is True
+        assert result["text"] == "delivered on resend"
+        # exactly two prompts: the aborted original + the single resend
+        assert (tmp_path / "fake-pi-abort-idle.count").read_text() == "pp"
+    finally:
+        client.close()
+
+
+def test_abort_shaped_prompt_rejection_waits_when_turn_in_flight(tmp_path):
+    client = PiRPCClient(
+        acp_command=_abort_rejection_pi(
+            tmp_path,
+            "fake-pi-abort-inflight",
+            accept_resend=False,
+            final_text="in-flight turn finished",
+        ),
+        base_url="pi://abort-inflight",
+        persistent_session=True,
+    )
+    try:
+        result = client.run_session_prompt("go", timeout_seconds=5)
+        assert result["success"] is True
+        assert result["text"] == "in-flight turn finished"
+        # exactly ONE prompt: the rejected one — a resend here would have
+        # double-run the turn the child was already streaming
+        assert (tmp_path / "fake-pi-abort-inflight.count").read_text() == "p"
+    finally:
+        client.close()
+
+
 # ------------------------------------------------- answer text mapping
 
 @pytest.mark.parametrize(
@@ -598,6 +708,46 @@ def test_persistent_answerer_failure_uses_conservative_fallback(fake_pi, clean_r
     assert sent == [{"type": "extension_ui_response", "id": 88, **expected}]
     assert pending_questions == {}
     assert "conservative fallback" in "".join(client._reasoning_parts)
+    client.close()
+
+
+def test_persistent_answerer_bounded_by_question_timeout(
+    fake_pi, clean_registry, monkeypatch
+):
+    """A wedged supervisor answerer must not hold the pi dialog open for the
+    whole stall window: it degrades to the conservative fallback within the
+    existing question budget, and its late result is discarded — never
+    double-sent (A4: unbounded delegate capacity held by a leaked worker)."""
+    monkeypatch.setattr("agent.pi_rpc_client._DEFAULT_QUESTION_TIMEOUT", 0.5)
+    release = threading.Event()
+    sent = []
+
+    def wedged_answerer(_method, _title, _options):
+        release.wait(timeout=10.0)
+        return "late answer"
+
+    client = make_client(
+        fake_pi, persistent_session=True, question_answerer=wedged_answerer
+    )
+    client._send_pi = lambda payload: sent.append(payload)
+
+    started = time.monotonic()
+    client._handle_ui_request(
+        {"type": "extension_ui_request", "id": 55, "method": "confirm", "title": "Proceed?"}
+    )
+    elapsed = time.monotonic() - started
+
+    # bound + 10x scheduling margin — nowhere near the stall window the
+    # unbounded inline call used to hold the dialog open for
+    assert elapsed < 5.0
+    assert sent == [{"type": "extension_ui_response", "id": 55, "confirmed": False}]
+    reasoning = "".join(client._reasoning_parts)
+    assert "exceeded" in reasoning
+    assert "conservative fallback" in reasoning
+    # the late answerer result is discarded, never double-sent
+    release.set()
+    time.sleep(0.2)
+    assert sent == [{"type": "extension_ui_response", "id": 55, "confirmed": False}]
     client.close()
 
 
