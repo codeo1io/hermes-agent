@@ -14,9 +14,11 @@ property is ``null``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+from pathlib import Path
 from typing import Any, Mapping
 
 _TOKEN = re.compile(r"""\s*(?:
@@ -68,6 +70,24 @@ def _number(value: Any) -> float:
         except ValueError:
             return math.nan
     return math.nan
+
+
+def _hash_files(patterns: list[Any]) -> str:
+    """GitHub's hashFiles(): for each file matched by the patterns (sorted),
+    sha256 over ``relative-posix-path \n content``; per-file hex digests are
+    joined with ``-``. Patterns resolve from the workspace root, which for this
+    test harness is the repository checkout (the runner's cwd). Non-matching
+    patterns contribute nothing, exactly like the real runner."""
+    root = Path.cwd()
+    hashes: list[str] = []
+    for pattern in patterns:
+        matches = sorted(p for p in root.glob(to_string(pattern)) if p.is_file())
+        for path in matches:
+            digest = hashlib.sha256(
+                path.relative_to(root).as_posix().encode() + b"\n" + path.read_bytes()
+            ).hexdigest()
+            hashes.append(digest)
+    return "-".join(hashes)
 
 
 def _equal(a: Any, b: Any) -> bool:
@@ -187,6 +207,28 @@ class _Parser:
             if isinstance(hay, list):
                 return any(_equal(h, needle) for h in hay)
             return to_string(needle).lower() in to_string(hay).lower()
+        if name == "startsWith":
+            hay, needle = args
+            return to_string(hay).lower().startswith(to_string(needle).lower())
+        if name == "endsWith":
+            hay, needle = args
+            return to_string(hay).lower().endswith(to_string(needle).lower())
+        if name == "join":
+            if not args:
+                raise Unsupported(f"join() with no arguments in {self.text!r}")
+            values = [to_string(v) for v in args[0]] if isinstance(args[0], list) else [to_string(args[0])]
+            sep = to_string(args[1]) if len(args) > 1 else ","
+            return sep.join(values)
+        if name == "format":
+            if not args:
+                raise Unsupported(f"format() with no arguments in {self.text!r}")
+            template = to_string(args[0])
+            replaced = template
+            for i, value in enumerate(args[1:]):
+                replaced = replaced.replace("{" + str(i) + "}", to_string(value))
+            return replaced
+        if name == "hashFiles":
+            return _hash_files(args)
         raise Unsupported(f"function {name}() in {self.text!r}")
 
     def lookup(self, path: str) -> Any:

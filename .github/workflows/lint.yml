@@ -3,8 +3,10 @@ name: Lint (ruff + ty)
 # Three things here:
 #   1. Advisory diff — ruff + ty diagnostics as a diff vs the target branch.
 #      Writes a Markdown summary to the run page. Exit zero always.
-#   2. Blocking ``ruff check .`` — enforces the explicit rules in
-#      ``[tool.ruff.lint.select]`` (currently PLW1514). Failure blocks merge.
+#   2. Blocking ``ruff check .`` — enforces the explicit rules in the
+#      tracked ``ruff.toml`` ``[lint]`` config (the single authority;
+#      ``pyproject.toml`` carries no ``[tool.ruff]`` table). Failure blocks
+#      merge.
 #      Separate job so the advisory diff still runs even when enforcement
 #      fails.
 #   3. Blocking code-health ratchet (``scripts/code_health``) for Python and TypeScript.

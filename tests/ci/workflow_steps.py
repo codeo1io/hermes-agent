@@ -134,7 +134,8 @@ def selected_files(step: dict, ctx: dict, repo: Path) -> set[str]:
                 paths.extend(args[i].split(os.pathsep))
             elif arg == "-m":
                 i += 1  # native marker evaluation belongs to the native runner
-                assert args[i] in ("platforms and integration", "platforms and not integration"), args
+                assert args[i] in ("platforms and integration", "platforms and not integration",
+                                   "platforms and not integration and not live"), args
             elif arg.startswith("--ignore-glob="):
                 ignores.append(arg.split("=", 1)[1])
             elif arg in ("--", "--include-integration", "-v", "--tb=short", "-rA"):

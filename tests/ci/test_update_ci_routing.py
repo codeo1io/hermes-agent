@@ -119,7 +119,15 @@ def _inputs_for(called: str, given: dict[str, Any]) -> dict[str, Any]:
     declared = (_on(_yaml(called)).get("workflow_call") or {}).get("inputs") or {}
     unknown = set(given) - set(declared)
     assert not unknown, f"{called} is passed input(s) it never declares: {sorted(unknown)}"
-    return {name: given.get(name, spec.get("default")) for name, spec in declared.items()}
+    result = {}
+    for name, spec in declared.items():
+        value = given.get(name, spec.get("default"))
+        if spec.get("type") == "boolean" and isinstance(value, str):
+            # A typed ``with:`` input arrives as a real boolean: ``if: inputs.e2e``
+            # must not fire on the rendered string "false" (truthy in expressions).
+            value = value.strip() == "true"
+        result[name] = value
+    return result
 
 
 def _run_workflow(rel: str, *, inputs: dict[str, Any], detect: dict[str, Any] | None = None) -> dict:
@@ -226,13 +234,17 @@ def _windows_desktop_updater_tests_selected(run: dict) -> bool:
 
 
 # Each real consumer of a lane, as a path of job names from ci.yaml down.
+# The replay plays an ordinary (non-conductor) event, so the Linux suites are
+# reached through ``tests-standard`` — the complement lane that calls the real
+# tests.yml. The conductor variant (``tests`` -> conductor-tests.yml, conductor
+# PRs only) is pinned by tests/ci/test_classify_changes.py's real-update table.
 _CONSUMERS: dict[str, tuple[tuple[str, ...], ...]] = {
     "e2e_upgrade": (
-        ("tests", "e2e-upgrade-plan"),
-        ("tests", "e2e-upgrade"),
+        ("tests-standard", "e2e-upgrade-plan"),
+        ("tests-standard", "e2e-upgrade"),
         ("tests-os", "install-update-e2e", "install-update"),
     ),
-    "e2e": (("tests", "e2e"), ("tests-os", "e2e-windows")),
+    "e2e": (("tests-standard", "e2e"), ("tests-os", "e2e-windows")),
     "e2e_desktop_update": (("e2e-desktop-update", "update"),),
 }
 
@@ -264,7 +276,7 @@ def test_replay_evaluator_follows_actions_semantics():
     assert gha.render("${{ inputs.flag && '1' || '' }}", ctx) == "1"
     assert gha.render("${{ inputs.missing && '1' || '' }}", ctx) == ""
     with pytest.raises(gha.Unsupported):
-        gha.condition("hashFiles('x') != ''", ctx)  # unmodelled: fail, never guess
+        gha.condition("sha256('x') != ''", ctx)  # unmodelled: fail, never guess
 
 
 @pytest.mark.parametrize("combo", list(itertools.product((False, True), repeat=len(_GATED))),
@@ -386,7 +398,7 @@ def test_every_detect_output_a_lane_sets_is_consumed_by_some_job():
 
 # The job (path from ci.yaml down) that runs each lane's consumers of a shared fixture.
 _FIXTURE_LANE_JOBS: dict[str, tuple[str, ...]] = {
-    "python": ("tests", "test"),  # pytest on Linux (marker.sh corpus included)
+    "python": ("tests-standard", "test"),  # pytest on Linux (marker.sh corpus included)
     "rust": ("rust-tests", "bootstrap-installer"),  # cargo test of the Tauri crate
     "frontend": ("js-tests", "check"),  # apps/desktop `check` -> vitest --project electron
 }
@@ -793,8 +805,8 @@ def test_desktop_build_scripts_start_the_desktop_update_suite():
 # -- strict acceptance: the dispatch input reaches every E2E suite's environment ------------
 
 _STRICT_STEPS = (
-    (("tests", "e2e"), ".github/workflows/tests.yml", "e2e", "Run e2e tests"),
-    (("tests", "e2e-upgrade"), ".github/workflows/tests.yml", "e2e-upgrade", "Run upgrade e2e tests"),
+    (("tests-standard", "e2e"), ".github/workflows/tests.yml", "e2e", "Run e2e tests"),
+    (("tests-standard", "e2e-upgrade"), ".github/workflows/tests.yml", "e2e-upgrade", "Run upgrade e2e tests"),
     (("tests-os", "e2e-windows"), ".github/workflows/tests-os.yml", "e2e-windows", "Run Windows E2E suite"),
     (("tests-os", "install-update-e2e", "install-update"), ".github/workflows/windows-install-update-e2e.yml",
      "install-update", "Run Windows install + update E2E"),
@@ -827,7 +839,10 @@ def test_pull_requests_and_main_pushes_never_run_e2e(event_name):
     for lane in ("e2e", "e2e_upgrade", "e2e_desktop_update"):
         assert not any(_consumers_reached(run, lane).values()), f"{event_name}: {lane} ran"
     assert "e2e-desktop-core" not in run
-    assert "tests" in run and "tests-os" in run  # the unit lanes still run
+    # The ordinary-PR world runs the real suite (tests.yml) through
+    # tests-standard; the conductor variant must stay off it.
+    assert "tests-standard" in run and "tests-os" in run
+    assert "tests" not in run
 
 
 def test_windows_install_update_dispatch_alone_sets_strict():
