@@ -25,7 +25,7 @@ FORBIDDEN_LABEL_PATTERNS = (
 # entries that are not labels at all (e.g. container images). We fail CLOSED
 # on the forbidden patterns above rather than enumerating allowed labels.
 
-WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 
 
 def _workflow_files() -> list[Path]:
