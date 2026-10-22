@@ -233,10 +233,8 @@ def _frames(buf):
 
 def _wait_open(server_requests, buf=None, timeout=30.0, windows=()):
     """The open request once registered and delivered to the supplied captures
-    (registration precedes the write).
-
-    Generous deadline: the first send() in a process lazily imports the ws/contracts/replay modules,
-    which can take seconds on a loaded CI box when this is the first server request of the run."""
+    (registration precedes the write; generous deadline: the first send()
+    lazily imports ws/contracts/replay, slow on a loaded CI box)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with server_requests._lock:
