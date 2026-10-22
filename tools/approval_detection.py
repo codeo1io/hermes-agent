@@ -1427,6 +1427,121 @@ def _deny_command_variants(command: str):
                 pending.append(payload)
 
 
+_ASSIGNMENT_NAME_VALUE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.+", re.DOTALL)
+_ASSIGNMENT_EXPORT_CARRIERS = frozenset({"export"})
+
+
+def _split_top_level_segments(command: str) -> list[str]:
+    """Split at unquoted ``; & | \n`` so earlier assignments can be tied to later commands."""
+    segments, start, quote, index = [], 0, None, 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote is None:
+            if char in ("'", '"'):
+                quote = char
+            elif char in ";|&\n":
+                segments.append(command[start:index])
+                start = index + 1
+        elif char == quote:
+            quote = None
+        index += 1
+    segments.append(command[start:])
+    return segments
+
+
+def _segment_assignments(segment: str) -> dict[str, str] | None:
+    """Return local assignments when *segment* only assigns (``X=rm`` / ``export X=rm``)."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        return None
+    if tokens and tokens[0] in _ASSIGNMENT_EXPORT_CARRIERS:
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    assignments: dict[str, str] = {}
+    for token in tokens:
+        if _ASSIGNMENT_NAME_VALUE_RE.fullmatch(token) is None:
+            return None
+        name, _, value = token.partition("=")
+        assignments[name] = value
+    return assignments
+
+
+def _expand_assignment_refs(segment: str, assignments: dict[str, str]) -> str:
+    """Substitute ``$NAME``/``${NAME}`` references of locally assigned names.
+
+    Single-quoted text is data (no expansion, as in a real shell); double-quoted
+    references expand in place, keeping their quotes so quoted prose keeps the
+    direct-spelling verdict instead of gaining or losing one.
+    """
+    if "$" not in segment or not assignments:
+        return segment
+    out: list[str] = []
+    quote, index = None, 0
+    while index < len(segment):
+        char = segment[index]
+        if char == "\\" and quote != "'":
+            out.append(segment[index:index + 2])
+            index += 2
+            continue
+        if quote is None and char in ("'", '"'):
+            quote = char
+        elif quote == char:
+            quote = None
+        if char == "$" and quote != "'":
+            name, skip = None, 0
+            if segment.startswith("${", index):
+                end = segment.find("}", index + 2)
+                if end != -1:
+                    candidate = segment[index + 2:end]
+                    if candidate.isidentifier():
+                        name, skip = candidate, end + 1
+            else:
+                match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", segment[index + 1:])
+                if match:
+                    name, skip = match.group(0), index + 1 + match.end()
+            if name in assignments:
+                out.append(assignments[name])
+                index = skip
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _local_assignment_expansion(command: str) -> str | None:
+    """Rewrite assignment-indirected commands to their expanded spelling.
+
+    ``X=rm; \"$X\" -rf /`` becomes ``rm -rf /``: pure-assignment segments (and
+    ``export`` carriers) are collected and dropped, and later segments see their
+    references substituted, so pattern matching reads the command the shell will
+    run instead of the spelling that hides it. Only earlier-segment assignments
+    expand; a same-segment prefix assignment applies after expansion in a real
+    shell and is left alone. Returns ``None`` unless a reference was substituted.
+    """
+    segments = _split_top_level_segments(command)
+    if len(segments) < 2:
+        return None
+    assignments: dict[str, str] = {}
+    kept: list[str] = []
+    substituted = False
+    for segment in segments:
+        local = _segment_assignments(segment)
+        if local is None:
+            expanded = _expand_assignment_refs(segment, assignments)
+            substituted = substituted or expanded != segment
+            kept.append(expanded)
+        else:
+            assignments.update(local)
+    if not substituted or not kept:
+        return None
+    return "; ".join(kept)
+
+
 def _command_detection_variants(command: str):
     # Mask quoted newlines BEFORE normalization: normalization strips escapes (\" -> ") and ""
     # pairs, corrupting quote tracking (`echo "a\""` becomes an unterminated quote) so masking
@@ -1480,6 +1595,12 @@ def _command_detection_variants(command: str):
     faithful = _normalize_command_for_detection(_mark_command_starts(_mask_quoted_newlines(command), marker=" \n"))
     if fresh(faithful):
         yield faithful
+    # Assignment indirection: `X=rm; "$X" -rf /` must read as its expansion so the
+    # approval gate sees the command the shell will run, not the spelling that hides it.
+    if (expanded := _local_assignment_expansion(_mask_quoted_newlines(command))) is not None:
+        expanded_normalized = _normalize_command_for_detection(expanded)
+        if fresh(expanded_normalized):
+            yield expanded_normalized
     # Quoting/escaping can spell an executable in pieces (r\m, r''m). Keep that deobfuscation scoped
     # to command words so arguments don't false-positive.
     # One variant with EVERY command word deobfuscated, not one full-length variant per word: a heredoc
