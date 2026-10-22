@@ -31,6 +31,10 @@ name: OS-specific tests
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Commit to test and build. Empty keeps the triggering commit.
+        type: string
+        default: ''
       desktop_updater:
         description: >-
           Run the Windows desktop-update hand-off integration tests
@@ -68,8 +72,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-os-${{ github.ref_type == 'tag' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  group: tests-os-${{ (github.ref_type == 'tag' || inputs.commit != '') && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' && inputs.commit == '' }}
 
 jobs:
   os-tests:
@@ -80,7 +84,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Two slices on the free standard runner (3 cores, 3 workers): one lane ran
+          # Two slices: on the old free standard runner (3 cores, 3 workers) one lane ran
           # ~7.5 min and became the slowest required job once the Linux suite split.
           - name: macOS-only tests (1/2)
             runner: macos-latest
@@ -93,13 +97,15 @@ jobs:
           - name: Windows-only tests
             runner: windows-latest
             marker: windows
-          # Fork: upstream's arm64 lane (windows-latest-32-arm-core) is dropped —
+          # Fork: upstream's arm64 lane (windows-latest) is dropped —
           # larger-runner labels are billing-blocked on this public fork and no
           # hosted arm64 Windows label is pinned here; the x64 lane above runs
           # the same ``-m platforms`` selection.
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       # No arm64 wheels for some of the extras below: PM builds them from sdist.
       - name: Set up native ARM64 build dependencies
@@ -213,6 +219,7 @@ jobs:
     if: inputs.e2e_upgrade
     uses: ./.github/workflows/windows-install-update-e2e.yml
     with:
+      commit: ${{ inputs.commit }}
       strict_acceptance: ${{ inputs.strict_acceptance }}
 
   e2e-windows:
@@ -230,14 +237,16 @@ jobs:
     # xfails (per-file KNOWN tables), so a fix turns this job red until the entry goes.
     name: Windows E2E (real processes)
     if: inputs.e2e
-    # Fork: hosted windows-latest (was windows-latest-32-core, a paid larger
+    # Fork: hosted windows-latest (was windows-latest, a paid larger
     # runner). On the 4-vCPU image the suite step took 153-171 s (job 4.7-5.6
     # min) with headroom against scheduling-starved timeouts.
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
       - name: Checkout code
-        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
 
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm

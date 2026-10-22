@@ -29,12 +29,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Fork: hosted windows-latest (was windows-latest-32-arm-core x2, a paid
+        # Fork: hosted windows-latest (was windows-latest x2, a paid
         # larger runner, billing-blocked here — upstream matrix listed the arm
         # SKU twice; the arm lane is dropped per fork doctrine, tests-os.yml).
         runner: [windows-latest]
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-pm

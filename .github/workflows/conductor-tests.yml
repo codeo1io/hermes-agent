@@ -203,7 +203,7 @@ jobs:
     # `tests/e2e/core/*`, and the repo's own e2e lane runs exactly this
     # selection (minus core/upgrade). The runner-based invocation (not bare
     # pytest) keeps per-file subprocess isolation, bounded workers, and the
-    # per-file timeout/retry budget. tests.yml pins ubuntu-latest-32-core
+    # per-file timeout/retry budget. tests.yml pins ubuntu-latest
     # for this lane; this variant runs the same selection (same Node 26 +
     # Ink TUI build, same HERMES_E2E_REQUIRE_TUI=1, same WAL guard, same
     # zero retries) on a 4-vCPU hosted runner with 4 workers / 900s files.
