@@ -31,9 +31,10 @@ sleep() { return 1; }
 '''
 
 
-# Workflows use Blacksmith's drop-in checkout (same inputs, cached on its runners;
-# it also works on the remaining GitHub-hosted jobs); a few still use actions/checkout.
-CHECKOUT_ACTIONS = ("actions/checkout@", "useblacksmith/checkout@")
+# The fork runs GitHub-hosted runners only (#270): actions/checkout everywhere.
+# (Upstream's Blacksmith drop-in checkout was swept in the v0.22.4 adoption —
+# billing-blocked third-party runners are fork-forbidden labels.)
+CHECKOUT_ACTIONS = ("actions/checkout@",)
 
 
 def is_checkout(step: dict) -> bool:
