@@ -471,6 +471,7 @@ jobs:
     needs:
       - detect
       - tests
+      - tests-standard
       - tests-os
       - lint
       - js-tests

@@ -605,7 +605,12 @@ def _iter_if_expressions(job: object):
 # (caller workflow, job, called workflow, lane input) for every real-update
 # suite: each runs on a PR exactly when its lane fires and then gates the merge.
 _REAL_UPDATE_LANES = (
-    ("ci.yaml", "tests", "tests.yml", "e2e_upgrade"),
+    # Fork shape: the `tests` job reroutes conductor validation PRs to
+    # conductor-tests.yml (fingerprinted by head_ref + title prefixes); every
+    # other event lands on `tests-standard`, which runs the exact workflow
+    # main ships — tests.yml. Both are lane-gated and both gate the merge.
+    ("ci.yaml", "tests", "conductor-tests.yml", "e2e_upgrade"),
+    ("ci.yaml", "tests-standard", "tests.yml", "e2e_upgrade"),
     ("ci.yaml", "tests-os", "tests-os.yml", "e2e_upgrade"),
     ("ci.yaml", "e2e-desktop-update", "e2e-desktop-update.yml", "e2e_desktop_update"),
     ("tests-os.yml", "install-update-e2e", "windows-install-update-e2e.yml", "e2e_upgrade"),
@@ -633,6 +638,26 @@ def test_real_update_suites_gate_the_merge_when_their_lane_fires(caller, job, ca
     assert root in ci["jobs"]["all-checks-pass"]["needs"]
     for name, body in _yaml(f".github/workflows/{called}")["jobs"].items():
         assert not body.get("continue-on-error"), f"{called}::{name} cannot fail the merge"
+
+
+def test_ci_python_lanes_all_gate_the_merge():
+    """Every ci.yaml job that runs Python tests must be a need of all-checks-pass.
+
+    The tests-standard split (b28d2c9dde) forgot to add itself to the gate: for
+    eight months an ordinary PR's Python tests ran but never blocked the merge —
+    invisible on main because skipped lanes report neutral. Pins the whole
+    family so the next lane split cannot repeat it.
+    """
+    ci = _yaml(".github/workflows/ci.yaml")
+    python_jobs = [
+        name
+        for name, body in ci["jobs"].items()
+        if isinstance(body, dict) and body.get("uses", "").endswith(("tests.yml", "tests-os.yml"))
+    ]
+    assert {"tests", "tests-standard", "tests-os"} <= set(python_jobs)
+    needs = ci["jobs"]["all-checks-pass"]["needs"]
+    for job in python_jobs:
+        assert job in needs, f"ci.yaml::{job} runs tests but never gates the merge"
 
 
 def test_remote_backends_lane_runs_test_files_that_exist_and_start_it():
