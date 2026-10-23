@@ -192,7 +192,12 @@ jobs:
         uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
         with:
           ref: ${{ inputs.commit }}
-          fetch-depth: 2 # the merge commit and its first parent (the base branch tip)
+          # Full history + tags: the ratchet's release-adoption demotion detects
+          # adoptions by a vX.Y.Z tag reachable from HEAD^2 but not HEAD^1 — a
+          # shallow untagged checkout can never see that (same shape the
+          # plugin-catalog gate needs; see plugin-catalog-ci.yml).
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: ./.github/actions/setup-pm
         with:
