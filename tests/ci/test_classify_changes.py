@@ -585,8 +585,14 @@ def _iter_if_expressions(job: object):
 
 # (caller workflow, job, called workflow, lane input) for every real-update
 # suite: each runs on a PR exactly when its lane fires and then gates the merge.
+# ci.yaml splits the Python-test lane in two: `tests` reroutes conductor
+# ephemeral-validation PRs to the hosted-runner variant, while
+# `tests-standard` runs the workflow main ships (tests.yml) for human PRs
+# and pushes. Both must reach all-checks-pass or the real suite cannot
+# fail a merge.
 _REAL_UPDATE_LANES = (
-    ("ci.yaml", "tests", "tests.yml", "e2e_upgrade"),
+    ("ci.yaml", "tests", "conductor-tests.yml", "e2e_upgrade"),
+    ("ci.yaml", "tests-standard", "tests.yml", "e2e_upgrade"),
     ("ci.yaml", "tests-os", "tests-os.yml", "e2e_upgrade"),
     ("ci.yaml", "e2e-desktop-update", "e2e-desktop-update.yml", "e2e_desktop_update"),
     ("tests-os.yml", "install-update-e2e", "windows-install-update-e2e.yml", "e2e_upgrade"),
