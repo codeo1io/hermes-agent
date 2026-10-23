@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-17T11:22:42Z",
+  "updated_at": "2026-10-23T02:48:40Z",
   "metadata": {
     "source": "hermes-agent repo",
     "docs": "https://hermes-agent.nousresearch.com/docs/reference/model-catalog"
@@ -313,6 +313,9 @@
         "note": "The entry labeled \"default\": true is the model Hermes silently lands on when the user never picked one."
       },
       "models": [
+        {
+          "id": "x-ai/grok-4.7"
+        },
         {
           "id": "anthropic/claude-fable-5.1"
         },
