@@ -255,7 +255,12 @@ def test_first_launch_syncs_without_marker_then_uses_completion_fact(tmp_path, m
     root = tmp_path / "checkout"
     root.mkdir()
     (root / ".git").mkdir()
-    (root / "pyproject.toml").write_text("[project]\nname='example'\n")
+    # A real checkout declares the ``all`` extra; the launch sync's default
+    # selection legitimately leads with it only when the root declares it.
+    (root / "pyproject.toml").write_text(
+        "[project]\nname='example'\n"
+        "[project.optional-dependencies]\nall=[]\n"
+    )
     (root / "uv.lock").write_text("lock\n")
     (root / "install-stamp.json").write_text(json.dumps({"updateMechanism": "self"}))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -359,7 +364,13 @@ def test_blessed_legacy_install_is_adopted_before_sync(tmp_path, monkeypatch, co
     root = home / "hermes-agent"
     root.mkdir(parents=True)
     (root / ".git").mkdir()
-    (root / "pyproject.toml").write_text("[project]\n")
+    # Real-checkout vocabulary: ``all`` is declared, so adopting it into the
+    # default selection is legitimate (pm.extras refuses to fabricate it
+    # for roots that declare no such extra).
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        "[project.optional-dependencies]\nall=[]\n"
+    )
     monkeypatch.setattr(pm, "venv_is_current", lambda **kw: False)
     calls = []
     monkeypatch.setattr(pm, "sync_venv", lambda *args, **kw: calls.append(args))
