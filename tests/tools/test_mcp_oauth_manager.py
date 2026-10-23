@@ -196,6 +196,9 @@ def _fake_response(status, url, body):
     resp = MagicMock()
     resp.status_code = status
     resp.request = SimpleNamespace(url=url, method="POST")
+    # ``next_request=None`` matters: mcp 2.2.0+'s auth flow routes responses through
+    # ``shared/_httpx_utils.next_request_within_origin`` / RedirectAwareAuth, which
+    # follows any truthy next_request (and compares its method to the sent request's).
     resp.next_request = None
 
     async def _aread():

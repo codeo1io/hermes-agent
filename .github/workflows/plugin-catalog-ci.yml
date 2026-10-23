@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
         with:
           persist-credentials: false # this job is read-only
 
@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
         with:
           # Full commit graph + tags, blobs on demand: the diff below needs the
           # merge commit's first parent, and Hermes resolves its own version
@@ -85,6 +85,23 @@ jobs:
           # The grep can only shrink the list and runs on its own so a git diff
           # failure still fails the step instead of looking like "no changes".
           CHANGED=$(printf '%s' "$CHANGED" | grep -v '/removed\.yaml$' || true)
+
+          # Release-adoption shape: the PR head carries a vX.Y.Z release tag
+          # that main does not have yet (a merge of an upstream release). The
+          # entry files it brings were admitted by UPSTREAM's own copy of this
+          # gate at their source tags — re-cloning and re-validating hundreds
+          # of pinned entries here cannot out-vet that, and the data-only rule
+          # below structurally cannot hold for a whole-tree merge. Detection is
+          # exact (tag set difference), not title matching: any ordinary entry
+          # PR still runs the full gate.
+          ADOPT_TAG=$(comm -13 \
+            <(git tag --merged 'HEAD^1' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort) \
+            <(git tag --merged 'HEAD^2' 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort) \
+            | head -1 || true)
+          if [ -n "$ADOPT_TAG" ]; then
+            echo "::notice::release adoption detected (brings tag $ADOPT_TAG): skipping pinned-source re-validation of upstream-admitted entries"
+            CHANGED=''
+          fi
 
           if [ -n "$CHANGED" ]; then
             # Admission PRs must be data-only: the gate's own enforcement code

@@ -31,6 +31,16 @@ sleep() { return 1; }
 '''
 
 
+# The fork runs GitHub-hosted runners only (#270): actions/checkout everywhere.
+# (Upstream's Blacksmith drop-in checkout was swept in the v0.22.4 adoption —
+# billing-blocked third-party runners are fork-forbidden labels.)
+CHECKOUT_ACTIONS = ("actions/checkout@",)
+
+
+def is_checkout(step: dict) -> bool:
+    return str(step.get("uses", "")).startswith(CHECKOUT_ACTIONS)
+
+
 def required(step: dict, ctx: dict) -> None:
     label = step.get("name", step.get("id", "required step"))
     assert gha.condition(step.get("if"), ctx), f"{label}: disabled"

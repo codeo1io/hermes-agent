@@ -48,12 +48,13 @@ DEFAULT = {
     "desktop_updater": True,
     "rust": True,
     "remote_backends": True,
+    "catalog": True,
 }
 
 SLOW_LANES = {"docker", "nix", "e2e", "e2e_upgrade", "e2e_desktop_core", "e2e_desktop_update"}
 
 
-def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, docker_meta=False, python_prod=None, nix=False, docker=None, e2e=False, e2e_upgrade=False, e2e_desktop_core=False, e2e_desktop_update=False, remote_backends=False) -> dict[str, bool]:
+def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_lock=False, npm_lock=False, bootstrap=False, desktop_updater=False, rust=False, docker_meta=False, python_prod=None, nix=False, docker=None, e2e=False, e2e_upgrade=False, e2e_desktop_core=False, e2e_desktop_update=False, remote_backends=False, catalog=False) -> dict[str, bool]:
     # python_prod tracks python except for tests-only diffs; default it to
     # python so the majority of cases don't need to spell it out.
     #
@@ -82,6 +83,7 @@ def _lanes(python=False, frontend=False, site=False, scan=False, deps=False, uv_
         "desktop_updater": desktop_updater,
         "rust": rust,
         "remote_backends": remote_backends,
+        "catalog": catalog,
     }
 
 
@@ -402,6 +404,10 @@ CASES = {
         ["apps/desktop/e2e/core/transcript-integrity.spec.ts"],
         _lanes(frontend=True, e2e_desktop_core=True),
     ),
+    "desktop queue panel (lost-turn card) → desktop core": (
+        ["apps/desktop/src/app/chat/composer/queue-panel.tsx"],
+        _lanes(frontend=True, e2e_desktop_core=True),
+    ),
     "desktop profile rail → desktop core": (
         ["apps/desktop/src/app/chat/sidebar/profile-switcher.tsx"],
         _lanes(frontend=True, e2e_desktop_core=True),
@@ -418,6 +424,19 @@ CASES = {
     "image tests → docker": (
         ["tests/docker/test_image_smoke.py"],
         _lanes(python=True, python_prod=False, scan=True, docker=True),
+    ),
+    # Catalog entry data runs the catalog tests INSTEAD of the Python suite.
+    "catalog entry → catalog only": (["plugin-catalog/foo.yaml"], _lanes(catalog=True)),
+    "catalog entry + email map → catalog only": (
+        ["plugin-catalog/foo.yaml", "contributors/emails/a@example.com"],
+        _lanes(catalog=True),
+    ),
+    # The rules README is mirrored by a docs-page test, so it keeps the suite.
+    "catalog README → python": (["plugin-catalog/README.md"], _lanes(python=True)),
+    # Any code next to the entry brings the full suite back.
+    "catalog entry + code → python and catalog": (
+        ["plugin-catalog/foo.yaml", "agent/display.py"],
+        _lanes(python=True, scan=True, catalog=True),
     ),
     # Fail open: CI-config / empty / blank diffs run everything.
     ".github change → all": ([".github/workflows/tests.yml"], DEFAULT),
@@ -509,7 +528,7 @@ _DESKTOP_UPDATE_PATH_FILES = (
     "apps/desktop/electron/handoff-result.ts",
     "apps/desktop/electron/desktop-installation.ts",
     "apps/desktop/electron/backend-discovery.ts",
-    "apps/desktop/electron/host-backend-attach.ts",
+    "apps/desktop/electron/local-gateway.ts",
     "scripts/desktop-update/windows.ps1",
     "scripts/desktop-update/posix.sh",
     "hermes_cli/desktop_update_verify.py",
@@ -586,12 +605,19 @@ def _iter_if_expressions(job: object):
 # (caller workflow, job, called workflow, lane input) for every real-update
 # suite: each runs on a PR exactly when its lane fires and then gates the merge.
 _REAL_UPDATE_LANES = (
-    ("ci.yaml", "tests", "tests.yml", "e2e_upgrade"),
+    # Fork shape: the `tests` job reroutes conductor validation PRs to
+    # conductor-tests.yml (fingerprinted by head_ref + title prefixes); every
+    # other event lands on `tests-standard`, which runs the exact workflow
+    # main ships — tests.yml. Both are lane-gated and both gate the merge.
+    ("ci.yaml", "tests", "conductor-tests.yml", "e2e_upgrade"),
+    ("ci.yaml", "tests-standard", "tests.yml", "e2e_upgrade"),
     ("ci.yaml", "tests-os", "tests-os.yml", "e2e_upgrade"),
     ("ci.yaml", "e2e-desktop-update", "e2e-desktop-update.yml", "e2e_desktop_update"),
     ("tests-os.yml", "install-update-e2e", "windows-install-update-e2e.yml", "e2e_upgrade"),
     # Not an update suite, but the same contract: the real SSH/Docker backend lane.
     ("ci.yaml", "remote-backends", "remote-backends.yml", "remote_backends"),
+    # Catalog-only PRs skip the suite, so their catalog tests must gate the merge.
+    ("ci.yaml", "catalog-tests", "catalog-tests.yml", "catalog"),
 )
 
 
@@ -612,6 +638,26 @@ def test_real_update_suites_gate_the_merge_when_their_lane_fires(caller, job, ca
     assert root in ci["jobs"]["all-checks-pass"]["needs"]
     for name, body in _yaml(f".github/workflows/{called}")["jobs"].items():
         assert not body.get("continue-on-error"), f"{called}::{name} cannot fail the merge"
+
+
+def test_ci_python_lanes_all_gate_the_merge():
+    """Every ci.yaml job that runs Python tests must be a need of all-checks-pass.
+
+    The tests-standard split (b28d2c9dde) forgot to add itself to the gate: for
+    eight months an ordinary PR's Python tests ran but never blocked the merge —
+    invisible on main because skipped lanes report neutral. Pins the whole
+    family so the next lane split cannot repeat it.
+    """
+    ci = _yaml(".github/workflows/ci.yaml")
+    python_jobs = [
+        name
+        for name, body in ci["jobs"].items()
+        if isinstance(body, dict) and body.get("uses", "").endswith(("tests.yml", "tests-os.yml"))
+    ]
+    assert {"tests", "tests-standard", "tests-os"} <= set(python_jobs)
+    needs = ci["jobs"]["all-checks-pass"]["needs"]
+    for job in python_jobs:
+        assert job in needs, f"ci.yaml::{job} runs tests but never gates the merge"
 
 
 def test_remote_backends_lane_runs_test_files_that_exist_and_start_it():
@@ -742,3 +788,22 @@ def test_pull_request_labels_prefers_the_live_labels_over_the_replayed_event(tmp
     monkeypatch.setattr(_mod.subprocess, "run", lambda *a, **k: failed)
     event.write_text(json.dumps({"pull_request": {"number": 7, "labels": [{"name": "run-e2e"}]}}), encoding="utf-8")
     assert pull_request_labels() == ["run-e2e"]
+
+
+def test_catalog_lane_runs_every_test_that_reads_the_shipped_catalog():
+    """A catalog-only PR runs only the lane's discovered files, so a test that
+    reads the real ``plugin-catalog/`` must be among them."""
+    spec = importlib.util.spec_from_file_location("catalog_test_files", _REPO / "scripts/ci/catalog_test_files.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    files = set(mod.catalog_test_files())
+    for must in (
+        "tests/hermes_cli/test_plugin_catalog.py",
+        "tests/scripts/test_validate_plugin_catalog.py",
+        "tests/scripts/test_contributor_map.py",
+        "tests/website/test_extract_plugins.py",
+    ):
+        assert must in files
+    assert not any(f.startswith("tests/e2e/") for f in files)
+    text = (_REPO / ".github/workflows/catalog-tests.yml").read_text(encoding="utf-8-sig")
+    assert "scripts/ci/catalog_test_files.py" in text and "scripts/run_tests.sh" in text

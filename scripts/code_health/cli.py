@@ -87,9 +87,16 @@ def _skipped(why: str, as_json: bool) -> None:
 
 
 def run(repo: Path, base: str, head: str | None, as_json: bool = False,
-        switch_rev: str | None = None) -> int:
+        switch_rev: str | None = None, head_commit: str | None = None) -> int:
     """Judge ``head`` against ``base``; the ENFORCEMENT switch is read from ``switch_rev``
-    (default: the base), never from the head under test."""
+    (default: the base), never from the head under test.
+
+    ``head_commit`` is the commit the judged artifact comes from (the working tree's
+    HEAD when ``--head`` is absent, as in CI). Adoption provenance needs a commit:
+    a tree has no parents to test for a release-merge, so without it an adoption's
+    verbatim upstream files could never be demoted. Tree heads (``--staged``) pass
+    ``head_commit=None`` and keep the old no-demotion behavior.
+    """
     started = time.monotonic()
     switch_rev = switch_rev or base
     mode = enforcement(repo, switch_rev)
@@ -110,6 +117,12 @@ def run(repo: Path, base: str, head: str | None, as_json: bool = False,
     head_m = measurer.measure(head, head_paths)
     findings = compare(base_m, head_m, changes)
     apply_allows(findings, head_m)
+    from scripts.code_health.adoption import adoption_parent, demote_adopted
+    # Provenance needs a commit: the CI shape passes no --head (working tree), so
+    # main() resolves HEAD; demotion reads blobs from that same commit when the
+    # tree is absent. A tree head (--staged, --head <tree>) keeps the old shape.
+    provenance = head_commit or (head if head and gitio.commit_or_none(repo, head) else None)
+    demote_adopted(findings, repo, provenance or head, adoption_parent(repo, provenance))
     blocking, advisory = verdict(findings)
     failed = bool(blocking) and mode == "blocking"
     if as_json:
@@ -136,16 +149,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         head = gitio.resolve_tree(repo, args.head) if args.head else None
+        head_commit = gitio.commit_or_none(repo, args.head) if args.head else gitio.commit_or_none(repo, "HEAD")
         if args.report:
             return _report(repo, head)
         if args.base:  # CI: the base is the target branch tip, which also holds the switch
-            return run(repo, gitio.resolve_rev(repo, args.base), head, as_json=args.json)
+            return run(repo, gitio.resolve_rev(repo, args.base), head, as_json=args.json,
+                       head_commit=head_commit)
         # Locally the base is the merge-base, which lags main; the switch comes from the main tip
         # so a flip on main reaches a branch without a rebase. The head never supplies it.
         tip = gitio.commit_or_none(repo, args.head) if args.head else None
-        base = gitio.default_base(repo, tip or "HEAD")
+        base = gitio.default_base(repo, tip or head_commit or "HEAD")
         switch_rev = gitio.commit_or_none(repo, "origin/main") or base
-        return run(repo, base, head, as_json=args.json, switch_rev=switch_rev)
+        return run(repo, base, head, as_json=args.json, switch_rev=switch_rev,
+                   head_commit=head_commit)
     except RuntimeError as exc:
         print(f"code health: {exc}", file=sys.stderr)
         return 2

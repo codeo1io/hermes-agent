@@ -72,7 +72,7 @@ def _message_list(kwargs: dict[str, Any]) -> list:
     return messages if isinstance(messages, list) else []
 
 
-def _usage_summary(response: Any, *, provider: str, api_mode: str) -> Optional[dict[str, Any]]:
+def _usage_summary(response: Any) -> Optional[dict[str, Any]]:
     # Relay paths hand back plain dicts; attribute-style API responses carry
     # ``usage`` directly. Read both or the dict path silently reports no usage.
     if isinstance(response, dict):
@@ -85,7 +85,10 @@ def _usage_summary(response: Any, *, provider: str, api_mode: str) -> Optional[d
 
     from agent.usage_pricing import normalize_usage
 
-    cu = normalize_usage(raw_usage, provider=provider, api_mode=api_mode)
+    # Every auxiliary attempt returns from ``chat.completions.create``: native adapters
+    # (Codex Responses, Anthropic Messages) translate their usage to prompt/completion
+    # tokens first, so the native api_mode/provider shape would read zeros here.
+    cu = normalize_usage(raw_usage, api_mode="chat_completions")
     summary = asdict(cu)
     summary.pop("raw_usage", None)
     summary["prompt_tokens"] = cu.prompt_tokens
@@ -116,8 +119,6 @@ class _AuxCallHooks:
         self, *, aux_task: str, metadata: dict[str, Any], client: Any, kwargs: dict[str, Any],
         provider: str, model: str, api_mode: str, streaming: bool,
     ) -> None:
-        self.provider = provider
-        self.api_mode = api_mode
         self.streaming = streaming
         self.kwargs = kwargs
         self.started_at = time.time()
@@ -180,7 +181,7 @@ class _AuxCallHooks:
             message, finish_reason = _first_choice_message(response)
             content = _field(message, "content") if message is not None else None
             tool_calls = (_field(message, "tool_calls") if message is not None else None) or []
-            usage = _usage_summary(response, provider=self.provider, api_mode=self.api_mode)
+            usage = _usage_summary(response)
             payload.update(
                 finish_reason=finish_reason,
                 response_model=_field(response, "model"),
@@ -194,7 +195,9 @@ class _AuxCallHooks:
                         "tool_calls": tool_calls,
                     },
                     # Mirror of the top-level normalized usage: built from the
-                    # same summary so the two can never drift apart.
+                    # same summary so the two can never drift apart. (The fork's
+                    # one-contract invariant: ``payload.get("usage")`` here would
+                    # read the pre-update payload — mirror always None.)
                     "usage": usage,
                 }),
                 assistant_content_chars=len(content) if isinstance(content, str) else 0,
