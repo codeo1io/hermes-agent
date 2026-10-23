@@ -295,4 +295,15 @@ def legacy_selection(project_root: Path) -> list[str]:
         if any(all(_installed_in(tree, anchor) for anchor in _anchors(extra)) for tree in trees)
         and extra_supported(extra, importable=lambda _anchor: False)
     )
+    # `all` is main-era vocabulary: only a project whose pyproject declares
+    # it (every real hermes checkout) may carry it in the selection. A root
+    # that declares other extras but not `all` (a PM-managed plugin
+    # workspace, an embedded/test core) must not have it fabricated — uv
+    # resolves extras against the workspace's own optional-dependencies and
+    # refuses unknown names.
+    from pm.features import declared_extras
+
+    manifest = root / "pyproject.toml"
+    if manifest.is_file() and "all" not in declared_extras(root):
+        return carried
     return ["all", *carried]

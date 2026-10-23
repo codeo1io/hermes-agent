@@ -241,6 +241,22 @@ def test_legacy_selection_carries_extras_the_main_era_venv_lazily_installed(monk
     assert extras.legacy_selection(tmp_path / "no-venv") == ["all"]
 
 
+def test_legacy_selection_never_fabricates_an_undeclared_all_extra(tmp_path):
+    """A root whose pyproject declares extras but not `all` (a PM-managed
+    plugin workspace, the admission tests' embedded core) must not have
+    `all` fabricated into the selection: uv resolves extras against the
+    workspace's own optional-dependencies and refuses unknown names, so a
+    fabricated `all` fails the whole dependency transaction."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"embedded-core\"\nversion = \"0\"\ndependencies = []\n"
+        "[project.optional-dependencies]\ntelegram = []\n",
+        encoding="utf-8",
+    )
+    site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
+    (site / "telegram").mkdir(parents=True)
+    assert extras.legacy_selection(tmp_path) == ["telegram"]
+
+
 def test_runtime_marker_evaluation_answers_for_the_given_environment():
     """The delegate really evaluates the marker (in PM's runtime interpreter)."""
     import subprocess
