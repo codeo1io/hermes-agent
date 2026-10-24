@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
 
