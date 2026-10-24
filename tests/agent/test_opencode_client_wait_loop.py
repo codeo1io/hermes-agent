@@ -50,6 +50,7 @@ class _ScriptedTransport:
         self._script = list(script)
         self._t0: Optional[float] = None
         self._prompted = False
+        self.prompt_body: Optional[dict] = None
         self.requests: list[tuple[str, str]] = []
 
     def _current(self) -> list[dict]:
@@ -78,6 +79,7 @@ class _ScriptedTransport:
             return 204, ""
         if base_path.startswith("/session/") and base_path.endswith("/prompt_async"):
             # POST prompt_async: drop the baseline state, start the clock.
+            self.prompt_body = body
             self._t0 = time.monotonic()
             self._script.pop(0)
             return 204, ""
@@ -215,3 +217,22 @@ def test_immediate_reply_returns_quickly():
     client = _client(script)
     result = client.run_session_prompt("go", timeout_seconds=15, poll_interval=0.02)
     assert result["text"] == "OK."
+
+
+@pytest.mark.parametrize("agent", ["fixer", "custom-write-agent"])
+def test_hermes_delegate_selects_write_capable_agent(monkeypatch, agent):
+    """Never inherit an OpenCode default coordinator unable to edit code."""
+    if agent == "fixer":
+        monkeypatch.delenv("HERMES_OPENCODE_DELEGATE_AGENT", raising=False)
+    else:
+        monkeypatch.setenv("HERMES_OPENCODE_DELEGATE_AGENT", agent)
+    base = [_msg("msg_base_000001", "user", [{"type": "text", "text": "start"}])]
+    answer = base + [_msg(
+        "msg_live_000002", "assistant",
+        [{"type": "text", "text": "OK."}, {"type": "step-finish", "reason": "stop"}],
+        completed=True,
+    )]
+    client = _client([(base, 0.05), (answer, 999.0)])
+    client.run_session_prompt("fix this", timeout_seconds=15, poll_interval=0.02)
+    assert client._transport.prompt_body["agent"] == agent
+    assert client._transport.prompt_body["parts"][0]["text"] == "fix this"

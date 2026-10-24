@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
 
@@ -519,7 +519,15 @@ class OpenCodeClient:
             self.start(timeout=min(30.0, timeout_seconds))
         baseline_ids = {m.get("info", {}).get("id") for m in self._baseline_messages()}
         path = f"/session/{self.native_session_id}/prompt_async{self._qdir()}"
-        self._request("POST", path, {"parts": [{"type": "text", "text": message}]})
+        # The globally configured default `build` is a read-only coordinator
+        # whose implementation delegate may not exist. Route Hermes coding
+        # work orders to the installed, write-capable fixer agent instead.
+        # A host can override this explicitly when its agent roster differs.
+        delegate_agent = os.environ.get("HERMES_OPENCODE_DELEGATE_AGENT", "fixer").strip() or "fixer"
+        self._request("POST", path, {
+            "agent": delegate_agent,
+            "parts": [{"type": "text", "text": message}],
+        })
         deadline = time.monotonic() + timeout_seconds
         last_snapshot: Optional[tuple] = None
         stable_since: Optional[float] = None
