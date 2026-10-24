@@ -586,7 +586,10 @@ def _iter_if_expressions(job: object):
 # (caller workflow, job, called workflow, lane input) for every real-update
 # suite: each runs on a PR exactly when its lane fires and then gates the merge.
 _REAL_UPDATE_LANES = (
-    ("ci.yaml", "tests", "tests.yml", "e2e_upgrade"),
+    # The conductor reroute (ci.yaml ``tests`` -> conductor-tests.yml) moved
+    # the real update suite to the complement lane ``tests-standard``;
+    # this table pins that the real suite still gates the merge.
+    ("ci.yaml", "tests-standard", "tests.yml", "e2e_upgrade"),
     ("ci.yaml", "tests-os", "tests-os.yml", "e2e_upgrade"),
     ("ci.yaml", "e2e-desktop-update", "e2e-desktop-update.yml", "e2e_desktop_update"),
     ("tests-os.yml", "install-update-e2e", "windows-install-update-e2e.yml", "e2e_upgrade"),

@@ -8,15 +8,18 @@ asserting booleans in isolation. Anything outside the subset raises
 
 Semantics follow the Actions docs: ``&&``/``||`` return an operand, ``!``
 negates truthiness, ``==``/``!=`` compare strings case-insensitively and coerce
-mismatched types to numbers (so ``'true' == true`` is false), and a missing
-property is ``null``.
+mismatched types to numbers (so ``'true' == true`` is false), ``contains`` is
+case-insensitive while ``startsWith``/``endsWith`` are case-sensitive, and a
+missing property is ``null``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+from pathlib import Path
 from typing import Any, Mapping
 
 _TOKEN = re.compile(r"""\s*(?:
@@ -68,6 +71,28 @@ def _number(value: Any) -> float:
         except ValueError:
             return math.nan
     return math.nan
+
+
+def _hash_files(patterns: list[Any]) -> str:
+    """GitHub's hashFiles() for this harness's purposes: ``''`` when no
+    pattern matches anything, otherwise a deterministic digest that changes
+    whenever any matched file's content changes. The exact digest layout
+    differs from the real runner's: this one hashes each file's
+    relative-posix-path, a newline, then the content, and joins the per-file
+    hex digests with ``-``. The routing replay only branches on
+    empty/non-empty and determinism, so no test may pin the exact value.
+    Patterns resolve from the workspace root, which for this harness is the
+    repository checkout (the runner's cwd)."""
+    root = Path.cwd()
+    hashes: list[str] = []
+    for pattern in patterns:
+        matches = sorted(p for p in root.glob(to_string(pattern)) if p.is_file())
+        for path in matches:
+            digest = hashlib.sha256(
+                path.relative_to(root).as_posix().encode() + b"\n" + path.read_bytes()
+            ).hexdigest()
+            hashes.append(digest)
+    return "-".join(hashes)
 
 
 def _equal(a: Any, b: Any) -> bool:
@@ -187,6 +212,28 @@ class _Parser:
             if isinstance(hay, list):
                 return any(_equal(h, needle) for h in hay)
             return to_string(needle).lower() in to_string(hay).lower()
+        if name == "startsWith":
+            hay, needle = args
+            return to_string(hay).startswith(to_string(needle))
+        if name == "endsWith":
+            hay, needle = args
+            return to_string(hay).endswith(to_string(needle))
+        if name == "join":
+            if not args:
+                raise Unsupported(f"join() with no arguments in {self.text!r}")
+            values = [to_string(v) for v in args[0]] if isinstance(args[0], list) else [to_string(args[0])]
+            sep = to_string(args[1]) if len(args) > 1 else ","
+            return sep.join(values)
+        if name == "format":
+            if not args:
+                raise Unsupported(f"format() with no arguments in {self.text!r}")
+            template = to_string(args[0])
+            replaced = template
+            for i, value in enumerate(args[1:]):
+                replaced = replaced.replace("{" + str(i) + "}", to_string(value))
+            return replaced
+        if name == "hashFiles":
+            return _hash_files(args)
         raise Unsupported(f"function {name}() in {self.text!r}")
 
     def lookup(self, path: str) -> Any:
