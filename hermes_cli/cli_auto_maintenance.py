@@ -59,6 +59,15 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _exc:
             logger.debug("Turn-lease sweep skipped: %s", _exc, exc_info=True)
 
+        # Same residue class, same slot: a backend killed without running atexit leaves a
+        # heartbeat row its per-nonce backend_id makes permanent. Its own try so a failing
+        # prune skips neither the sweep above nor the gates below.
+        try:
+            from hermes_state_gateway import _GATEWAY_HEARTBEAT_PRUNE_WINDOW_S
+            session_db.prune_stale_heartbeats(max_age_seconds=_GATEWAY_HEARTBEAT_PRUNE_WINDOW_S)
+        except Exception as _exc:
+            logger.debug("Gateway-heartbeat prune skipped: %s", _exc, exc_info=True)
+
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.

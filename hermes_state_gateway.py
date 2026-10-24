@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -18,6 +19,21 @@ from hermes_state_common import (
 
 # Log-record parity with the origin module (caplog tests pin "hermes_state").
 logger = logging.getLogger("hermes_state")
+
+# Gateway-heartbeat reclaim cadence (see ``prune_stale_heartbeats``): the backstop window any
+# stale row eventually falls to, and the floor past which a THIS-host row whose pid is
+# kernel-provably dead is reclaimed early. Floor = two missed 60 s refreshes (death is proven
+# long before the window) — chosen for residue-clearing cadence, not tuned to any external
+# staleness threshold; rows under the floor keep the orphan sweep's protection grace.
+_GATEWAY_HEARTBEAT_PRUNE_WINDOW_S = 300.0
+_GATEWAY_HEARTBEAT_DEAD_PID_FLOOR_S = 120.0
+
+
+def _heartbeat_local_hostname() -> str:
+    """This host's heartbeat ``host`` value: mirrors ``tui_gateway.session_reaper._reaper_hostname``
+    (the only writer) — only a row written by this host may have its pid probed here, exactly as
+    a foreign PID namespace defers to the TTL backstop in the turn-lease sweep."""
+    return os.uname().nodename if hasattr(os, "uname") else "host"
 
 # Recursive CTE naming a session plus its compression ancestors (rows a
 # resume must keep on one routing peer); branch/delegate/tool/reset rows stop it
@@ -916,17 +932,45 @@ class SessionGatewayMixin:
             "DELETE FROM gateway_heartbeats WHERE backend_id = ?", (str(backend_id),)) > 0
 
     def prune_stale_heartbeats(self, *, max_age_seconds: float) -> list[str]:
-        """Drop heartbeat rows older than the staleness window; return removed backend ids.
-        Safe from any process — only stale rows are touched."""
+        """Drop heartbeat rows whose backend is gone (one write txn); return removed backend ids.
+        Safe from any process — only dead rows are touched.
+
+        Two rules, the turn-lease sweep's shape (residue is not retention). Backstop: a row
+        whose ``last_heartbeat`` is older than ``max_age_seconds`` goes whatever its pid/host —
+        the documented staleness contract; even a wrongly-taken live row self-heals (the next
+        60 s refresh upserts it back). Fast path: past the floor (two missed refreshes) a row
+        on THIS host whose pid is kernel-provably dead is reclaimed before it can age into any
+        staleness threshold — a backend killed without running ``atexit`` (SIGKILL, host
+        outage, user-manager exit) leaves residue its per-nonce ``backend_id`` makes permanent.
+        Fresh rows, foreign-host rows and any probe doubt (a recycled pid reads alive;
+        psutil-less Windows) defer to the backstop: a stalled-but-alive backend must never
+        lose its row early."""
         if max_age_seconds <= 0:
             return []
-        cutoff = time.time() - max_age_seconds
+        from hermes_state import _pid_provably_dead  # sibling late-import of the facade seam
         def _do(conn):
-            cur = conn.execute(
-                "DELETE FROM gateway_heartbeats WHERE last_heartbeat < ? RETURNING backend_id",
-                (cutoff,))
-            return [str(r[0]) for r in cur.fetchall()]
-        return list(self._execute_write(_do) or [])
+            # Retry-safe shape (``_do`` re-runs on write replay): ``now`` and the doomed list
+            # are derived per attempt, local to it.
+            now = time.time()
+            local_host = _heartbeat_local_hostname()
+            removed = [
+                str(r[0]) for r in conn.execute(
+                    "DELETE FROM gateway_heartbeats WHERE last_heartbeat < ? RETURNING backend_id",
+                    (now - max_age_seconds,)).fetchall()]
+            doomed = [
+                str(row["backend_id"]) for row in conn.execute(
+                    "SELECT backend_id, pid, host FROM gateway_heartbeats"
+                    " WHERE last_heartbeat < ?",
+                    (now - _GATEWAY_HEARTBEAT_DEAD_PID_FLOOR_S,))
+                if row["host"] == local_host and _pid_provably_dead(row["pid"])]
+            for backend_id in doomed:
+                conn.execute(
+                    "DELETE FROM gateway_heartbeats WHERE backend_id = ?", (backend_id,))
+            return removed + doomed
+        removed = list(self._execute_write(_do) or [])
+        if removed:
+            logger.debug("Gateway-heartbeat prune reclaimed %d stale row(s)", len(removed))
+        return removed
 
     def list_backend_heartbeats(self) -> list[dict[str, Any]]:
         """Snapshot of every backend heartbeat (diagnostics/tests); fields mirror the table."""

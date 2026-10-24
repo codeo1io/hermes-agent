@@ -138,18 +138,13 @@ class SessionExportTooLargeError(ValueError):
         )
 
 
-def _compression_lock_holder_process_is_dead(holder: str) -> bool:
-    """True only when a ``pid=<n>`` lock holder's local PID is provably gone.
-    Reclaim on kernel proof only: unstructured/same-process holders (another
-    thread's live lease) and any probe doubt keep the lease until TTL expiry
-    (PID reuse must never steal a live lease; a wrongly-kept one self-heals).
-    Foreign/unstamped PID namespaces defer to TTL: see ``hermes_state_pidns``."""
-    match = re.search(r"(?:^|:)pid=(\d+)(?::|$)", holder or "")
-    pid = int(match.group(1)) if match else 0
+def _pid_provably_dead(pid: int) -> bool:
+    """True only when a raw local PID is kernel-provably gone. Any probe doubt reads alive:
+    a recycled PID belongs to a new process and must never look dead, and a wrongly-kept row
+    self-heals at its own TTL backstop. Shared kernel-proof core of the compression-lock /
+    turn-lease holder check and the gateway-heartbeat reclaim."""
     if pid <= 0 or pid == os.getpid():
         return False
-    if not holder_pid_checkable(holder):
-        return False  # foreign / unknown namespace: defer to TTL
     if psutil is not None:
         try:
             return not psutil.pid_exists(pid)  # recycled PIDs read as alive (conservative)
@@ -166,6 +161,21 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
     except (OSError, OverflowError):  # PermissionError is an OSError: alive but foreign
         return False
     return False
+
+
+def _compression_lock_holder_process_is_dead(holder: str) -> bool:
+    """True only when a ``pid=<n>`` lock holder's local PID is provably gone.
+    Reclaim on kernel proof only: unstructured/same-process holders (another
+    thread's live lease) and any probe doubt keep the lease until TTL expiry
+    (PID reuse must never steal a live lease; a wrongly-kept one self-heals).
+    Foreign/unstamped PID namespaces defer to TTL: see ``hermes_state_pidns``."""
+    match = re.search(r"(?:^|:)pid=(\d+)(?::|$)", holder or "")
+    pid = int(match.group(1)) if match else 0
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if not holder_pid_checkable(holder):
+        return False  # foreign / unknown namespace: defer to TTL
+    return _pid_provably_dead(pid)
 
 
 # Billing buckets that aren't a routable provider identity: a session that persisted only
