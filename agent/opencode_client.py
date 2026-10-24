@@ -737,7 +737,7 @@ class OpenCodeClient:
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         return sorted(messages, key=self._message_sort_key)
 
-    def _pending_payload_for(self, session_id: str) -> Optional[dict[str, Any]]:
+    def _pending_payload_for(self, session_id: str) -> dict[str, Any] | None:
         _status, data = self._request("GET", f"/question{self._qdir()}")
         rows = data if isinstance(data, list) else (data or {}).get("data") or []
         for row in rows:
@@ -753,7 +753,7 @@ class OpenCodeClient:
             }
         return None
 
-    def pending_question_payload(self) -> Optional[dict[str, Any]]:
+    def pending_question_payload(self) -> dict[str, Any] | None:
         if not self.native_session_id:
             return None
         return self._pending_payload_for(self.native_session_id)

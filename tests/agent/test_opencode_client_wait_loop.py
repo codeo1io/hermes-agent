@@ -26,7 +26,7 @@ Hermetic: a scripted fake transport serves canned transcripts; no server.
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 
@@ -55,9 +55,9 @@ class _ScriptedTransport:
 
     def __init__(self, script: list[tuple[list[dict], float]]):
         self._script = list(script)
-        self._t0: Optional[float] = None
+        self._t0: float | None = None
         self._prompted = False
-        self.prompt_body: Optional[dict] = None
+        self.prompt_body: dict | None = None
         self.requests: list[tuple[str, str]] = []
 
     def _current(self) -> list[dict]:
@@ -71,7 +71,7 @@ class _ScriptedTransport:
             elapsed -= hold
         return self._script[-1][0]
 
-    def request(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, str]:
+    def request(self, method: str, path: str, body: dict | None = None) -> tuple[int, str]:
         import json as _json
 
         self.requests.append((method, path))
