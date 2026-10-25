@@ -617,7 +617,21 @@ class OpenCodeClient:
             self.start(timeout=min(30.0, timeout_seconds))
         baseline_ids = {m.get("info", {}).get("id") for m in self._baseline_messages()}
         path = f"/session/{self.native_session_id}/prompt_async{self._qdir()}"
-        self._request("POST", path, {"parts": [{"type": "text", "text": message}]})
+        # The globally configured default `build` is a read-only coordinator
+        # whose implementation delegate may not exist. Route Hermes coding
+        # work orders to the installed, write-capable fixer agent instead.
+        # A host can override this explicitly when its agent roster differs.
+        delegate_agent = (
+            os.environ.get("HERMES_OPENCODE_DELEGATE_AGENT", "fixer").strip() or "fixer"
+        )
+        self._request(
+            "POST",
+            path,
+            {
+                "agent": delegate_agent,
+                "parts": [{"type": "text", "text": message}],
+            },
+        )
         deadline = time.monotonic() + timeout_seconds
         last_snapshot: Optional[tuple] = None
         stable_since: Optional[float] = None
@@ -737,15 +751,32 @@ class OpenCodeClient:
                     # the matching clock. monotonic() would be a different
                     # epoch entirely.
                     open_since = time.time() - (newest_open / 1000.0)
-                # Only content-bearing parts (text/tool) count as a reply; a
-                # bare step-start/step-finish row is protocol scaffolding.
-                has_assistant = any(
+                # Only NON-EMPTY text (or a definitive end-of-turn) is a
+                # reply: glm-5.3 creates the assistant text part EMPTY and
+                # streams content into it seconds later (dev-002
+                # 2026-10-24: part created 01:02:46.367Z empty, filled
+                # 01:03:02.901Z — the old check counted the empty part as
+                # content and raised 3.7s before the fill). An empty text
+                # part is a streaming placeholder, not a reply.
+                has_reply_text = any(
                     (m.get("info") or {}).get("role") == "assistant"
                     and any(
-                        (p or {}).get("type") in ("text", "tool")
+                        (p or {}).get("type") == "text"
+                        and str(p.get("text") or "").strip()
                         for p in (m.get("parts") or [])
                     )
                     for m in fresh
+                )
+                # Definitive end-of-turn: every fresh assistant row carries
+                # info.time.completed and nothing is running — the server has
+                # stamped the step finished, so stability is real completion
+                # even though no text was ever produced (tool-only turn).
+                fresh_assistant = [
+                    m for m in fresh if (m.get("info") or {}).get("role") == "assistant"
+                ]
+                all_steps_completed = bool(fresh_assistant) and all(
+                    ((m.get("info") or {}).get("time") or {}).get("completed")
+                    for m in fresh_assistant
                 )
                 # Idle events can be observed before the transcript fetch
                 # below reflects them; give the message endpoint a short
@@ -799,7 +830,7 @@ class OpenCodeClient:
                 if completed or (
                     stable
                     and fresh
-                    and has_assistant
+                    and (has_reply_text or all_steps_completed)
                     and not tools_running
                     and not generating_veto
                     and not self._pending_questions()
@@ -837,6 +868,17 @@ class OpenCodeClient:
                                 "state": {"sessionId": self.native_session_id},
                                 "duration_s": time.monotonic() - started,
                             }
+                    # Genuinely empty turn. Abort the native session BEFORE
+                    # detaching: dev-002 (2026-10-24) kept generating for 12+
+                    # minutes and finally asked a native question nobody would
+                    # ever answer, because the bare raise left the server-side
+                    # agent running on a session no client was watching.
+                    try:
+                        self.abort(timeout=10.0)
+                    except Exception:
+                        logger.debug(
+                            "opencode abort on empty reply failed", exc_info=True
+                        )
                     raise RuntimeError(
                         "OpenCode turn ended without an assistant text reply "
                         "(a pending question may have been rejected)"
@@ -899,7 +941,7 @@ class OpenCodeClient:
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         return sorted(messages, key=self._message_sort_key)
 
-    def _pending_payload_for(self, session_id: str) -> Optional[dict[str, Any]]:
+    def _pending_payload_for(self, session_id: str) -> dict[str, Any] | None:
         _status, data = self._request("GET", f"/question{self._qdir()}")
         rows = data if isinstance(data, list) else (data or {}).get("data") or []
         for row in rows:
@@ -919,7 +961,7 @@ class OpenCodeClient:
             }
         return None
 
-    def pending_question_payload(self) -> Optional[dict[str, Any]]:
+    def pending_question_payload(self) -> dict[str, Any] | None:
         if not self.native_session_id:
             return None
         return self._pending_payload_for(self.native_session_id)
