@@ -38,9 +38,12 @@ logger = logging.getLogger(__name__)
 # Answerer contract shared with the Pi backend: (method, question, options) -> str | None
 QuestionAnswerer = Callable[[str, str, list[str]], Optional[str]]
 
-_DEFAULT_READY_TIMEOUT = float(
-    os.environ.get("HERMES_OPENCODE_READY_TIMEOUT", "90") or 90
-)
+# Readiness gate for a spawned ``opencode serve``: cold boots measured 14-29s
+# live (plugin + provider init), so the historical hard-coded 30s gate aborted
+# delegate sessions at startup. Plain constant, not an env knob: the repo
+# rejects new HERMES_* behaviour env vars (contribution rubric); tests tune
+# these via monkeypatch.
+_DEFAULT_READY_TIMEOUT = 90.0
 _DEFAULT_POLL_INTERVAL = 0.5
 # Post-question continuation window: how long after answering a question the
 # client must treat idle/stable-without-text as PREMATURE completion (the
@@ -48,18 +51,14 @@ _DEFAULT_POLL_INTERVAL = 0.5
 # generously — glm-5.3 sat 40+ seconds between question-answer and final
 # text in the live failure — while staying well under typical phase budgets
 # so a genuinely dead continuation still surfaces within one window.
-_POST_QUESTION_GRACE_SECONDS = float(
-    os.environ.get("HERMES_OPENCODE_POST_QUESTION_GRACE_SECONDS", "90")
-)
+_POST_QUESTION_GRACE_SECONDS = 90.0
 # Bounded legacy fallback for transports that never stamp
 # ``info.time.completed``: after an open assistant message has sat this long
 # on a fully stable transcript with nothing running, accept the stable exit
 # instead of holding the veto until the caller's deadline. Stamp-stamping
 # transports (glmplus/OpenCode 1.19.4 verified live) release the veto the
 # moment the real turn ends, so this only gates the legacy path.
-_STAMPLESS_GENERATION_FALLBACK_SECONDS = float(
-    os.environ.get("HERMES_OPENCODE_STAMPLESS_FALLBACK_SECONDS", "120")
-)
+_STAMPLESS_GENERATION_FALLBACK_SECONDS = 120.0
 
 
 class _Transport(Protocol):
@@ -606,6 +605,33 @@ class OpenCodeClient:
             r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL
         ).strip()
 
+    @staticmethod
+    def _open_message_age_seconds(fresh: list[dict]) -> Optional[float]:
+        """Age of the newest still-open assistant message, in seconds.
+
+        2026-10-24 live repro ses_e8fbd486bffeEijK4IE6BKLPDg: multi-step
+        turns go QUIET BETWEEN STEPS — step N completes with its stamp,
+        OpenCode creates step N+1's empty assistant row while the provider
+        call (rate-limit recovery included) takes tens of seconds — and the
+        stability window then lapses mid-turn. The open message IS the
+        in-flight generation signal, and its age gates the bounded legacy
+        fallback. ``time.created`` is a wall-clock epoch (ms), so the age is
+        measured against ``time.time()``.
+        """
+        open_rows = [
+            m
+            for m in fresh
+            if (m.get("info") or {}).get("role") == "assistant"
+            and not ((m.get("info") or {}).get("time") or {}).get("completed")
+        ]
+        if not open_rows:
+            return None
+        newest_open = max(
+            ((m.get("info") or {}).get("time") or {}).get("created") or 0
+            for m in open_rows
+        )
+        return time.time() - (newest_open / 1000.0)
+
     def run_session_prompt(
         self,
         message: str,
@@ -729,28 +755,7 @@ class OpenCodeClient:
                     and not ((m.get("info") or {}).get("time") or {}).get("completed")
                     for m in fresh
                 )
-                # Track how long the newest open assistant message has sat on
-                # an unchanged transcript with nothing running (2026-10-24
-                # live repro ses_e8fbd486bffeEijK4IE6BKLPDg): multi-step turns
-                # go QUIET BETWEEN STEPS — step N completes with its stamp,
-                # OpenCode creates step N+1's empty assistant row while the
-                # provider call (rate-limit recovery included) takes tens of
-                # seconds — and the stability window then lapses mid-turn.
-                # The open message IS the in-flight generation signal.
-                open_since: Optional[float] = None
-                if generating:
-                    newest_open = max(
-                        ((m.get("info") or {}).get("time") or {}).get("created") or 0
-                        for m in fresh
-                        if (m.get("info") or {}).get("role") == "assistant"
-                        and not ((m.get("info") or {}).get("time") or {}).get(
-                            "completed"
-                        )
-                    )
-                    # time.created is a wall-clock epoch (ms); time.time() is
-                    # the matching clock. monotonic() would be a different
-                    # epoch entirely.
-                    open_since = time.time() - (newest_open / 1000.0)
+                open_since = self._open_message_age_seconds(fresh)
                 # Only NON-EMPTY text (or a definitive end-of-turn) is a
                 # reply: glm-5.3 creates the assistant text part EMPTY and
                 # streams content into it seconds later (dev-002
