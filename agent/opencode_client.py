@@ -32,6 +32,7 @@ import urllib.request
 from typing import Any, Callable, Optional, Protocol
 
 from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
+from agent.delegate_start_budget import bootstrap_stage_budgets
 
 logger = logging.getLogger(__name__)
 
@@ -172,30 +173,58 @@ def _terminate_server_process(handle: _ServerHandle) -> None:
         proc.wait(timeout=5)
 
 
-def _wait_ready(base_url: str, timeout: float) -> None:
-    deadline = time.monotonic() + timeout
+def _wait_ready(
+    base_url: str,
+    timeout: float,
+    stages: list[float] | None = None,
+    proc: Optional[Any] = None,
+) -> None:
+    # Staged readiness ladder (agent/delegate_start_budget.py, the A4 fix the
+    # Pi backend already has): stage 1 keeps the historical 30s wedge-fail
+    # bound, later stages give a slow-but-alive server room to finish booting
+    # (config+LSP+plugin scan takes 40-160s on a loaded host), and the child
+    # is liveness-probed between stages so a crashed serve never burns the
+    # full ladder. `stages=None` keeps the legacy single bounded wait.
     last_error: Optional[Exception] = None
-    while time.monotonic() < deadline:
-        try:
-            transport = _UrllibTransport(base_url, timeout=5.0)
-            status, _text = transport.request("GET", "/session")
-            if status == 200:
-                return
-        except Exception as exc:
-            last_error = exc
-        time.sleep(0.25)
-    raise RuntimeError(f"opencode server not ready at {base_url}: {last_error or 'no response'}")
+    for stage in stages or [timeout]:
+        deadline = time.monotonic() + stage
+        while time.monotonic() < deadline:
+            if proc is not None and proc.poll() is not None:
+                raise RuntimeError(
+                    f"opencode serve exited with code {proc.poll()} before "
+                    f"becoming ready at {base_url}"
+                )
+            try:
+                transport = _UrllibTransport(base_url, timeout=5.0)
+                status, _text = transport.request("GET", "/session")
+                if status == 200:
+                    return
+            except Exception as exc:
+                last_error = exc
+            time.sleep(0.25)
+        # Stage exhausted: fall through to the next stage (a live process
+        # under load gets the full ladder), or raise after the last one.
+    raise RuntimeError(
+        f"opencode server not ready at {base_url}: {last_error or 'no response'}"
+    )
 
 
 def acquire_opencode_server(
     working_directory: str = "",
     ready_timeout: float = _DEFAULT_READY_TIMEOUT,
+    stages: list[float] | None = None,
 ) -> _ServerHandle:
     """Return the ONE shared server handle, spawning it on first use.
 
     ``working_directory`` is accepted for API compatibility but ignored: every
     call is scoped per-request via the ``?directory=`` query parameter, so a
     single long-lived server hosts delegate sessions in any directory.
+
+    ``stages`` carries the staged readiness ladder from
+    ``agent/delegate_start_budget.py`` (A4): a fresh ``opencode serve`` boots
+    in 40-160s on a loaded host (config + LSP + plugin scan), so the legacy
+    fixed 30s gate misclassified every slow-but-alive boot as dead, killed it,
+    and re-spawned another — the exact herd the ladder exists to prevent.
     """
     with _server_lock:
         handle = _servers.get(_SINGLETON_KEY)
@@ -245,7 +274,7 @@ def acquire_opencode_server(
         # connection errors themselves.
         try:
             if handle.proc is not None:
-                _wait_ready(handle.base_url, ready_timeout)
+                _wait_ready(handle.base_url, ready_timeout, stages, handle.proc)
         except Exception:
             if handle.proc is not None:
                 _terminate_server_process(handle)
@@ -316,6 +345,10 @@ class OpenCodeClient:
         self._transport_factory = transport_factory
         self._transport: Optional[_Transport] = None
         self._server_handle: Optional[_ServerHandle] = None
+        # Readiness budget stashed by start() (A4 ladder for the shared
+        # server spawn); defaults reproduce the legacy single 30s wait.
+        self._ready_timeout: float = _DEFAULT_READY_TIMEOUT
+        self._ready_stages: Optional[list[float]] = None
         self.native_session_id: Optional[str] = None
         # Question ids already replied/rejected (SSE watcher + poll loop race).
         self._answered_questions: set = set()
@@ -338,7 +371,11 @@ class OpenCodeClient:
             self._transport = self._transport_factory(self.cwd)
             return self._transport
         if self._server_handle is None:
-            self._server_handle = acquire_opencode_server(working_directory=self.cwd)
+            self._server_handle = acquire_opencode_server(
+                working_directory=self.cwd,
+                ready_timeout=self._ready_timeout,
+                stages=self._ready_stages,
+            )
         self._transport = _UrllibTransport(self._server_handle.base_url)
         return self._transport
 
@@ -358,10 +395,17 @@ class OpenCodeClient:
     def start(
         self, timeout: float = 30.0, stages: list[float] | None = None
     ) -> dict[str, Any]:
-        # `stages` is call-shape parity with PiRPCClient's staged start
-        # handshake (agent/delegate_start_budget.py): the opencode transport
-        # is one bounded HTTP wait with no ladder semantics, so it is
-        # accepted and ignored.
+        # `stages` mirrors PiRPCClient's staged start handshake
+        # (agent/delegate_start_budget.py): the opencode transport is an HTTP
+        # readiness wait rather than an RPC handshake, so the ladder bounds
+        # that wait — stage 1 keeps the fast wedge-fail probe, later stages
+        # let a slow-but-alive `opencode serve` boot (40-160s under load)
+        # instead of being killed and re-spawned (the A4 re-spawn herd).
+        # Stashed BEFORE any request so both paths — fresh start and resume
+        # of a persisted session in a new process — acquire the shared server
+        # through _http() with the same ladder.
+        self._ready_timeout = timeout
+        self._ready_stages = list(stages) if stages is not None else None
         if self.native_session_id:
             # Reopen a persisted session: verify it is still addressable.
             try:
@@ -369,6 +413,19 @@ class OpenCodeClient:
                 return {"sessionId": self.native_session_id}
             except RuntimeError:
                 logger.info("Stored opencode session %s missing; creating a new one", self.native_session_id)
+        if self._server_handle is None and self._transport_factory is None:
+            # Real transport: acquire the shared server NOW (not lazily in
+            # _http()) so the readiness ladder governs the spawn. Injected
+            # transport factories (hermetic tests, custom servers) never
+            # spawn anything.
+            ready_stages = self._ready_stages
+            if ready_stages is None and self._ready_timeout:
+                ready_stages = bootstrap_stage_budgets(self._ready_timeout)
+            self._server_handle = acquire_opencode_server(
+                working_directory=self.cwd,
+                ready_timeout=self._ready_timeout or _DEFAULT_READY_TIMEOUT,
+                stages=ready_stages,
+            )
         _status, payload = self._request("POST", f"/session{self._qdir()}", {"title": self.session_name})
         if not isinstance(payload, dict) or not payload.get("id"):
             raise RuntimeError(f"opencode session create returned no id: {payload!r}"[:500])
