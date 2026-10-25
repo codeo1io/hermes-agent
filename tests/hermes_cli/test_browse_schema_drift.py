@@ -604,8 +604,13 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     # Integrity scan and DDL each have independent bounded deadlines. The
     # total includes both; assert the DDL bound *from actual lock-time* and
     # separately bound the two phases together with scheduling grace.
-    assert float(elapsed) - ddl_started_s < budget_s + 2, out
-    assert float(elapsed) < budget_s + reconcile.BROWSE_INTEGRITY_BUDGET_S + 2, out
+    # The separate SQL VM watchdog still enforces budget_s itself. The
+    # subprocess-to-parent wall clock also includes macOS hosted-runner
+    # scheduling, WAL close/flush, and releasing the profile lock; a 2s
+    # envelope was observed failing with a correct 503 + full rollback.
+    # Keep a finite wall envelope without conflating it with VM time.
+    assert float(elapsed) - ddl_started_s < budget_s + 4, out
+    assert float(elapsed) < budget_s + reconcile.BROWSE_INTEGRITY_BUDGET_S + 4, out
     detail = " ".join(detail)
     assert "nothing was changed" in detail
     assert "`hermes -p scribe sessions repair`" in detail and "gateway" not in detail.lower()
