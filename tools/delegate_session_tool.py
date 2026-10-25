@@ -1621,11 +1621,8 @@ def delegate_session(
                 ensure_ascii=False,
             )
         if normalized == "messages":
-            # Durable metadata deliberately stores no prompt text; the native
-            # backend holds the history once the session is resumed. Offline
-            # reads surface durable tail evidence via _offline_tail_rows so a
-            # restart/close race can't launder a completed turn into "zero
-            # output" (see that helper's docstring for the live incident).
+            # Offline reads surface durable tail evidence via _offline_tail_rows
+            # so a restart/close race can't launder a completed turn as zero-output.
             return json.dumps(
                 {
                     "success": True,
