@@ -184,6 +184,35 @@ def test_midturn_idle_with_open_message_not_completed():
     assert result["text"].endswith("final-answer")
 
 
+def test_stamped_multistep_transport_never_ghosts_at_legacy_fallback(monkeypatch):
+    """An open step after a stamped tool-call step is *not* stamp-less.
+
+    Regression: live mission -005 finished with only "Let me pull the
+    work order" while step 3 was still generating. The 120s stamp-less
+    fallback misclassified its open step despite earlier completion stamps.
+    """
+    monkeypatch.setattr(oc, "_STAMPLESS_GENERATION_FALLBACK_SECONDS", 1.0)
+    base = [_msg("msg_base_000001", "user", [{"type": "text", "text": "go"}])]
+    interstep = base + [
+        _step1_done(),
+        _msg("msg_live_000003", "assistant", [], completed=False),
+    ]
+    final = base + [
+        _step1_done(),
+        _msg("msg_live_000003", "assistant", [
+            {"type": "text", "text": "actual-final-result"},
+            {"type": "step-finish", "reason": "stop"},
+        ], completed=True),
+    ]
+    transport = _InterStepScriptedTransport(
+        [(base, 0.05), (interstep, 13.0), (final, 999.0)]
+    )
+    result = _client(transport).run_session_prompt(
+        "go", timeout_seconds=20, poll_interval=0.02
+    )
+    assert result["text"].endswith("actual-final-result")
+
+
 def test_stampless_transport_falls_back(monkeypatch):
     """Transports that never stamp still terminate: bounded legacy fallback.
 
