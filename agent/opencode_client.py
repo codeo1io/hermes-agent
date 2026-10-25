@@ -38,13 +38,33 @@ logger = logging.getLogger(__name__)
 # Answerer contract shared with the Pi backend: (method, question, options) -> str | None
 QuestionAnswerer = Callable[[str, str, list[str]], Optional[str]]
 
-_DEFAULT_READY_TIMEOUT = 30.0
+# Readiness gate for a spawned ``opencode serve``: cold boots measured 14-29s
+# live (plugin + provider init), so the historical hard-coded 30s gate aborted
+# delegate sessions at startup. Plain constant, not an env knob: the repo
+# rejects new HERMES_* behaviour env vars (contribution rubric); tests tune
+# these via monkeypatch.
+_DEFAULT_READY_TIMEOUT = 90.0
 _DEFAULT_POLL_INTERVAL = 0.5
+# Post-question continuation window: how long after answering a question the
+# client must treat idle/stable-without-text as PREMATURE completion (the
+# model resumes generating its real continuation after the answer). Sized
+# generously — glm-5.3 sat 40+ seconds between question-answer and final
+# text in the live failure — while staying well under typical phase budgets
+# so a genuinely dead continuation still surfaces within one window.
+_POST_QUESTION_GRACE_SECONDS = 90.0
+# Bounded legacy fallback for transports that never stamp
+# ``info.time.completed``: after an open assistant message has sat this long
+# on a fully stable transcript with nothing running, accept the stable exit
+# instead of holding the veto until the caller's deadline. Stamp-stamping
+# transports (glmplus/OpenCode 1.19.4 verified live) release the veto the
+# moment the real turn ends, so this only gates the legacy path.
+_STAMPLESS_GENERATION_FALLBACK_SECONDS = 120.0
 
 
 class _Transport(Protocol):
-    def request(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, str]:
-        ...
+    def request(
+        self, method: str, path: str, body: Optional[dict] = None
+    ) -> tuple[int, str]: ...
 
 
 class _UrllibTransport:
@@ -52,7 +72,9 @@ class _UrllibTransport:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def request(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, str]:
+    def request(
+        self, method: str, path: str, body: Optional[dict] = None
+    ) -> tuple[int, str]:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
@@ -83,7 +105,12 @@ _SINGLETON_KEY = "__opencode_singleton__"
 
 
 class _ServerHandle:
-    def __init__(self, base_url: str, proc: Optional[subprocess.Popen], config_fingerprint: Optional[tuple] = None):
+    def __init__(
+        self,
+        base_url: str,
+        proc: Optional[subprocess.Popen],
+        config_fingerprint: Optional[tuple] = None,
+    ):
         self.base_url = base_url
         self.proc = proc
         self.refcount = 0
@@ -112,7 +139,9 @@ def _opencode_command() -> list[str]:
     raw = os.environ.get("HERMES_OPENCODE_BIN", "").strip()
     if raw:
         return raw.split()
-    binary = shutil.which("opencode") or str(os.path.join(Path_home(), ".local", "bin", "opencode"))
+    binary = shutil.which("opencode") or str(
+        os.path.join(Path_home(), ".local", "bin", "opencode")
+    )
     return [binary]
 
 
@@ -144,7 +173,10 @@ def _opencode_config_fingerprint() -> tuple:
         path = os.path.join(root, name)
         if not os.path.isfile(path):
             continue
-        if name.endswith((".json", ".jsonc", ".yaml", ".yml", ".toml", ".lock")) or name == "bun.lockb":
+        if (
+            name.endswith((".json", ".jsonc", ".yaml", ".yml", ".toml", ".lock"))
+            or name == "bun.lockb"
+        ):
             signatures.append(_hash_file(path))
 
     explicit = os.environ.get("OPENCODE_CONFIG", "").strip()
@@ -155,7 +187,10 @@ def _opencode_config_fingerprint() -> tuple:
     inline = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
     if inline:
         signatures.append(
-            ("OPENCODE_CONFIG_CONTENT", hashlib.sha256(inline.encode("utf-8")).hexdigest())
+            (
+                "OPENCODE_CONFIG_CONTENT",
+                hashlib.sha256(inline.encode("utf-8")).hexdigest(),
+            )
         )
     return (root, tuple(signatures))
 
@@ -184,7 +219,9 @@ def _wait_ready(base_url: str, timeout: float) -> None:
         except Exception as exc:
             last_error = exc
         time.sleep(0.25)
-    raise RuntimeError(f"opencode server not ready at {base_url}: {last_error or 'no response'}")
+    raise RuntimeError(
+        f"opencode server not ready at {base_url}: {last_error or 'no response'}"
+    )
 
 
 def acquire_opencode_server(
@@ -225,7 +262,11 @@ def acquire_opencode_server(
         else:
             port = _free_port()
             cmd = _opencode_command() + [
-                "serve", "--port", str(port), "--hostname", "127.0.0.1",
+                "serve",
+                "--port",
+                str(port),
+                "--hostname",
+                "127.0.0.1",
             ]
             # Spawn from a stable home directory: the per-session directory is
             # a query parameter on each call, so the startup cwd only needs to
@@ -238,7 +279,9 @@ def acquire_opencode_server(
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            handle = _ServerHandle(f"http://127.0.0.1:{port}", proc, _opencode_config_fingerprint())
+            handle = _ServerHandle(
+                f"http://127.0.0.1:{port}", proc, _opencode_config_fingerprint()
+            )
         # Readiness-gate only servers we spawned; an externally managed URL
         # (HERMES_OPENCODE_SERVER_URL) is trusted as-is so a temporarily
         # unreachable remote does not break startup — real calls surface
@@ -295,6 +338,7 @@ def _ensure_shutdown_hook() -> None:
 # Client
 # ---------------------------------------------------------------------------
 
+
 class OpenCodeClient:
     """Persistent OpenCode delegate-session client with question supervision."""
 
@@ -342,10 +386,14 @@ class OpenCodeClient:
         self._transport = _UrllibTransport(self._server_handle.base_url)
         return self._transport
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> tuple[int, Any]:
+    def _request(
+        self, method: str, path: str, body: Optional[dict] = None
+    ) -> tuple[int, Any]:
         status, text = self._http().request(method, path, body)
         if status >= 400:
-            raise RuntimeError(f"opencode server {method} {path} failed: HTTP {status}: {text[:500]}")
+            raise RuntimeError(
+                f"opencode server {method} {path} failed: HTTP {status}: {text[:500]}"
+            )
         if not text:
             return status, None
         try:
@@ -368,10 +416,17 @@ class OpenCodeClient:
                 self._request("GET", f"/session/{self.native_session_id}")
                 return {"sessionId": self.native_session_id}
             except RuntimeError:
-                logger.info("Stored opencode session %s missing; creating a new one", self.native_session_id)
-        _status, payload = self._request("POST", f"/session{self._qdir()}", {"title": self.session_name})
+                logger.info(
+                    "Stored opencode session %s missing; creating a new one",
+                    self.native_session_id,
+                )
+        _status, payload = self._request(
+            "POST", f"/session{self._qdir()}", {"title": self.session_name}
+        )
         if not isinstance(payload, dict) or not payload.get("id"):
-            raise RuntimeError(f"opencode session create returned no id: {payload!r}"[:500])
+            raise RuntimeError(
+                f"opencode session create returned no id: {payload!r}"[:500]
+            )
         self.native_session_id = str(payload["id"])
         return {"sessionId": self.native_session_id}
 
@@ -382,7 +437,9 @@ class OpenCodeClient:
 
     def _assistant_text(self, message: dict) -> str:
         parts = message.get("parts") or []
-        return "\n".join(str(p.get("text") or "") for p in parts if p.get("type") == "text").strip()
+        return "\n".join(
+            str(p.get("text") or "") for p in parts if p.get("type") == "text"
+        ).strip()
 
     def _baseline_messages(self) -> list[dict]:
         path = f"/session/{self.native_session_id}/message{self._qdir()}"
@@ -397,7 +454,14 @@ class OpenCodeClient:
         rows = data if isinstance(data, list) else (data or {}).get("data") or []
         return [row for row in rows if row.get("sessionID") == self.native_session_id]
 
-    def _answer_pending_questions(self) -> None:
+    def _answer_pending_questions(self) -> int:
+        """Answer pending questions; returns how many were answered/rejected.
+
+        The count (not just a bool) lets the turn loop anchor its
+        post-question continuation window on the LAST answer, including
+        when an earlier question in the same turn was rejected.
+        """
+        answered = 0
         for request in self._pending_questions():
             request_id = str(request.get("id") or "")
             if not request_id or request_id in self._answered_questions:
@@ -406,11 +470,17 @@ class OpenCodeClient:
             answers: list[list[str]] = []
             reject = False
             for question in questions:
-                options = [str(opt.get("label")) for opt in (question.get("options") or []) if opt.get("label")]
+                options = [
+                    str(opt.get("label"))
+                    for opt in (question.get("options") or [])
+                    if opt.get("label")
+                ]
                 method = "select" if options else "ask"
                 answer = None
                 if self.question_answerer is not None:
-                    answer = self.question_answerer(method, str(question.get("question") or ""), options)
+                    answer = self.question_answerer(
+                        method, str(question.get("question") or ""), options
+                    )
                 if answer is None:
                     reject = True
                     break
@@ -422,18 +492,32 @@ class OpenCodeClient:
                 answers.append([answer])
             try:
                 if reject:
-                    self._request("POST", f"/question/{request_id}/reject{self._qdir()}", {})
-                    logger.info("Rejected unanswerable opencode question %s", request_id)
+                    self._request(
+                        "POST", f"/question/{request_id}/reject{self._qdir()}", {}
+                    )
+                    logger.info(
+                        "Rejected unanswerable opencode question %s", request_id
+                    )
                 else:
-                    self._request("POST", f"/question/{request_id}/reply{self._qdir()}", {"answers": answers})
-                    logger.info("Replied to opencode question %s: %s", request_id, answers)
+                    self._request(
+                        "POST",
+                        f"/question/{request_id}/reply{self._qdir()}",
+                        {"answers": answers},
+                    )
+                    logger.info(
+                        "Replied to opencode question %s: %s", request_id, answers
+                    )
             except RuntimeError as exc:
                 # The SSE watcher and the poll loop can race on the same
                 # question; whoever loses gets QuestionNotFoundError (404).
                 if "QuestionNotFound" not in str(exc):
                     raise
-                logger.debug("opencode question %s already answered elsewhere", request_id)
+                logger.debug(
+                    "opencode question %s already answered elsewhere", request_id
+                )
             self._answered_questions.add(request_id)
+            answered += 1
+        return answered
 
     @staticmethod
     def _match_label(answer: str, options: list[str]) -> Optional[str]:
@@ -475,18 +559,27 @@ class OpenCodeClient:
                         continue
                     etype = event.get("type")
                     props = event.get("properties") or {}
-                    if etype == "session.idle" and str(props.get("sessionID") or "") == self.native_session_id:
+                    if (
+                        etype == "session.idle"
+                        and str(props.get("sessionID") or "") == self.native_session_id
+                    ):
                         idle_flag.set()
                         return
-                    if etype in ("question.asked", "question.v2.asked") and str(
-                        props.get("sessionID") or ""
-                    ) == self.native_session_id:
+                    if (
+                        etype in ("question.asked", "question.v2.asked")
+                        and str(props.get("sessionID") or "") == self.native_session_id
+                    ):
                         try:
                             self._answer_pending_questions()
                         except Exception:
-                            logger.debug("SSE question auto-answer failed", exc_info=True)
+                            logger.debug(
+                                "SSE question auto-answer failed", exc_info=True
+                            )
         except Exception:
-            logger.debug("opencode event stream failed; polling decides completion", exc_info=True)
+            logger.debug(
+                "opencode event stream failed; polling decides completion",
+                exc_info=True,
+            )
 
     def _final_reply_text(self, baseline_ids: set) -> str:
         """Fetch the transcript and join fresh assistant text parts.
@@ -496,7 +589,9 @@ class OpenCodeClient:
         whose only text is a reminder has NOT been answered, so strip them
         before deciding whether a reply exists.
         """
-        _status, data = self._request("GET", f"/session/{self.native_session_id}/message{self._qdir()}")
+        _status, data = self._request(
+            "GET", f"/session/{self.native_session_id}/message{self._qdir()}"
+        )
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         messages = sorted(messages, key=self._message_sort_key)
         fresh = [m for m in messages if m.get("info", {}).get("id") not in baseline_ids]
@@ -506,7 +601,36 @@ class OpenCodeClient:
             if (m.get("info") or {}).get("role") == "assistant"
             and self._assistant_text(m)
         ).strip()
-        return re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL).strip()
+        return re.sub(
+            r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL
+        ).strip()
+
+    @staticmethod
+    def _open_message_age_seconds(fresh: list[dict]) -> Optional[float]:
+        """Age of the newest still-open assistant message, in seconds.
+
+        2026-10-24 live repro ses_e8fbd486bffeEijK4IE6BKLPDg: multi-step
+        turns go QUIET BETWEEN STEPS — step N completes with its stamp,
+        OpenCode creates step N+1's empty assistant row while the provider
+        call (rate-limit recovery included) takes tens of seconds — and the
+        stability window then lapses mid-turn. The open message IS the
+        in-flight generation signal, and its age gates the bounded legacy
+        fallback. ``time.created`` is a wall-clock epoch (ms), so the age is
+        measured against ``time.time()``.
+        """
+        open_rows = [
+            m
+            for m in fresh
+            if (m.get("info") or {}).get("role") == "assistant"
+            and not ((m.get("info") or {}).get("time") or {}).get("completed")
+        ]
+        if not open_rows:
+            return None
+        newest_open = max(
+            ((m.get("info") or {}).get("time") or {}).get("created") or 0
+            for m in open_rows
+        )
+        return time.time() - (newest_open / 1000.0)
 
     def run_session_prompt(
         self,
@@ -523,11 +647,17 @@ class OpenCodeClient:
         # whose implementation delegate may not exist. Route Hermes coding
         # work orders to the installed, write-capable fixer agent instead.
         # A host can override this explicitly when its agent roster differs.
-        delegate_agent = os.environ.get("HERMES_OPENCODE_DELEGATE_AGENT", "fixer").strip() or "fixer"
-        self._request("POST", path, {
-            "agent": delegate_agent,
-            "parts": [{"type": "text", "text": message}],
-        })
+        delegate_agent = (
+            os.environ.get("HERMES_OPENCODE_DELEGATE_AGENT", "fixer").strip() or "fixer"
+        )
+        self._request(
+            "POST",
+            path,
+            {
+                "agent": delegate_agent,
+                "parts": [{"type": "text", "text": message}],
+            },
+        )
         deadline = time.monotonic() + timeout_seconds
         last_snapshot: Optional[tuple] = None
         stable_since: Optional[float] = None
@@ -543,7 +673,9 @@ class OpenCodeClient:
         #      part running, and no pending question. Snapshot polling alone is
         #      unreliable because /question registration lags the live turn by
         #      many seconds and empty assistant shells appear immediately.
-        stable_window = min(max(5.0, poll_interval * 4), max(1.0, timeout_seconds / 3.0))
+        stable_window = min(
+            max(5.0, poll_interval * 4), max(1.0, timeout_seconds / 3.0)
+        )
         idle_flag = threading.Event()
         watcher = threading.Thread(
             target=self._event_stream_idle,
@@ -551,13 +683,39 @@ class OpenCodeClient:
             daemon=True,
         )
         watcher.start()
+        # Post-question continuation window (msn-auto05 2026-10-23 17:26,
+        # reproduced hermetically in test_opencode_wait_loop.py): OpenCode
+        # fires ``session.idle`` at a question/step boundary AND the
+        # transcript snapshot goes stable there, while the model — resumed
+        # by the auto-answer — is still generating its real continuation.
+        # Both completion signals are therefore premature for a grace
+        # window after the LAST question this turn answered: hold the
+        # "turn ended without a reply" verdict and keep polling until the
+        # continuation lands or the caller's deadline expires. Pi has no
+        # analogue because its questions are out-of-band to a single RPC.
+        question_answered_at: Optional[float] = None
         try:
             while time.monotonic() < deadline:
-                self._answer_pending_questions()
-                _status, data = self._request("GET", f"/session/{self.native_session_id}/message{self._qdir()}")
-                messages = data if isinstance(data, list) else (data or {}).get("data") or []
+                questions_now = self._answer_pending_questions()
+                if questions_now:
+                    question_answered_at = time.monotonic()
+                    # The transcript may evolve past the boundary; reset the
+                    # stability anchor so the stable-window cannot fire on
+                    # the pre-answer snapshot.
+                    stable_since = None
+                    last_snapshot = None
+                _status, data = self._request(
+                    "GET", f"/session/{self.native_session_id}/message{self._qdir()}"
+                )
+                messages = (
+                    data if isinstance(data, list) else (data or {}).get("data") or []
+                )
                 messages = sorted(messages, key=self._message_sort_key)
-                fresh = [m for m in messages if m.get("info", {}).get("id") not in baseline_ids]
+                fresh = [
+                    m
+                    for m in messages
+                    if m.get("info", {}).get("id") not in baseline_ids
+                ]
                 if fresh:
                     for m in reversed(fresh):
                         if (m.get("info") or {}).get("role") == "assistant":
@@ -597,6 +755,7 @@ class OpenCodeClient:
                     and not ((m.get("info") or {}).get("time") or {}).get("completed")
                     for m in fresh
                 )
+                open_since = self._open_message_age_seconds(fresh)
                 # Only NON-EMPTY text (or a definitive end-of-turn) is a
                 # reply: glm-5.3 creates the assistant text part EMPTY and
                 # streams content into it seconds later (dev-002
@@ -607,7 +766,8 @@ class OpenCodeClient:
                 has_reply_text = any(
                     (m.get("info") or {}).get("role") == "assistant"
                     and any(
-                        (p or {}).get("type") == "text" and str(p.get("text") or "").strip()
+                        (p or {}).get("type") == "text"
+                        and str(p.get("text") or "").strip()
                         for p in (m.get("parts") or [])
                     )
                     for m in fresh
@@ -626,28 +786,58 @@ class OpenCodeClient:
                 # Idle events can be observed before the transcript fetch
                 # below reflects them; give the message endpoint a short
                 # grace period after the flag trips so the final text lands.
-                completed = idle_flag.is_set() and (
-                    not tools_running or time.monotonic() - started > timeout_seconds
-                )
-                # The stable window is itself evidence the turn ended: a
-                # transcript that has not changed for stable_window with a
-                # content-bearing assistant message and nothing running is
-                # finished even when the server never stamps
-                # info.time.completed (some transports omit it). `generating`
-                # only vetoes the exit while the transcript is still moving;
-                # once stability has held for the full window the completed
-                # stamp can no longer arrive, so waiting longer can only burn
-                # the caller's timeout.
+                # The stable window alone is NOT evidence the turn ended:
+                # between tool steps the transcript sits unchanged while the
+                # provider call for the next step is in flight (rate-limit
+                # recovery can hold it for a minute or more), so stability
+                # routinely lapses mid-turn with an assistant message still
+                # open. When any fresh assistant message lacks its completion
+                # stamp the turn is still generating: veto the stable exit.
+                # The veto releases the moment the stamp lands (verified on
+                # glmplus/OpenCode 1.19.4 — finished messages carry it) or,
+                # for transports that never stamp, after
+                # _STAMPLESS_GENERATION_FALLBACK_SECONDS of full stability so
+                # a stamp-less legacy path still terminates.
                 stable = (
                     stable_since is not None
                     and time.monotonic() - stable_since >= stable_window
+                )
+                generating_veto = generating and not (
+                    open_since is not None
+                    and stable
+                    and open_since >= _STAMPLESS_GENERATION_FALLBACK_SECONDS
+                )
+                # Idle events can be observed before the transcript fetch
+                # below reflects them; give the message endpoint a short
+                # grace period after the flag trips so the final text lands.
+                # The inter-step veto also gates the idle path: a mid-turn
+                # session.idle (observed live at step boundaries) must not
+                # complete the turn while a fresh assistant message is open.
+                completed = (
+                    idle_flag.is_set()
+                    and (
+                        not tools_running
+                        or time.monotonic() - started > timeout_seconds
+                    )
+                    and not generating_veto
+                )
+                # Premature-idle guard: within the post-question grace
+                # window an idle/stable signal without reply text is NOT
+                # turn-end — the continuation is still streaming. Clear
+                # the flag and keep polling (the watcher thread has exited
+                # by construction, so the transcript-stability fallback
+                # decides completion once the window lapses).
+                in_question_grace = (
+                    question_answered_at is not None
+                    and time.monotonic() - question_answered_at
+                    < _POST_QUESTION_GRACE_SECONDS
                 )
                 if completed or (
                     stable
                     and fresh
                     and (has_reply_text or all_steps_completed)
                     and not tools_running
-                    and not (generating and not stable)
+                    and not generating_veto
                     and not self._pending_questions()
                 ):
                     if idle_flag.is_set() and tools_running:
@@ -661,6 +851,17 @@ class OpenCodeClient:
                             "state": {"sessionId": self.native_session_id},
                             "duration_s": time.monotonic() - started,
                         }
+                    if in_question_grace:
+                        # Premature completion signal: idle/stability fired
+                        # at the question boundary while the resumed model
+                        # has not produced its continuation yet. Keep
+                        # polling — the alternative is the exact
+                        # "turn ended without an assistant text reply"
+                        # failure that killed every question-bearing
+                        # OpenCode mission turn (msn-m3-opencode-dev-001
+                        # through -005, msn-auto05 2026-10-23).
+                        idle_flag.clear()
+                        continue
                     if idle_flag.is_set():
                         # Authoritative idle but no assistant text yet: one
                         # short re-check before declaring the turn empty.
@@ -680,7 +881,9 @@ class OpenCodeClient:
                     try:
                         self.abort(timeout=10.0)
                     except Exception:
-                        logger.debug("opencode abort on empty reply failed", exc_info=True)
+                        logger.debug(
+                            "opencode abort on empty reply failed", exc_info=True
+                        )
                     raise RuntimeError(
                         "OpenCode turn ended without an assistant text reply "
                         "(a pending question may have been rejected)"
@@ -722,7 +925,11 @@ class OpenCodeClient:
         # handshake (tools/delegate_session_tool passes both to every client);
         # accepted and ignored — this path returns an immediate queued note,
         # never waits.
-        return {"text": "", "note": "opencode has no live steer; message queued", "queued": True}
+        return {
+            "text": "",
+            "note": "opencode has no live steer; message queued",
+            "queued": True,
+        }
 
     def abort(self, timeout: float = 10.0) -> None:
         if not self.native_session_id:
@@ -733,7 +940,9 @@ class OpenCodeClient:
         self, timeout: float = 30.0, stages: list[float] | None = None
     ) -> list[dict]:
         # `stages`: accepted-and-ignored, see start().
-        _status, data = self._request("GET", f"/session/{self.native_session_id}/message{self._qdir()}")
+        _status, data = self._request(
+            "GET", f"/session/{self.native_session_id}/message{self._qdir()}"
+        )
         messages = data if isinstance(data, list) else (data or {}).get("data") or []
         return sorted(messages, key=self._message_sort_key)
 
@@ -744,7 +953,11 @@ class OpenCodeClient:
             if row.get("sessionID") != session_id:
                 continue
             first = (row.get("questions") or [{}])[0]
-            options = [str(opt.get("label")) for opt in (first.get("options") or []) if opt.get("label")]
+            options = [
+                str(opt.get("label"))
+                for opt in (first.get("options") or [])
+                if opt.get("label")
+            ]
             return {
                 "method": "select" if options else "ask",
                 "question": str(first.get("question") or ""),
