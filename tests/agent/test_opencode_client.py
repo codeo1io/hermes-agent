@@ -598,3 +598,113 @@ def test_steer_accepts_delegate_tool_call_shape():
     assert result["queued"] is True
     assert "note" in result
     assert transport.requests == []  # no wire traffic: steer is a queued note
+
+
+def test_wait_ready_stages_wait_longer_than_legacy_timeout(monkeypatch):
+    """A slow-but-alive server boot must survive the A4 ladder: the legacy
+    fixed 30s gate killed every boot slower than 30s (fresh ``opencode serve``
+    takes 40-160s under load), which re-spawned another server — the exact
+    herd the ladder exists to prevent."""
+    # /session answers 200 only after 5 failed probes; a fresh transport is
+    # built per poll tick, so the counter must be class-level.
+    class SlowBoot:
+        n = 0
+
+        def __init__(self, base_url, timeout=5.0):
+            pass
+
+        def request(self, method, path, body=None):
+            SlowBoot.n += 1
+            if SlowBoot.n > 5:
+                return 200, "[]"
+            raise ConnectionError("not ready")
+
+    class FakeProc:
+        def poll(self):
+            return None  # alive the whole time
+
+    monkeypatch.setattr(oc, "_UrllibTransport", SlowBoot)
+    # Stage 1 (0.2s ≈ <5 ticks at 0.25s each) cannot cover 5 failures; only
+    # reaching stage 2 lets the 6th probe succeed — not raising IS the proof.
+    oc._wait_ready("http://127.0.0.1:1", timeout=0.2, stages=[0.2, 5.0], proc=FakeProc())
+
+
+def test_wait_ready_dead_process_fails_fast_between_stages(monkeypatch):
+    """A crashed serve must fail fast at the stage boundary, not burn the
+    whole ladder: the liveness probe between stages raises immediately."""
+
+    class DeadProc:
+        def poll(self):
+            return 7
+
+    def never(url, timeout=5.0):
+        raise AssertionError("no probe should reach the wire on a dead proc")
+
+    monkeypatch.setattr(oc, "_UrllibTransport", never)
+    with pytest.raises(RuntimeError, match="exited with code 7"):
+        oc._wait_ready("http://127.0.0.1:1", timeout=5.0, stages=[0.2, 5.0], proc=DeadProc())
+
+
+def test_wait_ready_legacy_call_shape_unchanged(monkeypatch):
+    """stages=None keeps the legacy single bounded wait — byte-for-byte
+    behavior for every caller that has not adopted the ladder yet."""
+
+    class NeverReady:
+        def __init__(self, base_url, timeout=5.0):
+            pass
+
+        def request(self, method, path, body=None):
+            raise ConnectionError("nope")
+
+    monkeypatch.setattr(oc, "_UrllibTransport", NeverReady)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="not ready"):
+        oc._wait_ready("http://127.0.0.1:1", timeout=0.3)
+    assert time.monotonic() - started < 2.0
+
+
+def test_start_threads_ladder_into_server_spawn(monkeypatch):
+    """client.start(stages=...) must hand the ladder to the shared-server
+    spawn: before the fix the kwargs were accepted and discarded, so every
+    fresh-server boot died at the hardcoded 30s gate regardless of budget."""
+    captured = {}
+
+    def fake_acquire(working_directory="", ready_timeout=30.0, stages=None):
+        captured["ready_timeout"] = ready_timeout
+        captured["stages"] = stages
+        handle = oc._ServerHandle("http://127.0.0.1:9", None)
+        return handle
+
+    monkeypatch.setattr(oc, "acquire_opencode_server", fake_acquire)
+    transport = FakeTransport([(200, {"id": "ses_abc"})])
+    client = make_client(transport, preset_session=False)
+    # Pre-set the transport so the session-create POST stays hermetic while
+    # the nulled factory lets start()'s eager shared-server acquire fire.
+    client._transport = transport
+    client._transport_factory = None
+    client.start(timeout=600.0, stages=[30.0, 90.0, 240.0])
+    assert captured["stages"] == [30.0, 90.0, 240.0]
+    assert captured["ready_timeout"] == 600.0
+
+
+def test_start_without_stages_derives_ladder_from_budget(monkeypatch):
+    """No explicit stages: the ladder is derived from the start budget the
+    same way the tool layer derives it for pi (clip 30/90/240 to the
+    ceiling), so a plain start(timeout=600) also survives slow boots."""
+    from agent.delegate_start_budget import bootstrap_stage_budgets
+
+    captured = {}
+
+    def fake_acquire(working_directory="", ready_timeout=30.0, stages=None):
+        captured["stages"] = stages
+        return oc._ServerHandle("http://127.0.0.1:9", None)
+
+    monkeypatch.setattr(oc, "acquire_opencode_server", fake_acquire)
+    transport = FakeTransport([(200, {"id": "ses_abc"})])
+    client = make_client(transport, preset_session=False)
+    # Pre-set the transport so the session-create POST stays hermetic while
+    # the nulled factory lets start()'s eager shared-server acquire fire.
+    client._transport = transport
+    client._transport_factory = None
+    client.start(timeout=600.0)
+    assert captured["stages"] == bootstrap_stage_budgets(600.0)
