@@ -234,8 +234,12 @@ def _apply_additive_schema(path: Path, budget: _Budget | None = None) -> None:
                                  isolation_level=None)) as conn:
         _reapply_durability_barriers(conn)
         budget.arm(conn)
-        conn.execute('BEGIN IMMEDIATE')
         try:
+            # BEGIN can itself be interrupted by the time-bounded progress
+            # handler on cold disks. Keep it inside the rollback/error-mapping
+            # scope so the caller gets BrowseBudgetExceeded (retryable 503
+            # naming the offline repair), never generic schema corruption.
+            conn.execute('BEGIN IMMEDIATE')
             cursor = conn.cursor()
             apply_declared_schema(cursor)
             # Postcondition, still inside the transaction: every declared table/column resolves.
