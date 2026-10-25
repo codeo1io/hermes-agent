@@ -52,6 +52,18 @@ _DEFAULT_POLL_INTERVAL = 0.5
 # text in the live failure — while staying well under typical phase budgets
 # so a genuinely dead continuation still surfaces within one window.
 _POST_QUESTION_GRACE_SECONDS = 90.0
+# Step-boundary quiet guard (2026-10-25, ses_e8f34b567ffeJgNa9V0gy6Ibmb):
+# a finished INTERMEDIATE step (``step-finish`` reason ``tool-calls``) is
+# followed by a quiet gap while the provider call for the next step is in
+# flight — no open row exists yet (OpenCode creates step N+1's row when
+# the provider responds, not when step N ends) — so neither the
+# generating veto (#516) nor the stamped-turn veto (#518) sees anything
+# to veto, and an idle event at that boundary ghost-completed the turn
+# with step N's text (dev-003 02:04:13Z, 131s in). Once the newest fresh
+# assistant row is a completed intermediate step, exit signals are held
+# for this window; a genuinely finished turn shows a final text answer
+# (``reason: stop``) well inside it.
+_OPENCODE_STEP_BOUNDARY_QUIET_SECONDS = 75.0
 # Bounded legacy fallback for transports that never stamp
 # ``info.time.completed``: after an open assistant message has sat this long
 # on a fully stable transcript with nothing running, accept the stable exit
@@ -817,6 +829,52 @@ class OpenCodeClient:
                     and stable
                     and open_since >= _STAMPLESS_GENERATION_FALLBACK_SECONDS
                 )
+                # Step-boundary quiet guard (dev-003 2026-10-25T02:04:13Z):
+                # OpenCode fires ``session.idle`` when a step ends, and step
+                # N+1's row does not exist yet — the newest fresh assistant
+                # row is step N, COMPLETED and tool-bearing
+                # (``step-finish`` reason ``tool-calls``). Both vetoes above
+                # see nothing open, so an idle at that boundary (or the
+                # stable-exit twin) returned step N's text as the final
+                # result while the turn continued server-side — the ghost
+                # behind the 131s dev-003 verdict. While the newest fresh
+                # assistant row is a completed INTERMEDIATE step (tool
+                # bearing / ``tool-calls`` finish) younger than the quiet
+                # window, exit signals are premature: clear the idle flag
+                # and keep polling. A genuinely finished turn ends with a
+                # text-only row (``reason: stop``), which never trips this.
+                newest_assistant = fresh_assistant[-1] if fresh_assistant else None
+                step_boundary_quiet = False
+                if newest_assistant is not None:
+                    newest_info = newest_assistant.get("info") or {}
+                    newest_parts = newest_assistant.get("parts") or []
+                    newest_completed = bool(
+                        (newest_info.get("time") or {}).get("completed")
+                    )
+                    tool_bearing = any(
+                        (p or {}).get("type") == "tool" for p in newest_parts
+                    )
+                    tool_calls_finish = any(
+                        (p or {}).get("type") == "step-finish"
+                        and (p or {}).get("reason") == "tool-calls"
+                        for p in newest_parts
+                    )
+                    if newest_completed and (tool_bearing or tool_calls_finish):
+                        completed_ms = (newest_info.get("time") or {}).get(
+                            "completed"
+                        ) or 0
+                        boundary_age = max(0.0, time.time() - completed_ms / 1000.0)
+                        step_boundary_quiet = (
+                            boundary_age < _OPENCODE_STEP_BOUNDARY_QUIET_SECONDS
+                        )
+                        if step_boundary_quiet:
+                            stable_since = (
+                                None
+                                if boundary_age < _OPENCODE_STEP_BOUNDARY_QUIET_SECONDS
+                                else stable_since
+                            )
+                if step_boundary_quiet:
+                    idle_flag.clear()
                 # Idle events can be observed before the transcript fetch
                 # below reflects them; give the message endpoint a short
                 # grace period after the flag trips so the final text lands.
@@ -848,6 +906,7 @@ class OpenCodeClient:
                     and (has_reply_text or all_steps_completed)
                     and not tools_running
                     and not generating_veto
+                    and not step_boundary_quiet
                     and not self._pending_questions()
                 ):
                     if idle_flag.is_set() and tools_running:
