@@ -47,7 +47,7 @@ def test_no_blacksmith_action_refs():
                     offenders.append(f"{f.name}:{i}: {line.strip()}")
     assert not offenders, (
         "fork policy #270 violation — Blacksmith action refs (billing-blocked "
-        f"third-party runners):\n" + "\n".join(offenders)
+        "third-party runners):\n" + "\n".join(offenders)
     )
 
 
@@ -61,5 +61,5 @@ def test_no_paid_or_blacksmith_runner_labels():
                     offenders.append(f"{f.name}:{i}: {line.strip()}")
     assert not offenders, (
         "fork policy #270 violation — paid/Blacksmith runner labels "
-        f"(billing-blocked on this public fork):\n" + "\n".join(offenders)
+        "(billing-blocked on this public fork):\n" + "\n".join(offenders)
     )
