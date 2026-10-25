@@ -1198,30 +1198,26 @@ def _initial_prompt(goal: str, context: str | None) -> str:
 def _offline_tail_rows(durable: dict[str, Any]) -> list[dict[str, Any]]:
     """Surface durable tail evidence for offline `messages` reads.
 
-    Durable metadata deliberately stores no prompt text, but ``last_line`` /
-    ``salvage_tail`` carry the completed turn's final assistant text. An
-    EMPTY list launders as "zero output" downstream: a supervisor reading a
-    turn that completed just as this process lost the in-memory record
+    An EMPTY list launders as "zero output" downstream: a supervisor reading
+    a turn that completed just as this process lost the in-memory record
     (restart race, close race) gets success:true with no rows and banks a
     false provider failure while the durable record itself carries the
     completed turn's tail (observed live: msn-exec06-003, turn completed
     113.6s with a real assistant tail, banked "zero assistant output" 46ms
-    later). With durable tail evidence, return a clearly-marked synthetic
-    final assistant row — read-only — so downstream proof-of-answer gates
-    judge the turn on the durable record. No durable tail still means an
-    honest empty list (a session that never produced a turn legitimately
-    has no tail to show).
+    later). With durable tail evidence (``last_line``/``salvage_tail``),
+    return a clearly-marked synthetic final assistant row — read-only — so
+    downstream proof-of-answer gates judge the turn on the durable record.
+    No durable tail still means an honest empty list.
     """
     durable_tail = str(durable.get("last_line") or durable.get("salvage_tail") or "").strip()
     if not durable_tail:
         return []
-    return [
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": durable_tail}],
-            "_offline_tail": True,
-        }
-    ]
+    row: dict[str, Any] = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": durable_tail}],
+        "_offline_tail": True,
+    }
+    return [row]
 
 
 def delegate_session(
