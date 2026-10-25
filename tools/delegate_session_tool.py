@@ -1195,6 +1195,35 @@ def _initial_prompt(goal: str, context: str | None) -> str:
     return "\n\n".join(parts)
 
 
+def _offline_tail_rows(durable: dict[str, Any]) -> list[dict[str, Any]]:
+    """Surface durable tail evidence for offline `messages` reads.
+
+    Durable metadata deliberately stores no prompt text, but ``last_line`` /
+    ``salvage_tail`` carry the completed turn's final assistant text. An
+    EMPTY list launders as "zero output" downstream: a supervisor reading a
+    turn that completed just as this process lost the in-memory record
+    (restart race, close race) gets success:true with no rows and banks a
+    false provider failure while the durable record itself carries the
+    completed turn's tail (observed live: msn-exec06-003, turn completed
+    113.6s with a real assistant tail, banked "zero assistant output" 46ms
+    later). With durable tail evidence, return a clearly-marked synthetic
+    final assistant row — read-only — so downstream proof-of-answer gates
+    judge the turn on the durable record. No durable tail still means an
+    honest empty list (a session that never produced a turn legitimately
+    has no tail to show).
+    """
+    durable_tail = str(durable.get("last_line") or durable.get("salvage_tail") or "").strip()
+    if not durable_tail:
+        return []
+    return [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": durable_tail}],
+            "_offline_tail": True,
+        }
+    ]
+
+
 def delegate_session(
     *,
     action: str = "start",
@@ -1597,35 +1626,15 @@ def delegate_session(
             )
         if normalized == "messages":
             # Durable metadata deliberately stores no prompt text; the native
-            # backend holds the history once the session is resumed. But an
-            # EMPTY list launders as "zero output" downstream: a supervisor
-            # reading a turn that completed just as this process lost the
-            # in-memory record (restart race, close race) gets success:true
-            # with no rows and banks a false provider failure while the
-            # durable record itself carries the completed turn's tail
-            # (observed live: msn-exec06-003, turn completed 113.6s with a
-            # real assistant tail, banked "zero assistant output" 46ms
-            # later). When durable tail evidence exists, surface it as a
-            # synthetic final assistant row — read-only, clearly marked —
-            # so downstream proof-of-answer gates judge the turn on the
-            # durable record instead of an empty array. No durable tail
-            # still means an honest empty list (a session that never
-            # produced a turn legitimately has no tail to show).
-            tail_rows: list[dict[str, Any]] = []
-            durable_tail = str(durable.get("last_line") or durable.get("salvage_tail") or "").strip()
-            if durable_tail:
-                tail_rows.append(
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": durable_tail}],
-                        "_offline_tail": True,
-                    }
-                )
+            # backend holds the history once the session is resumed. Offline
+            # reads surface durable tail evidence via _offline_tail_rows so a
+            # restart/close race can't launder a completed turn into "zero
+            # output" (see that helper's docstring for the live incident).
             return json.dumps(
                 {
                     "success": True,
                     **_durable_summary(durable, note=_OFFLINE_RESUME_NOTE),
-                    "messages_json": json.dumps(tail_rows, ensure_ascii=False),
+                    "messages_json": json.dumps(_offline_tail_rows(durable), ensure_ascii=False),
                 },
                 ensure_ascii=False,
             )
