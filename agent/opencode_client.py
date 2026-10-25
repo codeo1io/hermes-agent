@@ -802,8 +802,18 @@ class OpenCodeClient:
                     stable_since is not None
                     and time.monotonic() - stable_since >= stable_window
                 )
+                # Fallback only for a genuinely stamp-less transport. Once
+                # this turn has any stamped assistant step, its NEXT open
+                # step is evidence generation is in flight, not a legacy
+                # endpoint that omits completion stamps. The old fallback
+                # ghost-completed real GLM-5.3 development turns after 120s.
+                any_stamped_step = any(
+                    ((m.get("info") or {}).get("time") or {}).get("completed")
+                    for m in fresh_assistant
+                )
                 generating_veto = generating and not (
-                    open_since is not None
+                    not any_stamped_step
+                    and open_since is not None
                     and stable
                     and open_since >= _STAMPLESS_GENERATION_FALLBACK_SECONDS
                 )
