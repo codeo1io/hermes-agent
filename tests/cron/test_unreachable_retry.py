@@ -37,7 +37,7 @@ def test_import_survives_a_stale_cron_constants_from_a_live_gateway(monkeypatch)
     import importlib
     import sys
 
-    import cron.constants as constants
+    from cron import constants
 
     assert hasattr(constants, "is_recurring")  # the guard the skew removes
     monkeypatch.delattr(constants, "is_recurring")

@@ -949,7 +949,7 @@ def test_marked_worker_exits_before_cron_jobs_when_activation_silently_no_ops(tm
     worker died at ``No module named 'ruamel'`` for 100 minutes while the gateway recorded
     only masking ImportErrors. The dependency boot must verify the one import the package
     init makes first and exit loudly instead."""
-    import cron.worker_bootstrap as worker_bootstrap
+    from cron import worker_bootstrap
 
     repo_root = Path(worker_bootstrap.__file__).resolve().parent.parent
     # The deps-free base interpreter: no ruamel anywhere, exactly the relaunched worker.
@@ -958,7 +958,7 @@ def test_marked_worker_exits_before_cron_jobs_when_activation_silently_no_ops(tm
     env[worker_bootstrap.WORKER_MARKER] = "1"
     child = subprocess.run(
         [python, "-c", _SILENT_NOOP_BOOT_PROBE], cwd=repo_root, env=env,
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=60, check=False,
     )
     assert child.returncode == 3, f"exit {child.returncode}: {child.stderr}"
     result = json.loads(child.stdout.strip().splitlines()[-1])
