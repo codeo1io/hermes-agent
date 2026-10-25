@@ -245,7 +245,10 @@ jobs:
     name: Windows install and chat
     needs: validate
     if: inputs.platform == 'win32'
-    runs-on: windows-latest  # was windows-latest (paid larger runner, billing-blocked here)
+    # fork: plain GitHub-hosted windows-latest — upstream's windows-latest-32-core labels are
+    # paid larger runners (billing-blocked on this account); blacksmith MSIX exit-before-attach
+    # rationale from upstream f1b290e7734 noted, but labels unavailable here.
+    runs-on: windows-latest
     # windows-11-arm runners are much slower (npm ci alone runs 12+ minutes and
     # the MSIX leg exceeds 30 total); x64 legs complete in ~14.
     timeout-minutes: 45
