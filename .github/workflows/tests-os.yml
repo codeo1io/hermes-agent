@@ -193,9 +193,12 @@ jobs:
             -m "platforms and not integration and not live" \
             -v --tb=short
         env:
-          # These files spawn nested PowerShell trees. CPU-count parallelism
-          # starves cold child startup before the fixture's idle deadline.
-          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && (runner.arch == 'ARM64' && '16' || '16') || '' }}
+          # Windows-only files spawn nested PowerShell/Git/setup trees. The
+          # standard hosted runner cannot support 16 file subprocesses with
+          # nested process trees: child startups and per-file 300s watchdogs
+          # timed out in required CI. Cap to 3 independent file workers so
+          # tests still run (none skipped, no deadline relaxed).
+          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && '3' || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
