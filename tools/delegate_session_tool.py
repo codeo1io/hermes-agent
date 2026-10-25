@@ -1597,12 +1597,35 @@ def delegate_session(
             )
         if normalized == "messages":
             # Durable metadata deliberately stores no prompt text; the native
-            # backend holds the history once the session is resumed.
+            # backend holds the history once the session is resumed. But an
+            # EMPTY list launders as "zero output" downstream: a supervisor
+            # reading a turn that completed just as this process lost the
+            # in-memory record (restart race, close race) gets success:true
+            # with no rows and banks a false provider failure while the
+            # durable record itself carries the completed turn's tail
+            # (observed live: msn-exec06-003, turn completed 113.6s with a
+            # real assistant tail, banked "zero assistant output" 46ms
+            # later). When durable tail evidence exists, surface it as a
+            # synthetic final assistant row — read-only, clearly marked —
+            # so downstream proof-of-answer gates judge the turn on the
+            # durable record instead of an empty array. No durable tail
+            # still means an honest empty list (a session that never
+            # produced a turn legitimately has no tail to show).
+            tail_rows: list[dict[str, Any]] = []
+            durable_tail = str(durable.get("last_line") or durable.get("salvage_tail") or "").strip()
+            if durable_tail:
+                tail_rows.append(
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": durable_tail}],
+                        "_offline_tail": True,
+                    }
+                )
             return json.dumps(
                 {
                     "success": True,
                     **_durable_summary(durable, note=_OFFLINE_RESUME_NOTE),
-                    "messages_json": "[]",
+                    "messages_json": json.dumps(tail_rows, ensure_ascii=False),
                 },
                 ensure_ascii=False,
             )

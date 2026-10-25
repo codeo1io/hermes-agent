@@ -707,6 +707,65 @@ def test_offline_control_actions_fail_closed_until_resumed():
     assert "resume" in (messages.get("note") or "").lower()
 
 
+def test_offline_messages_surfaced_durable_tail_after_close_race():
+    """msn-exec06-003 regression (2026-10-25): a turn that completes just as
+    the registry loses the record (restart/close race) must NOT read as
+    "zero output". The durable metadata carries the completed turn's tail
+    (last_line); the offline messages fallback surfaces it as a synthetic
+    final assistant row so downstream proof-of-answer gates judge the turn
+    on the durable record instead of an empty array."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    # Simulate a completed turn's durable evidence.
+    with ds._SESSION_LOCK:
+        record = ds._SESSIONS[sid]
+        record["last_line"] = (
+            "I'm a dispatched delegate. The work is complete; here is the tail."
+        )
+        record["last_turn_outcome"] = "completed"
+    ds._persist_metadata(record)
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    messages = payload(
+        ds.delegate_session(action="messages", session_id=sid, parent_agent=parent)
+    )
+    assert messages["success"] is True
+    rows = json.loads(messages["messages_json"])
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["role"] == "assistant"
+    assert row["_offline_tail"] is True
+    text = row["content"][0]["text"]
+    assert "work is complete" in text
+    assert "resume" in (messages.get("note") or "").lower()
+
+
+def test_offline_messages_stays_empty_without_durable_tail():
+    """No durable tail (a session that never produced a completed turn)
+    keeps the honest empty list — the synthetic row appears ONLY when the
+    durable record actually carries tail evidence."""
+    parent = Parent()
+    started = payload(ds.delegate_session(action="start", parent_agent=parent))
+    sid = started["session_id"]
+    with ds._SESSION_LOCK:
+        record = ds._SESSIONS[sid]
+        record["last_line"] = ""
+        record["salvage_tail"] = None
+    ds._persist_metadata(record)
+    with ds._SESSION_LOCK:
+        stale = ds._SESSIONS.pop(sid)
+    stale["client"].close()
+
+    messages = payload(
+        ds.delegate_session(action="messages", session_id=sid, parent_agent=parent)
+    )
+    assert messages["success"] is True
+    assert messages["messages_json"] == "[]"
+
+
 def test_summary_preserves_structured_trailer_from_long_last_result():
     trailer = '{"phase_result":{"run_id":"r","phase_id":"p","action_id":"a","attempt_id":"x","status":"succeeded"}}'
     record = {
