@@ -10,6 +10,7 @@ import contextlib
 import secrets
 import threading
 
+from hermes_state_maintenance import backend_heartbeat_prune_max_age
 from tui_gateway._env import env_float
 
 from .method_ctx import bind_module
@@ -436,8 +437,12 @@ def _sweep_orphaned_session_rows() -> list[str]:
 # Each serve / gateway process registers a heartbeat row in ``gateway_heartbeats`` so the startup sweep can tell
 # "owned by a live but idle backend" from "truly orphaned" (else the first process to restart reaped every
 # inactive row of the other N−1). Refresh 60s default — far shorter than the 6h TTL so a refresh always lands
-# inside the staleness window. Removed at exit; a crashed row ages out.
+# inside the staleness window. Removed at exit; a row left behind by a crash (no atexit) is reclaimed by the
+# refresher's prune once older than max(900s, 15 × refresh interval) — see backend_heartbeat_prune_max_age.
 _HEARTBEAT_REFRESH_S = max(0.0, env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0))
+# A backend that missed 15 consecutive refresh beats is dead beyond doubt; its tombstone row (an
+# orderly exit clears its own) becomes prunable once older than this window.
+_HEARTBEAT_PRUNE_S = backend_heartbeat_prune_max_age(_HEARTBEAT_REFRESH_S)
 _heartbeat_refresher_started = False
 _heartbeat_refresher_lock = threading.Lock()
 _BACKEND_NONCE = secrets.token_hex(4)
@@ -474,10 +479,25 @@ def _refresh_backend_heartbeat() -> None:
         logger.debug("backend heartbeat refresh failed", exc_info=True)
 
 
+def _prune_stale_backend_heartbeats() -> None:
+    """Reclaim heartbeat rows of backends that died without an orderly exit (crash, kill, service
+    restart). No-op when DB unavailable; failures are debug-logged, never raised."""
+    try:
+        db = _get_db()
+        if db is None:
+            return
+        removed = db.prune_stale_heartbeats(max_age_seconds=_HEARTBEAT_PRUNE_S)
+        if removed:
+            logger.debug("pruned %d stale gateway heartbeat row(s): %s", len(removed), ", ".join(removed))
+    except Exception:
+        logger.debug("stale gateway heartbeat prune failed", exc_info=True)
+
+
 def _start_backend_heartbeat_refresher() -> None:
-    """Register this backend and start the refresher thread (once per process). The first refresh writes the row
-    synchronously so this process's own sweep sees itself in the heartbeat table. ``_HEARTBEAT_REFRESH_S <= 0``
-    means "register once, never refresh"."""
+    """Register this backend and start the refresher thread (once per process). The first refresh
+    writes the row synchronously so this process's own sweep sees itself in the heartbeat table,
+    then prunes tombstone rows of dead predecessors. ``_HEARTBEAT_REFRESH_S <= 0`` means "register
+    once, never refresh" (the initial prune still runs)."""
     global _heartbeat_refresher_started
     with _heartbeat_refresher_lock:
         if _heartbeat_refresher_started:
@@ -487,6 +507,10 @@ def _start_backend_heartbeat_refresher() -> None:
         _refresh_backend_heartbeat()
     except Exception:
         logger.debug("initial backend heartbeat write failed", exc_info=True)
+    try:
+        _prune_stale_backend_heartbeats()
+    except Exception:
+        logger.debug("initial stale gateway heartbeat prune failed", exc_info=True)
     if _HEARTBEAT_REFRESH_S <= 0:
         return
     stop_event = threading.Event()
@@ -495,6 +519,7 @@ def _start_backend_heartbeat_refresher() -> None:
         while not stop_event.is_set():
             try:
                 _refresh_backend_heartbeat()
+                _prune_stale_backend_heartbeats()
             except Exception:
                 logger.debug("heartbeat refresh loop iteration failed", exc_info=True)
             stop_event.wait(_HEARTBEAT_REFRESH_S)

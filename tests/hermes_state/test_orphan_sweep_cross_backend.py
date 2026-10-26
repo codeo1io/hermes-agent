@@ -16,6 +16,12 @@ no live backend (i.e. a heartbeat row whose ``last_heartbeat`` is recent)
 could plausibly own it. Backward-compatible fallback: if NO backend has
 ever written a heartbeat (legacy deployments mid-upgrade), the original
 predicates run unchanged so we never silently strand existing data.
+
+Extended for A4 34ce45cd2093: heartbeat tombstones left by non-orderly
+gateway deaths are reclaimed by ``prune_stale_heartbeats`` (wired into the
+refresher and maintenance seams); these tests pin that reaping semantics
+are unchanged by a prune pass, that live rows survive it, and that a
+backend recovers its row via the register upsert.
 """
 
 from __future__ import annotations
@@ -302,3 +308,127 @@ class TestBackendHeartbeatAPI:
         t.join(timeout=10)
         assert all(r == [] for r in results if not isinstance(r, Exception))
         assert db.get_session("racy")["ended_at"] is None
+
+
+# ── stale-heartbeat reclamation semantics (A4 34ce45cd2093) ─────────────
+
+
+class TestStaleHeartbeatReclamation:
+    """Tombstones left by non-orderly gateway deaths are reclaimed by
+    ``prune_stale_heartbeats``; the sweep's reaping decisions and live-row
+    protection are unchanged by a prune pass."""
+
+    def test_sweep_decisions_identical_with_and_without_prior_prune(self, tmp_path):
+        """R3 equivalence: a heartbeat row already older than the sweep's own
+        staleness is already non-protecting, so reaping is identical whether
+        the row was pruned beforehand or left in place — and the sweep itself
+        never reclaims heartbeat rows (that is the prune's job)."""
+        outcomes = []
+        for name, prune_first in (("a", False), ("b", True)):
+            db = SessionDB(tmp_path / f"{name}.db")
+            now = time.time()
+            idle_stale = now - 7 * 3600  # idle beyond IDLE_S → reap-eligible
+            _make_session(db, "orphan", source="tui", started_at=idle_stale, message_at=idle_stale)
+            # Row older than the sweep's staleness window: the NOT EXISTS gate
+            # ignores it whether or not it has been pruned.
+            db.register_backend_heartbeat(
+                backend_id="dead-backend", pid=9, started_at=now - 24 * 3600,
+                last_heartbeat=now - (HEARTBEAT_STALENESS_S + 600), profile="p", host="h")
+            if prune_first:
+                assert db.prune_stale_heartbeats(max_age_seconds=900.0) == ["dead-backend"]
+            outcomes.append(db.sweep_orphaned_sessions(max_idle_seconds=IDLE_S))
+            outcomes.append([r["backend_id"] for r in db.list_backend_heartbeats()])
+        assert outcomes[0] == outcomes[2] == ["orphan"]
+        assert outcomes[1] == ["dead-backend"]  # sweep never reclaims the row
+        assert outcomes[3] == []
+
+    def test_fresh_row_protects_session_and_survives_prune(self, db):
+        """R2: a beating backend's row sits inside both windows — its
+        reap-eligible session is spared by the sweep ONLY because of the
+        live row, and the row itself survives a prune pass."""
+        now = time.time()
+        session_at = now - 7 * 3600  # idle beyond IDLE_S → reap-eligible
+        _make_session(db, "owned", source="tui", started_at=session_at, message_at=session_at)
+        db.register_backend_heartbeat(
+            backend_id="live", pid=7, started_at=now - 8 * 3600,
+            last_heartbeat=now, profile="p", host="h")
+
+        assert db.sweep_orphaned_sessions(max_idle_seconds=IDLE_S) == []
+        assert db.get_session("owned")["ended_at"] is None
+
+        assert db.prune_stale_heartbeats(max_age_seconds=900.0) == []
+        assert [r["backend_id"] for r in db.list_backend_heartbeats()] == ["live"]
+
+    def test_upsert_recreates_row_after_prune(self, db):
+        """R2 recovery: a backend that resumes after its row was pruned
+        recreates it with current timestamps within one refresh interval."""
+        now = time.time()
+        db.register_backend_heartbeat(
+            backend_id="restartee", pid=5, started_at=now - 20 * 3600,
+            last_heartbeat=now - 20 * 3600, profile="p", host="h")
+        assert db.prune_stale_heartbeats(max_age_seconds=900.0) == ["restartee"]
+        assert db.list_backend_heartbeats() == []
+
+        resumed_at = now - 30
+        db.register_backend_heartbeat(
+            backend_id="restartee", pid=5, started_at=resumed_at,
+            last_heartbeat=now, profile="p", host="h")
+        rows = db.list_backend_heartbeats()
+        assert len(rows) == 1
+        assert rows[0]["backend_id"] == "restartee"
+        assert rows[0]["started_at"] == pytest.approx(resumed_at, abs=0.01)
+        assert rows[0]["last_heartbeat"] == pytest.approx(now, abs=5.0)
+
+    def test_prune_boundary_is_strict_and_zero_window_is_noop(self, db, monkeypatch):
+        """A row exactly ``max_age_seconds`` old is kept (strict ``<``);
+        strictly older is pruned; a non-positive window never deletes."""
+        import hermes_state_gateway
+
+        now = time.time()
+        db.register_backend_heartbeat(
+            backend_id="edge", pid=1, started_at=now - 3600,
+            last_heartbeat=now - 100.0, profile="p", host="h")
+        db.register_backend_heartbeat(
+            backend_id="older", pid=2, started_at=now - 3600,
+            last_heartbeat=now - 100.001, profile="p", host="h")
+
+        real_time = hermes_state_gateway.time
+
+        class _FrozenTime:
+            """Freeze ``time()`` for the prune call; delegate the rest."""
+
+            def time(self):
+                return now
+
+            def __getattr__(self, name):
+                return getattr(real_time, name)
+
+        monkeypatch.setattr(hermes_state_gateway, "time", _FrozenTime())
+
+        assert db.prune_stale_heartbeats(max_age_seconds=100.0) == ["older"]
+        assert [r["backend_id"] for r in db.list_backend_heartbeats()] == ["edge"]
+        assert db.prune_stale_heartbeats(max_age_seconds=0.0) == []
+        assert db.prune_stale_heartbeats(max_age_seconds=-1.0) == []
+        assert len(db.list_backend_heartbeats()) == 1
+
+    def test_tombstone_class_accumulates_until_prune_reclaims_it(self, db):
+        """The A4 34ce45cd2093 failure class: rows of dead backends survive
+        every landed maintenance call and accumulate; one prune pass leaves
+        only beating backends."""
+        now = time.time()
+        for i, age_s in enumerate((13 * 3600, 24 * 3600, 33 * 3600)):
+            db.register_backend_heartbeat(
+                backend_id=f"tombstone-{i}", pid=100 + i, started_at=now - age_s - 3600,
+                last_heartbeat=now - age_s, profile="p", host="h")
+        db.register_backend_heartbeat(
+            backend_id="beating", pid=999, started_at=now - 60,
+            last_heartbeat=now, profile="p", host="h")
+
+        # Repeated landed maintenance sweeps do NOT reclaim tombstones.
+        for _ in range(3):
+            db.sweep_expired_turn_leases()
+        assert len(db.list_backend_heartbeats()) == 4
+
+        pruned = db.prune_stale_heartbeats(max_age_seconds=900.0)
+        assert sorted(pruned) == ["tombstone-0", "tombstone-1", "tombstone-2"]
+        assert [r["backend_id"] for r in db.list_backend_heartbeats()] == ["beating"]
