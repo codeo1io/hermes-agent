@@ -59,6 +59,19 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _exc:
             logger.debug("Turn-lease sweep skipped: %s", _exc, exc_info=True)
 
+        # Same unconditional hygiene class: reclaim gateway-heartbeat tombstones of backends
+        # that died without an orderly exit (crash/SIGKILL — the ``atexit`` clear never ran).
+        # Tombstone reclamation is not retention config either; the window policy (15 missed
+        # beats, 900s floor) is single-sourced in ``hermes_state_maintenance``. Isolated so a
+        # failing prune cannot skip the archive/prune gates below it.
+        try:
+            from hermes_state_maintenance import backend_heartbeat_prune_max_age
+            from utils import env_float
+            session_db.prune_stale_heartbeats(max_age_seconds=backend_heartbeat_prune_max_age(
+                env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0)))
+        except Exception as _exc:
+            logger.debug("Stale-heartbeat prune skipped: %s", _exc, exc_info=True)
+
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.
