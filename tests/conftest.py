@@ -1495,7 +1495,12 @@ def _capture_real_hermes_root() -> list[Path]:
 
     roots: list[Path] = []
     try:
-        default_root = (Path.home() / ".hermes").resolve()
+        # run_tests_parallel.py gives each file a disposable HOME. Path.home()
+        # consequently points at that test sandbox, NOT the account's real
+        # Hermes state. Protect the authoritative machine root instead, using
+        # the same passwd-backed function as the native state tripwire.
+        from hermes_state_guard import _real_platform_state_root
+        default_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
         roots.append(default_root)
     except Exception:
         pass

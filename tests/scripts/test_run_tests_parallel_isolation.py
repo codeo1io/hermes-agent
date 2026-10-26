@@ -89,3 +89,8 @@ def test_subprocess_hermes_home_is_not_production(tmp_path):
     assert "hermes-pytest-home-" in home_line, (
         f"subprocess HOME not isolated: {home_line!r}"
     )
+    # The run owns an isolated "r-*" scratch root (disk-backed /var/tmp on
+    # Linux). Merely using mkdtemp() with the inherited TMPDIR puts a fake
+    # home under production ~/.hermes/tmp and trips the real-home guard.
+    assert Path(home_line).parent.name.startswith("r-"), home_line
+    assert Path(hermes_line) == Path(home_line) / ".hermes"
