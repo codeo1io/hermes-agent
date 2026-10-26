@@ -4383,32 +4383,6 @@ def _housekeeping_plugin_update_check() -> None:
     maybe_run_gateway_check(log=logger)
 
 
-def _launch_sessions_dir(config) -> Optional[tuple[Path, Path]]:
-    """``(launch home, its configured transcript dir)``, or ``None`` when the gateway carries none.
-
-    MUST be called outside any profile scope — ``get_hermes_home()`` is what identifies the launch
-    home. Consumed by :func:`_profile_sessions_dir`.
-    """
-    sessions_dir = getattr(config, "sessions_dir", None)
-    if sessions_dir is None:
-        return None
-    return get_hermes_home(), Path(sessions_dir)
-
-
-def _profile_sessions_dir(launch: Optional[tuple[Path, Path]]) -> Path:
-    """Transcript dir of the profile currently in scope.
-
-    ``gateway.sessions_dir`` overrides the LAUNCH profile's transcript dir only; every other served
-    profile keeps ``<home>/sessions``. Hardcoding ``<home>/sessions`` for the launch home too wrote
-    transcripts to the configured dir while the prune unlinked under the default one, orphaning
-    every pruned session's ``.json``/``.jsonl``/``request_dump_*`` forever.
-    """
-    home = get_hermes_home()
-    if launch is not None and Path(launch[0]) == home:
-        return Path(launch[1])
-    return home / "sessions"
-
-
 def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = None) -> None:
     """Per-profile state.db maintenance: expired-turn-lease hygiene ALWAYS, then stale-session
     auto-archive and auto-prune/VACUUM behind their sessions.auto_archive / sessions.auto_prune
@@ -4422,11 +4396,24 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     dir (:func:`_launch_sessions_dir`) so its override still governs its own profile."""
     from hermes_cli.config import load_config as _load_full_config
     from hermes_state_registry import acquire, release_or_close
+    from gateway.run_sessions_dirs import _profile_sessions_dir
+    from hermes_state_maintenance import backend_heartbeat_prune_max_age
+    from utils import env_float
     _sess_cfg = (_load_full_config().get("sessions") or {})
     _adb = acquire()
     try:
         # Ungated and first: a killed holder's expired lease row is residue, not retention.
         _adb.sweep_expired_turn_leases()
+        # Same residue class: heartbeat tombstones of backends that died without an orderly
+        # exit, reclaimed even when no backend refresher is alive (CLI-only hosts, quiescent
+        # ticks); window per backend_heartbeat_prune_max_age. Isolated so a refusing prune
+        # cannot skip the retention gates behind it.
+        try:
+            _adb.prune_stale_heartbeats(
+                max_age_seconds=backend_heartbeat_prune_max_age(
+                    env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0)))
+        except Exception as _exc:
+            logger.debug("Stale gateway heartbeat prune skipped: %s", _exc, exc_info=True)
         if _sess_cfg.get("auto_archive", False):
             _adb.maybe_auto_archive(
                 idle_days=float(_sess_cfg.get("auto_archive_days", 3)),
@@ -4507,6 +4494,7 @@ def _start_gateway_housekeeping(
     from gateway.run_delivery_queue_watch import DRAIN_LABEL, DeliveryQueueWatch, wait_for_next_tick
     from gateway.run_profile_reconcile import _mcp_config_reconciler, profile_scoped_chore
     from gateway.run_housekeeping_disk import housekeeping_media_caches, maybe_post_auto_prune_prompt
+    from gateway.run_sessions_dirs import _launch_sessions_dir
     chores: list[tuple[int, str, Any]] = [
         # First every tick: re-stamp ``updated_at`` in gateway_state.json so it is a real heartbeat.
         # ``hermes gateway status`` / ``/api/status`` warn when it ages past 2x ``interval`` with the

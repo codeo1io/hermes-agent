@@ -59,6 +59,19 @@ def _run_state_db_auto_maintenance(session_db) -> None:
         except Exception as _exc:
             logger.debug("Turn-lease sweep skipped: %s", _exc, exc_info=True)
 
+        # Same hygiene class: heartbeat rows of backends that died without an orderly exit
+        # (crash, kill) are tombstones nothing reclaims on a CLI-only host. A live backend always
+        # refreshes well inside this window (backend_heartbeat_prune_max_age); isolated so a
+        # failing prune cannot skip the archive/prune gates below it either.
+        try:
+            from hermes_state_maintenance import backend_heartbeat_prune_max_age
+            from utils import env_float
+            session_db.prune_stale_heartbeats(
+                max_age_seconds=backend_heartbeat_prune_max_age(
+                    env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0)))
+        except Exception as _exc:
+            logger.debug("Stale gateway heartbeat prune skipped: %s", _exc, exc_info=True)
+
         cfg = (_load_full_config().get("sessions") or {})
 
         # Auto-archive is independent of auto_prune: run it before prune's early return.
