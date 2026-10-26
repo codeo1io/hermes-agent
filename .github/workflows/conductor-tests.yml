@@ -28,13 +28,19 @@ name: Tests
 #      run in this lane (it still runs on real fork PRs via tests.yml).
 on:
   workflow_call:
+    inputs:
+      commit:
+        description: Admitted source commit
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 # Cancel in-progress runs for the same ref
 concurrency:
-  group: tests-${{ github.ref }}
+  group: conductor-tests-${{ github.run_id }}-${{ inputs.commit }}
   cancel-in-progress: true
 
 jobs:
@@ -55,6 +61,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit || github.sha }}
 
       - name: Install ripgrep (prebuilt binary)
         run: |
@@ -212,6 +220,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.commit || github.sha }}
 
       - name: Set up Node
         # The boot-contract suite feeds serve's stdout through Desktop's own
