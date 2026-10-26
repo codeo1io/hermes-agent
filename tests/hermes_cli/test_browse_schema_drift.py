@@ -546,7 +546,9 @@ def slowed(path, *a, **kw):
     conn = original(path, *a, **kw)
     read_only = "mode=ro" in str(path)
     if holding_lock() and (phase == "integrity") == read_only:
-        print("slowed", flush=True)  # this process holds gateway.lock and the slow phase begins
+        # Emit the phase-relative timestamp: the preceding integrity scan has
+        # its own independent deadline and is not part of the DDL budget.
+        print("slowed", time.monotonic() - started, flush=True)
         return SlowConnection(conn)
     return conn
 
@@ -586,7 +588,9 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     browse = subprocess.Popen([sys.executable, "-c", _SLOW_BROWSE, str(path), phase], env=os.environ,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     assert browse.stdout.readline().strip() == "started"
-    assert browse.stdout.readline().strip() == "slowed", "the slow phase never ran under the lock"
+    slow_parts = browse.stdout.readline().strip().split()
+    assert len(slow_parts) == 2 and slow_parts[0] == "slowed", "the slow phase never ran under the lock"
+    ddl_started_s = float(slow_parts[1])
     booting = ProfileOwnership()
     try:
         bootstrap._reserve_waiting_out_browse_reconcile(booting, [home])  # default wait: must not raise
@@ -597,7 +601,11 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     result = next(line for line in out.splitlines() if line.startswith("RESULT"))
     _, status, elapsed, *detail = result.split(" ", 3)
     assert status == "503", out
-    assert float(elapsed) < budget_s + 2, out
+    # Integrity scan and DDL each have independent bounded deadlines. The
+    # total includes both; assert the DDL bound *from actual lock-time* and
+    # separately bound the two phases together with scheduling grace.
+    assert float(elapsed) - ddl_started_s < budget_s + 2, out
+    assert float(elapsed) < budget_s + reconcile.BROWSE_INTEGRITY_BUDGET_S + 2, out
     detail = " ".join(detail)
     assert "nothing was changed" in detail
     assert "`hermes -p scribe sessions repair`" in detail and "gateway" not in detail.lower()

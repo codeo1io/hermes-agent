@@ -571,7 +571,10 @@ def _start_gateway_resolve_terminal_cwd() -> None:
 # publication and the drift probes, instead of exiting as if another gateway owned the profile.
 def _browse_reconcile_reserve_wait_s() -> float:
     from hermes_state_reconcile import BROWSE_RECONCILE_BUDGET_S
-    return BROWSE_RECONCILE_BUDGET_S + 2.0
+    # Include cold-disk and process-scheduling grace for macOS CI/loaded hosts.
+    # Browse DDL still has its own strict budget; only *gateway admission*
+    # waits longer for that bounded maintenance holder to release its lock.
+    return BROWSE_RECONCILE_BUDGET_S + 8.0
 
 
 def _conflicting_homes(homes):
