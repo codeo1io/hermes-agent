@@ -103,9 +103,7 @@ def test_usage_summary_reads_dict_responses_like_attribute_responses():
 
     attrs = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5))
     as_dict = {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
-    kwargs = {"provider": "openrouter", "api_mode": "chat_completions"}
-
-    assert _usage_summary(as_dict, **kwargs) == _usage_summary(attrs, **kwargs)
+    assert _usage_summary(as_dict) == _usage_summary(attrs)
 
 
 def test_string_input_is_one_message_not_a_char_count(manager):

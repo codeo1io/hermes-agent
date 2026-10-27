@@ -1588,7 +1588,14 @@ class TestSanePathIncludesHomebrew:
         the sane-path merge is a documented passthrough on Windows.
         """
         from tools.environments.local import _make_run_env
-        launchd_env = {"PATH": os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin"])}
+        # Model launchd's PATH, not a missing Hermes profile root. Clearing
+        # the entire environment without re-homing HERMES_HOME would read the
+        # real runner account's ~/.hermes/active_profile and correctly trip
+        # the live-state guard instead of testing PATH composition.
+        launchd_env = {
+            "PATH": os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
+            "HERMES_HOME": os.environ["HERMES_HOME"],
+        }
         with patch.dict(os.environ, launchd_env, clear=True):
             result = _make_run_env({})
         path_entries = result["PATH"].split(os.pathsep)

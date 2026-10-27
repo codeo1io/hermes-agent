@@ -142,10 +142,20 @@ def test_current_installer_publishes_real_dependencies_and_warm_path(tmp_path, s
     assert json.loads((install / ".hermes-bootstrap-complete").read_text())["pinnedCommit"] == commit
     facts = next((home / ".hermes/installs").glob("*/facts.json"))
     selection = json.loads(facts.read_text())["packages"]["venv"]
+    assert (Path(selection["environment"]) / "pyvenv.cfg").is_file()
     launcher = home / ".local/bin/hermes"
     child = json.loads(run([str(launcher), "from elsewhere"]).stdout)
     assert child["argv"] == ["from elsewhere"]
-    assert Path(child["module"]).is_relative_to(Path(selection["environment"]))
+    # The launcher performs restart-safe source-update completion before
+    # importing the application. That may publish a newer environment than
+    # the snapshot captured *before* launch. Compare against the committed
+    # selection after the launch, never an obsolete prior generation.
+    active_selection = json.loads(facts.read_text())["packages"]["venv"]
+    assert (Path(active_selection["environment"]) / "pyvenv.cfg").is_file()
+    assert Path(child["module"]).is_relative_to(Path(active_selection["environment"])), (
+        "launcher imported from an environment other than the published generation",
+        selection, active_selection, child,
+    )
     assert not (install / "venv").exists()
     # The developer setup path publishes through the same writer after real PM.
     launcher.unlink()

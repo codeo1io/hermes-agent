@@ -187,6 +187,14 @@ class _Parser:
             if isinstance(hay, list):
                 return any(_equal(h, needle) for h in hay)
             return to_string(needle).lower() in to_string(hay).lower()
+        if name == "startsWith":
+            if len(args) != 2:
+                raise Unsupported(f"startsWith() expects two arguments in {self.text!r}")
+            # GitHub Actions functions compare strings case-insensitively.
+            # The evaluator is a strict replay of workflow job gates: an
+            # unmodelled function must never be silently treated as false.
+            value, prefix = args
+            return to_string(value).lower().startswith(to_string(prefix).lower())
         raise Unsupported(f"function {name}() in {self.text!r}")
 
     def lookup(self, path: str) -> Any:

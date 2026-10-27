@@ -101,10 +101,13 @@ FIND_UPDATE_CHILD = r"""
 param([int]$Parent, [int]$Seconds)
 $deadline = (Get-Date).AddSeconds($Seconds)
 while ((Get-Date) -lt $deadline) {
-    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" |
+    # Avoid an unbounded CIM query under a saturated Windows CI runner:
+    # the outer Python watchdog is 90s, but a single WMI round-trip used
+    # to hang longer than that and mask the actual process-liveness test.
+    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" -OperationTimeoutSec 5 -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match '--yes' } | Select-Object -First 1
     if ($row) { [Console]::Out.Write($row.ProcessId); exit 0 }
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 400
 }
 exit 1
 """

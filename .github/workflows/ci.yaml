@@ -156,6 +156,8 @@ jobs:
       startsWith(github.head_ref, 'conductor/ci-') &&
       startsWith(github.event.pull_request.title, 'Conductor CI validation') }}
     uses: ./.github/workflows/conductor-tests.yml
+    with:
+      commit: ${{ inputs.commit || github.sha }}
 
   tests-standard:
     name: Python tests
@@ -296,6 +298,8 @@ jobs:
       startsWith(github.head_ref, 'conductor/ci-') &&
       startsWith(github.event.pull_request.title, 'Conductor CI validation') }}
     uses: ./.github/workflows/conductor-e2e-desktop-core.yml
+    with:
+      commit: ${{ inputs.commit || github.sha }}
 
   e2e-desktop-core-standard:
     name: Desktop core E2E
@@ -481,6 +485,7 @@ jobs:
       - bootstrap-installer
       - e2e-desktop
       - e2e-desktop-core
+      - e2e-desktop-core-standard
       - e2e-desktop-update
       - docs-site
       - history-check

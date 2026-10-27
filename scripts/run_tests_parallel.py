@@ -693,7 +693,7 @@ def _run_one_file_once(
     # subprocess launches so the finally-block cleanup below can't hit
     # an unbound name (the rewrite dropped the creation but kept the
     # rmtree, crashing every successful run with NameError).
-    home_root = tempfile.mkdtemp(prefix="hermes-pytest-home-")
+    home_root = tempfile.mkdtemp(prefix="hermes-pytest-home-", dir=temproot)
     env["HOME"] = home_root
     env["HERMES_HOME"] = os.path.join(home_root, ".hermes")
     # tests/conftest.py's real-home tripwire (v0.21.6+) treats ANY pre-set
