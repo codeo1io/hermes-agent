@@ -2,11 +2,91 @@
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 
 
 class CronExecutionUnknown(RuntimeError):
     """The owner may have accepted this fire; never book it as failed or re-fire."""
+
+
+# A permanently-unknown admission (firer died pre-receipt, execution row unknown, owner gone)
+# can never resolve: the owner that would answer ``recover`` is dead. Recovery retried such
+# journals forever (the 2026-10-24 receipt-recovery loop: ~54 deferrals/3min per journal), so
+# reconcile counts its own scans on the journal record and, past the bounds below, books a
+# terminal ``receipt_expired`` outcome instead of retrying. Fail-closed shape: the job's own
+# pause for the unknown stays until the receipt expiry retires it; nothing is re-fired.
+RECOVERY_SCAN_LIMIT = 64
+RECOVERY_AGE_LIMIT_SECONDS = 24 * 3600.0
+
+
+def _expiry_state(journal, record):
+    """``(scans, first_seen)`` tracked on the journal record; increments persist immediately.
+
+    The counter lives in the journal (not the ledger) so a restarted scheduler sees the same
+    history: one scan == one reconcile pass that could not resolve this journal.
+    """
+    scans = int(record.get('recovery_scans') or 0)
+    first_seen = record.get('recovery_first_seen_at')
+    if not first_seen:
+        from hermes_time import now as _hermes_now
+        first_seen = _hermes_now().isoformat()
+    record['recovery_scans'] = scans + 1
+    record['recovery_first_seen_at'] = first_seen
+    from utils import atomic_json_write
+    atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
+    return record['recovery_scans'], first_seen
+
+
+def _expired(scans, first_seen):
+    from datetime import datetime
+    from hermes_time import now as _hermes_now
+    try:
+        age = (_hermes_now() - datetime.fromisoformat(first_seen)).total_seconds()
+    except (TypeError, ValueError):
+        age = 0.0
+    return scans >= RECOVERY_SCAN_LIMIT or age >= RECOVERY_AGE_LIMIT_SECONDS
+
+
+def _retire_expired_journal(journal, reason):
+    """Set an unresolvable journal aside — never delete: out of the ``*.json`` scan,
+    evidence preserved for the operator (the 2026-10-25 manual mitigation's shape)."""
+    logger = logging.getLogger(__name__)
+    try:
+        target = journal.with_name(journal.name + '.deferred-expired')
+        journal.rename(target)
+        logger.warning('Cron receipt journal retired after exhausting recovery: %s (%s)',
+                       target, reason)
+    except OSError:
+        # Unwritable store: the journal stays in the scan; nothing is lost or dropped.
+        pass
+
+
+def _bound_deferred_retry(journal):
+    """Bound the deferred-retry loop in the exception path: a journal whose recovery keeps
+    raising (the 2026-10-24 ``UnscopedSecretError`` loop class) can never resolve, and each
+    pass re-spams the log. Parseable journals count scans on the record (same counter as the
+    unknown-state expiry); unreadable journals — which can never resolve at all — age-bound
+    by mtime. Past the bounds the journal is retired aside, evidence preserved."""
+    try:
+        record = json.loads(journal.read_text(encoding='utf-8-sig'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        import os
+        import time
+        try:
+            if time.time() - os.path.getmtime(journal) >= RECOVERY_AGE_LIMIT_SECONDS:
+                _retire_expired_journal(journal, 'unreadable journal past the age bound')
+        except OSError:
+            pass
+        return
+    if not isinstance(record, dict):
+        return
+    try:
+        scans, first_seen = _expiry_state(journal, record)
+    except (OSError, TypeError, ValueError):
+        return
+    if _expired(scans, first_seen):
+        _retire_expired_journal(journal, f'{scans} deferred recovery scans')
 
 
 def journal_path(job_id, request_id):
@@ -210,7 +290,27 @@ def reconcile_pending(*, allow_connect=True):
                     reason = 'Canonical cron unknown; no automatic re-execution'
                     record['pause_recorded'] = _pause_identity(pause_job(params['job_id'], reason=reason))
                     atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
-                continue
+                if state['status'] == 'unknown':
+                    scans, first_seen = _expiry_state(journal, record)
+                    if not _expired(scans, first_seen):
+                        continue
+                    # Permanently unknown past every bound: the dead owner can never answer,
+                    # so book the uncertainty itself as the run's terminal outcome instead of
+                    # deferring forever. Same refusal shape as a definite non-admission: the
+                    # job's record keeps an honest failure, the schedule resumes (the pause
+                    # recorded for THIS unknown is lifted by finish_completed_run), the ledger
+                    # row settles failed, and the journal retires. Never re-fired.
+                    current = get_job(params['job_id'])
+                    if current is None:
+                        journal.unlink(missing_ok=True)
+                        continue
+                    error = (f'Cron receipt expired: admission {params["request_id"]} stayed unknown '
+                             f'for {scans} recovery scans; no re-execution. Whether side effects '
+                             f'ran before the firer died is unknown.')
+                    state = {'status': 'terminal', 'job': current,
+                             'result': [False, f'# Cron Job: {params["job_id"]} (FAILED)\n\n{error}\n', '', error]}
+                else:
+                    continue
             success, output, answer, error = state['result']
             job = dict(state['job'], **(state.get('job_flags') or {}))
             job['execution_id'] = params['request_id']
@@ -232,3 +332,4 @@ def reconcile_pending(*, allow_connect=True):
                 _lift_pause(params['job_id'], record.get('pause_recorded'))
         except Exception:
             logging.getLogger(__name__).warning('Cron receipt recovery deferred: %s', journal, exc_info=True)
+            _bound_deferred_retry(journal)

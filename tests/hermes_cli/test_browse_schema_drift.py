@@ -605,10 +605,9 @@ def test_slow_browse_reconcile_gives_up_inside_its_budget_and_boot_waits_it_out(
     # total includes both; assert the DDL bound *from actual lock-time* and
     # separately bound the two phases together with scheduling grace.
     # The separate SQL VM watchdog still enforces budget_s itself. The
-    # subprocess-to-parent wall clock also includes macOS hosted-runner
-    # scheduling, WAL close/flush, and releasing the profile lock; a 2s
-    # envelope was observed failing with a correct 503 + full rollback.
-    # Keep a finite wall envelope without conflating it with VM time.
+    # process wall clock also includes macOS hosted-runner scheduling,
+    # WAL close/flush, and lock release. Keep an independent, finite wall
+    # envelope without relaxing the underlying SQLite VM deadline.
     assert float(elapsed) - ddl_started_s < budget_s + 4, out
     assert float(elapsed) < budget_s + reconcile.BROWSE_INTEGRITY_BUDGET_S + 4, out
     detail = " ".join(detail)
