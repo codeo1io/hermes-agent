@@ -97,7 +97,9 @@ def test_state_db_auto_maintenance_sweeps_turn_leases_before_retention_gates(
 ):
     """Expired turn leases of dead holders retire at every CLI startup: with both repair latches
     already set and auto_archive/auto_prune off — the config that returned before touching the DB
-    on the pre-sweep tree — the sweep still runs. Lease hygiene is not retention config."""
+    on the pre-sweep tree — the sweep still runs. Lease hygiene is not retention config; neither
+    is stale-heartbeat tombstone reclamation, which rides beside it at the shared 900 s window
+    (default 60 s refresh -> 15 missed beats)."""
     import cli
     import hermes_cli.config
     import hermes_constants
@@ -106,19 +108,42 @@ def test_state_db_auto_maintenance_sweeps_turn_leases_before_retention_gates(
     session_db.get_meta.return_value = "already-done"
     monkeypatch.setattr(hermes_cli.config, "load_config", lambda: {"sessions": {}})
     monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", raising=False)
 
     cli._run_state_db_auto_maintenance(session_db)
 
     session_db.sweep_expired_turn_leases.assert_called_once_with()
+    session_db.prune_stale_heartbeats.assert_called_once_with(max_age_seconds=900.0)
     session_db.maybe_auto_archive.assert_not_called()
     session_db.maybe_auto_prune_and_vacuum.assert_not_called()
+
+
+def test_state_db_auto_maintenance_derives_prune_window_from_refresh_env(
+    monkeypatch, tmp_path: Path
+):
+    """The tombstone window is not a constant: the seam reads
+    ``HERMES_GATEWAY_HEARTBEAT_REFRESH_S`` and derives 15 missed beats through the shared
+    policy helper (120 s refresh -> 1800 s window), matching the refresher's window exactly."""
+    import cli
+    import hermes_cli.config
+    import hermes_constants
+
+    session_db = MagicMock()
+    session_db.get_meta.return_value = "already-done"
+    monkeypatch.setattr(hermes_cli.config, "load_config", lambda: {"sessions": {}})
+    monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", "120")
+
+    cli._run_state_db_auto_maintenance(session_db)
+
+    session_db.prune_stale_heartbeats.assert_called_once_with(max_age_seconds=1800.0)
 
 
 def test_state_db_auto_maintenance_isolates_sweep_failure_from_retention_gates(
     monkeypatch, tmp_path: Path
 ):
-    """Never-raise contract: a failing sweep neither propagates out of startup maintenance nor
-    skips the retention gates behind it."""
+    """Never-raise contract: a failing sweep or stale-heartbeat prune neither propagates out of
+    startup maintenance nor skips the retention gates behind it."""
     import cli
     import hermes_cli.config
     import hermes_constants
@@ -126,6 +151,7 @@ def test_state_db_auto_maintenance_isolates_sweep_failure_from_retention_gates(
     session_db = MagicMock()
     session_db.get_meta.return_value = "already-done"
     session_db.sweep_expired_turn_leases.side_effect = RuntimeError("database is locked")
+    session_db.prune_stale_heartbeats.side_effect = RuntimeError("database is locked")
     monkeypatch.setattr(
         hermes_cli.config,
         "load_config",

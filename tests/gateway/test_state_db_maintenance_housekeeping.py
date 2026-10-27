@@ -6,11 +6,14 @@ profile (neither enabled, no conversation acquiring a lease) never retired the
 ``session_turn_leases`` rows of holders killed without releasing — residue that stands
 forever on a long-lived host. The sweep predicate itself lives with the lease machinery
 (``tests/hermes_state/test_session_turn_lease.py``); these tests pin the wiring: every
-maintenance call sweeps, the gated retention chores still gate (after the sweep), and the
-60s housekeeping tick still reaches the chore.
+maintenance call sweeps and reclaims stale ``gateway_heartbeats`` tombstones, the gated
+retention chores still gate (after both hygiene calls), and the 60s housekeeping tick
+still reaches the chore.
 """
 
 from types import SimpleNamespace
+
+import pytest
 
 import gateway.run as gateway_run
 
@@ -33,10 +36,17 @@ def _patch_store_seam(monkeypatch, calls: list):
     """Replace the registry seam with one recording fake store; returns (db, released)."""
     import hermes_state_registry as registry
 
+    def _prune_heartbeats(**kw):
+        calls.append("prune-heartbeats")
+        db.prune_windows.append(kw.get("max_age_seconds"))
+        return []
+
     db = SimpleNamespace(
         sweep_expired_turn_leases=lambda: calls.append("sweep") or 0,
+        prune_stale_heartbeats=_prune_heartbeats,
+        prune_windows=[],
         maybe_auto_archive=lambda **kw: calls.append("archive"),
-        maybe_auto_prune_and_vacuum=lambda **kw: calls.append("prune"))
+        maybe_auto_prune_and_vacuum=lambda **kw: calls.append("prune-retention"))
     released = []
     monkeypatch.setattr(registry, "acquire", lambda *a, **k: db)
     monkeypatch.setattr(registry, "release_or_close", released.append)
@@ -45,22 +55,25 @@ def _patch_store_seam(monkeypatch, calls: list):
 
 def test_maintenance_sweeps_turn_leases_with_retention_disabled(monkeypatch):
     """Neither auto_archive nor auto_prune: the chore still opens the store, sweeps expired
-    leases and releases the handle. (On the pre-change base this early-returned before the
-    acquire at all.)"""
+    leases, reclaims stale gateway-heartbeat tombstones at the shared window and releases the
+    handle. (On the pre-change base this early-returned before the acquire at all.)"""
     import hermes_cli.config as config_mod
 
     monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: {"sessions": {}})
+    monkeypatch.delenv("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", raising=False)
     calls: list = []
     db, released = _patch_store_seam(monkeypatch, calls)
 
     gateway_run._housekeeping_state_db_maintenance()
 
-    assert calls == ["sweep"]
+    assert calls == ["sweep", "prune-heartbeats"]
+    assert db.prune_windows == [900.0]
     assert released == [db]
 
 
 def test_maintenance_sweeps_before_the_gated_retention_chores(monkeypatch):
-    """With retention enabled the sweep still runs, first, and archive/prune keep their gates."""
+    """With retention enabled both hygiene calls still run, first, and archive/prune keep
+    their gates."""
     import hermes_cli.config as config_mod
 
     monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: {"sessions": {
@@ -70,7 +83,27 @@ def test_maintenance_sweeps_before_the_gated_retention_chores(monkeypatch):
 
     gateway_run._housekeeping_state_db_maintenance()
 
-    assert calls == ["sweep", "archive", "prune"]
+    assert calls == ["sweep", "prune-heartbeats", "archive", "prune-retention"]
+    assert released == [db]
+
+
+def test_maintenance_heartbeat_prune_failure_releases_handle(monkeypatch):
+    """The heartbeat prune rides the chore bare like the sweep (the housekeeping loop owns
+    errors): a failing prune propagates but the store handle is still released."""
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: {"sessions": {}})
+    calls: list = []
+    db, released = _patch_store_seam(monkeypatch, calls)
+
+    def _raise(**kw):
+        raise RuntimeError("database is locked")
+
+    db.prune_stale_heartbeats = _raise
+
+    with pytest.raises(RuntimeError, match="database is locked"):
+        gateway_run._housekeeping_state_db_maintenance()
+
     assert released == [db]
 
 
