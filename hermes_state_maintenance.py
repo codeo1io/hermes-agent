@@ -43,6 +43,19 @@ def _seconds_since(now: float, raw) -> Optional[float]:
         return None
 
 
+def backend_heartbeat_prune_max_age(refresh_s: float) -> float:
+    """Reclamation window for stale ``gateway_heartbeats`` rows (tombstones of backends that
+    died without an orderly exit — crash, SIGKILL, service restart whose ``atexit`` never ran).
+    A backend refreshes its row every ``refresh_s`` seconds, so a row untouched for 15
+    consecutive missed beats (default refresh 60 s → 900 s) is dead beyond doubt, while a live
+    backend's row survives any single missed refresh.  The 900 s floor keeps register-once mode
+    (``refresh_s <= 0``) and very fast refreshes from minting aggressive windows; pruning at
+    this window ends a non-beating backend's orphan-sweep protection earlier than the sweep's
+    own staleness — intended, because the row's upsert restores it within one refresh interval
+    of the backend resuming."""
+    return max(900.0, 15.0 * refresh_s)
+
+
 # Prune/archive filters in evaluation order: (kwarg, applies-when, builder -> (clauses, params)).
 # ``applies-when``: "notnone" (numeric/time bounds; 0 is a real bound) or "truthy" ("" = unset).
 _PRUNE_FILTERS = (

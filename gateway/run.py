@@ -4408,9 +4408,10 @@ def _profile_sessions_dir(launch: Optional[tuple[Path, Path]]) -> Path:
 
 
 def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = None) -> None:
-    """Per-profile state.db maintenance: expired-turn-lease hygiene ALWAYS, then stale-session
-    auto-archive and auto-prune/VACUUM behind their sessions.auto_archive / sessions.auto_prune
-    gates (min_interval_hours; VACUUM by its own throttles). Lease residue is not retention.
+    """Per-profile state.db maintenance: expired-turn-lease and stale-heartbeat-tombstone
+    hygiene ALWAYS, then stale-session auto-archive and auto-prune/VACUUM behind their
+    sessions.auto_archive / sessions.auto_prune gates (min_interval_hours; VACUUM by its own
+    throttles). Lease residue is not retention; neither is a crashed backend's heartbeat row.
 
     Profile-scoped by its caller: ``acquire()``, ``get_hermes_home()`` and ``load_config()`` all
     resolve through the active scope, so an unscoped run swept only the LAUNCH profile's store with
@@ -4419,12 +4420,18 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     gateway owns (``web_server_sessions``). *launch* carries the launch home's configured transcript
     dir (:func:`_launch_sessions_dir`) so its override still governs its own profile."""
     from hermes_cli.config import load_config as _load_full_config
+    from hermes_state_maintenance import backend_heartbeat_prune_max_age
     from hermes_state_registry import acquire, release_or_close
+    from utils import env_float
     _sess_cfg = (_load_full_config().get("sessions") or {})
     _adb = acquire()
     try:
         # Ungated and first: a killed holder's expired lease row is residue, not retention.
         _adb.sweep_expired_turn_leases()
+        # Ungated beside it: a crashed backend's heartbeat tombstone (its ``atexit`` clear never
+        # ran) is residue too — reclaimed at the shared window (15 missed beats, 900s floor).
+        _adb.prune_stale_heartbeats(max_age_seconds=backend_heartbeat_prune_max_age(
+            env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0)))
         if _sess_cfg.get("auto_archive", False):
             _adb.maybe_auto_archive(
                 idle_days=float(_sess_cfg.get("auto_archive_days", 3)),
