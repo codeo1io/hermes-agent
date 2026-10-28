@@ -1,8 +1,14 @@
 """Fail-closed evidence acceptance for cron jobs requiring real work."""
 import hashlib
 import json
+import time
+from datetime import UTC, datetime, timedelta
 
-from cron.completion_evidence import validate_completion_evidence
+from cron.completion_evidence import validate_completion_evidence as _gate
+
+
+def validate_completion_evidence(job, response, execution_id):
+    return _gate(job, response, execution_id, claimed_at_epoch=time.time() - 10)
 
 
 def _case(tmp_path, execution_id="exec-abc"):
@@ -87,8 +93,19 @@ def test_receipt_outside_root_not_accepted(tmp_path):
     assert "failed" in validate_completion_evidence(job, response, "exec-abc")
 
 
-def test_scheduler_marks_truncated_gated_turn_failed(tmp_path):
+def test_old_receipt_cannot_be_reused_for_new_execution(tmp_path):
+    job, _, _, _, response = _case(tmp_path)
+    assert "predates" in _gate(
+        job, response, "exec-abc", claimed_at_epoch=time.time() + 60
+    )
+
+
+def test_scheduler_marks_truncated_gated_turn_failed(tmp_path, monkeypatch):
     from cron.scheduler import _apply_agent_failure_marker
+    monkeypatch.setattr(
+        "cron.scheduler.get_execution",
+        lambda _id: {"claimed_at": (datetime.now(UTC) - timedelta(seconds=10)).isoformat()},
+    )
 
     job, _, _, _, _ = _case(tmp_path)
     success, error, agent_declared = _apply_agent_failure_marker(
@@ -99,8 +116,12 @@ def test_scheduler_marks_truncated_gated_turn_failed(tmp_path):
     assert agent_declared is False
 
 
-def test_scheduler_accepts_identity_bound_receipt(tmp_path):
+def test_scheduler_accepts_identity_bound_receipt(tmp_path, monkeypatch):
     from cron.scheduler import _apply_agent_failure_marker
+    monkeypatch.setattr(
+        "cron.scheduler.get_execution",
+        lambda _id: {"claimed_at": (datetime.now(UTC) - timedelta(seconds=10)).isoformat()},
+    )
 
     job, _, _, _, response = _case(tmp_path)
     assert _apply_agent_failure_marker(

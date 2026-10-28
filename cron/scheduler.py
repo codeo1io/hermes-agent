@@ -3299,11 +3299,21 @@ def _apply_agent_failure_marker(
         marker_error = _cron_failure_marker_error(final_response)
         if marker_error is not None:
             return False, marker_error, True
-        from cron.completion_evidence import validate_completion_evidence
+        if job.get("completion_evidence_root"):
+            from datetime import datetime
+            from cron.completion_evidence import validate_completion_evidence
 
-        evidence_error = validate_completion_evidence(job, final_response, execution_id)
-        if evidence_error is not None:
-            return False, evidence_error, False
+            try:
+                record = get_execution(execution_id) or {}
+                claimed_at_epoch = datetime.fromisoformat(record["claimed_at"]).timestamp()
+            except Exception as exc:
+                # A transient store failure cannot certify a repair; keep the run failed.
+                return False, f"Cron completion evidence gate has no durable claim: {exc}", False
+            evidence_error = validate_completion_evidence(
+                job, final_response, execution_id, claimed_at_epoch=claimed_at_epoch,
+            )
+            if evidence_error is not None:
+                return False, evidence_error, False
     return success, error, False
 
 

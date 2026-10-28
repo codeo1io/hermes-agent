@@ -33,7 +33,9 @@ def _safe_file(path: Path, root: Path, size_limit: int) -> bytes:
     return path.read_bytes()
 
 
-def validate_completion_evidence(job: dict, response: str, execution_id: str) -> str | None:
+def validate_completion_evidence(
+    job: dict, response: str, execution_id: str, *, claimed_at_epoch: float | None = None,
+) -> str | None:
     """Return a failure reason, or None if the opt-in receipt is identity-bound.
 
     The job's receipt directory and artifact roots are trusted operator configuration,
@@ -45,6 +47,8 @@ def validate_completion_evidence(job: dict, response: str, execution_id: str) ->
     try:
         if not execution_id or not isinstance(root_text, str):
             raise ValueError("missing execution identity or evidence root")
+        if claimed_at_epoch is None or claimed_at_epoch <= 0:
+            raise ValueError("missing durable run claim timestamp")
         root = Path(root_text)
         if not root.is_absolute() or root == Path("/"):
             raise ValueError("completion evidence root must be an absolute directory")
@@ -59,6 +63,8 @@ def validate_completion_evidence(job: dict, response: str, execution_id: str) ->
             raise ValueError("invalid receipt digest")
         receipt_path = root / f"{execution_id}.json"
         raw = _safe_file(receipt_path, root, _MAX_RECEIPT_BYTES)
+        if receipt_path.stat().st_mtime + 1 < claimed_at_epoch:
+            raise ValueError("receipt predates this execution")
         if hashlib.sha256(raw).hexdigest() != claimed:
             raise ValueError("receipt digest mismatch")
         receipt = json.loads(raw)
@@ -70,8 +76,8 @@ def validate_completion_evidence(job: dict, response: str, execution_id: str) ->
             raise ValueError("receipt lacks typed repair kind")
         artifacts = receipt.get("artifacts")
         roots = [Path(x) for x in job.get("completion_artifact_roots", []) if isinstance(x, str)]
-        if not roots or not isinstance(artifacts, list) or not artifacts:
-            raise ValueError("receipt lacks verifiable artifacts or configured roots")
+        if not roots or not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 16:
+            raise ValueError("receipt lacks bounded verifiable artifacts or configured roots")
         for item in artifacts:
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 raise ValueError("malformed artifact entry")
@@ -87,6 +93,8 @@ def validate_completion_evidence(job: dict, response: str, execution_id: str) ->
                     continue
             if data is None or hashlib.sha256(data).hexdigest() != item.get("sha256"):
                 raise ValueError("artifact missing, out of scope, or digest mismatch")
+            if path.stat().st_mtime + 1 < claimed_at_epoch:
+                raise ValueError("artifact predates this execution")
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         return f"Cron completion evidence gate failed: {exc}"
     return None
