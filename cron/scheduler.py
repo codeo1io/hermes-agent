@@ -3307,7 +3307,9 @@ def _apply_agent_failure_marker(
                 record = get_execution(execution_id) or {}
                 claimed_at_epoch = datetime.fromisoformat(record["claimed_at"]).timestamp()
             except Exception as exc:
-                # A transient store failure cannot certify a repair; keep the run failed.
+                # Deliberate fail-closed boundary: a store failure cannot certify a repair.
+                # Preserve the traceback for diagnosis instead of silently swallowing it.
+                logger.exception("Cron completion evidence claim lookup failed for %s", execution_id)
                 return False, f"Cron completion evidence gate has no durable claim: {exc}", False
             evidence_error = validate_completion_evidence(
                 job, final_response, execution_id, claimed_at_epoch=claimed_at_epoch,

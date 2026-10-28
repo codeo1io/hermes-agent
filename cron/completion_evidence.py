@@ -33,6 +33,29 @@ def _safe_file(path: Path, root: Path, size_limit: int) -> bytes:
     return path.read_bytes()
 
 
+def _validate_artifacts(
+    artifacts: list, roots: list[Path], receipt_path: Path, claimed_at_epoch: float,
+) -> None:
+    """Verify every scoped artifact independently; never accept a receipt as its own proof."""
+    for item in artifacts:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ValueError("malformed artifact entry")
+        path = Path(item["path"])
+        if path == receipt_path:
+            raise ValueError("receipt cannot verify itself")
+        data = None
+        for allowed_root in roots:
+            try:
+                data = _safe_file(path, allowed_root, _MAX_ARTIFACT_BYTES)
+                break
+            except (OSError, ValueError):
+                continue
+        if data is None or hashlib.sha256(data).hexdigest() != item.get("sha256"):
+            raise ValueError("artifact missing, out of scope, or digest mismatch")
+        if path.stat().st_mtime + 1 < claimed_at_epoch:
+            raise ValueError("artifact predates this execution")
+
+
 def validate_completion_evidence(
     job: dict, response: str, execution_id: str, *, claimed_at_epoch: float | None = None,
 ) -> str | None:
@@ -78,23 +101,7 @@ def validate_completion_evidence(
         roots = [Path(x) for x in job.get("completion_artifact_roots", []) if isinstance(x, str)]
         if not roots or not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 16:
             raise ValueError("receipt lacks bounded verifiable artifacts or configured roots")
-        for item in artifacts:
-            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
-                raise ValueError("malformed artifact entry")
-            path = Path(item["path"])
-            if path == receipt_path:
-                raise ValueError("receipt cannot verify itself")
-            data = None
-            for allowed_root in roots:
-                try:
-                    data = _safe_file(path, allowed_root, _MAX_ARTIFACT_BYTES)
-                    break
-                except (OSError, ValueError):
-                    continue
-            if data is None or hashlib.sha256(data).hexdigest() != item.get("sha256"):
-                raise ValueError("artifact missing, out of scope, or digest mismatch")
-            if path.stat().st_mtime + 1 < claimed_at_epoch:
-                raise ValueError("artifact predates this execution")
+        _validate_artifacts(artifacts, roots, receipt_path, claimed_at_epoch)
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         return f"Cron completion evidence gate failed: {exc}"
     return None
