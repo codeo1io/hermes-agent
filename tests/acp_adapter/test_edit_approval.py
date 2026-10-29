@@ -132,8 +132,10 @@ def test_multifile_v4a_patch_checks_every_real_path_not_the_joined_display_strin
     assert not should_auto_approve_edit(proposal, "session", str(tmp_path))
     assert not should_auto_approve_edit(proposal, "workspace_session", str(tmp_path))
 
-    # Escape target sits outside BOTH allowed roots (tempdir + session cwd).
-    escape = Path.home() / ".hermes-acp-escape-test.txt"
+    # Workspace auto-approval permits the OS temp root. CI redirects Path.home()
+    # *into* that root, so home is not a reliable out-of-scope escape target.
+    # The temp root's parent is outside both permitted roots on every platform.
+    escape = Path(tempfile.gettempdir()).resolve().parent / ".hermes-acp-escape-test.txt"
     hidden_escape = f"*** Update File: {tmp_path}/src/ok.py\n@@\n+ok\n*** Update File: {escape}\n@@\n+evil\n"
     proposal = build_edit_proposal("patch", {"mode": "patch", "patch": hidden_escape})
     assert not should_auto_approve_edit(proposal, "workspace_session", str(tmp_path))
