@@ -43,6 +43,8 @@ async def test_redelivered_media_message_returns_its_receipt_and_changed_bytes_c
     server = ThreadingHTTPServer(('127.0.0.1', 0), _Media)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{server.server_port}/photo.png'
+    # Only the exact local HTTP fixture is trusted here; production SSRF checks stay intact.
+    monkeypatch.setattr('gateway.relay.media.is_safe_url', lambda candidate: candidate == url)
     client = RelayMediaClient(f'http://127.0.0.1:{server.server_port}', None, None)
     runner = GatewayRunner(GatewayConfig())
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token='fixture-token', typing_indicator=False))
