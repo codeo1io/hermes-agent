@@ -1861,8 +1861,29 @@ DERIVED_MAX_IN_PROGRESS_FLOOR = 2
 DERIVED_MAX_IN_PROGRESS_CEILING = 8
 
 
+def _psi_full_avg60() -> Optional[float]:
+    """Host-wide percentage of time all runnable tasks stalled on memory.
+
+    MemAvailable alone can look merely elevated while swap thrashing leaves
+    the entire host unable to make forward progress.  PSI is Linux-only;
+    unavailable or malformed data leaves the existing memory guard intact.
+    """
+    try:
+        with open("/proc/pressure/memory", encoding="ascii") as stream:
+            for line in stream:
+                fields = line.split()
+                if fields and fields[0] == "full":
+                    for field in fields[1:]:
+                        if field.startswith("avg60="):
+                            value = float(field.partition("=")[2])
+                            return value if 0.0 <= value <= 100.0 else None
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _system_memory_sample() -> dict:
-    """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
+    """Best-effort system memory and PSI snapshot, ``{}`` when unknown.
 
     Local import keeps ``kanban_db`` importable without the gateway package.
     Module-level indirection is also the test seam — conftest patches this to
@@ -1870,7 +1891,12 @@ def _system_memory_sample() -> dict:
     """
     try:
         from gateway.lifecycle_ledger import sample_memory
-        return sample_memory() or {}
+        sample = sample_memory() or {}
+        if sample:
+            full_psi = _psi_full_avg60()
+            if full_psi is not None:
+                sample["memory_full_psi_avg60"] = full_psi
+        return sample
     except Exception:
         return {}
 
@@ -1975,12 +2001,10 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
 
 
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
-    """Classify system memory pressure: ok/elevated/critical/unknown.
+    """Classify pressure using both MemAvailable and sustained full-stall PSI.
 
-    Reuses :func:`gateway.memory_status.classify_pressure` so "critical" matches
-    the dashboard banner and lifecycle-ledger OOM heuristics. ``unknown``
-    (non-Linux, read failure) imposes no restriction — never brick dispatch
-    where /proc is unavailable.
+    A high MemAvailable reading must never override severe system-wide memory
+    stalls.  Missing PSI retains the existing cross-platform classification.
     """
     if sample is None:
         sample = _system_memory_sample()
@@ -1988,7 +2012,14 @@ def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
         return "unknown"
     try:
         from gateway.memory_status import classify_pressure
-        return classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
+        baseline = classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
+        full_psi = sample.get("memory_full_psi_avg60")
+        if isinstance(full_psi, (int, float)) and not isinstance(full_psi, bool):
+            if 10.0 <= full_psi <= 100.0:
+                return "critical"
+            if 5.0 <= full_psi < 10.0 and baseline != "critical":
+                return "elevated"
+        return baseline
     except Exception:
         return "unknown"
 
