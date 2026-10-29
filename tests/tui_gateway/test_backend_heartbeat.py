@@ -11,11 +11,15 @@ refreshes it periodically.  This file verifies:
 * Failure to start the refresher is swallowed so a malformed DB
   never breaks gateway startup.
 * ``HERMES_GATEWAY_HEARTBEAT_REFRESH_S=0`` disables the refresher.
+* A backend that crashed without ``atexit`` (SIGKILL, OOM, hard crash)
+  has its row reclaimed by the prune that runs inside every heartbeat
+  refresh once the row crosses the prune age.
 """
 
 from __future__ import annotations
 
 import io
+import time
 
 import pytest
 
@@ -88,6 +92,73 @@ class TestBackendHeartbeatRefresher:
         # Must not raise.
         server._start_backend_heartbeat_refresher()
 
+
+class TestCrashResidueReclaim:
+    """The crash-recovery leg of the heartbeat lifecycle.
+
+    A backend that dies without running ``atexit`` (SIGKILL after the
+    supervisor grace, OOM, hard crash) leaks its heartbeat row forever —
+    the startup orphan sweep then keeps treating the dead backend's idle
+    sessions as live-owned. The fix: every heartbeat refresh (the
+    synchronous startup registration and each loop tick) prunes rows
+    older than ``_HEARTBEAT_PRUNE_AGE_S``.
+    """
+
+    @staticmethod
+    def _seed(db, backend_id, age_s):
+        now = time.time()
+        db.register_backend_heartbeat(
+            backend_id=backend_id, pid=1, started_at=now - age_s - 60,
+            last_heartbeat=now - age_s, profile="p", host="h")
+
+    def test_refresh_reclaims_crashed_backend_row(self, db, monkeypatch):
+        """THE regression: a stale crash row is gone after one refresh by a live backend."""
+        from tui_gateway import server
+
+        self._seed(db, "crashed@h:1:dead", age_s=3600.0)
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "live@h:2:alive")
+
+        server._refresh_backend_heartbeat()
+
+        ids = [r["backend_id"] for r in db.list_backend_heartbeats()]
+        assert ids == ["live@h:2:alive"]
+
+    def test_startup_registration_reclaims_crashed_backend_row(self, db, monkeypatch):
+        """Restart-after-crash: the synchronous first refresh reclaims residue immediately."""
+        from tui_gateway import server
+
+        self._seed(db, "crashed@h:1:dead", age_s=3600.0)
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "live@h:2:alive")
+        monkeypatch.setattr(server, "_HEARTBEAT_REFRESH_S", 0.0)  # no refresher thread
+        monkeypatch.setattr(server, "_heartbeat_refresher_started", False)
+
+        server._start_backend_heartbeat_refresher()
+
+        ids = [r["backend_id"] for r in db.list_backend_heartbeats()]
+        assert ids == ["live@h:2:alive"]
+
+    def test_refresh_prunes_boundary_around_prune_age(self, db, monkeypatch):
+        """Liveness safety: rows under the prune age survive a sibling refresh; rows past it go."""
+        from tui_gateway import server
+
+        self._seed(db, "stalled@h:3:young", age_s=9.0)
+        self._seed(db, "crashed@h:4:old", age_s=11.0)
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "live@h:2:alive")
+        monkeypatch.setattr(server, "_HEARTBEAT_PRUNE_AGE_S", 10.0)
+
+        server._refresh_backend_heartbeat()
+
+        ids = {r["backend_id"] for r in db.list_backend_heartbeats()}
+        assert ids == {"stalled@h:3:young", "live@h:2:alive"}
+
+    def test_prune_age_scales_with_refresh_interval(self):
+        """Contract: the crash-residue tolerance is 5 refresh cycles at import defaults."""
+        from tui_gateway import server
+
+        assert server._HEARTBEAT_PRUNE_AGE_S == 5.0 * server._HEARTBEAT_REFRESH_S
 
 
 class TestEntryAndWsWiring:
