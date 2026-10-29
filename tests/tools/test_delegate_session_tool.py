@@ -583,7 +583,7 @@ def test_durable_metadata_cache_prunes_oldest_files(monkeypatch, tmp_path):
     created = []
     for index in range(5):
         path = root / f"session-{index}.json"
-        path.write_text(json.dumps({"session_id": str(index)}))
+        path.write_text(json.dumps({"session_id": str(index), "status": "closed"}))
         os.utime(path, (100 + index, 100 + index))
         created.append(path)
 

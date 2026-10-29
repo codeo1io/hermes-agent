@@ -216,13 +216,23 @@ def _metadata_files_newest(root: Path) -> list[Path]:
 
 
 def _prune_durable_metadata(root: Path) -> None:
-    """Bound Hermes' delegate-session metadata cache without touching Pi history."""
+    """Prune old terminal metadata without losing resumable live bindings.
+
+    A session can stay idle or running across many unrelated delegations.
+    Evicting its durable identity solely because 500 newer records appeared
+    makes recovery after a supervisor restart impossible. Only a verified
+    terminal (closed/error) record is eligible; unknown/corrupt records are
+    preserved rather than silently destroying potential recovery state.
+    """
     for stale in _metadata_files_newest(root)[_MAX_DURABLE_SESSIONS:]:
         try:
+            payload = json.loads(stale.read_text(encoding="utf-8-sig"))
+            if not isinstance(payload, dict) or payload.get("status") not in {"closed", "error"}:
+                continue
             stale.unlink()
-        except OSError:
+        except (OSError, ValueError):
             logger.debug(
-                "Could not prune stale delegate-session metadata %s",
+                "Could not safely prune delegate-session metadata %s",
                 stale,
                 exc_info=True,
             )
