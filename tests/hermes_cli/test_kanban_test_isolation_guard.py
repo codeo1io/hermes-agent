@@ -19,7 +19,6 @@ patch timing.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -72,9 +71,21 @@ def test_default_root_dot_profile_home_keeps_existing_mapping(monkeypatch, tmp_p
 
 
 @pytest.fixture()
-def _pytest_context(monkeypatch):
-    """Arm the env-based test signal the way the hermetic conftest does."""
+def _pytest_context(monkeypatch, tmp_path):
+    """Exercise the production-path guard against a synthetic, isolated root.
+
+    A CI runner's real home can itself be a registered pytest sandbox. Using
+    that home here makes the guard correctly allow the path and the test
+    incorrectly fail (or touch the runner's actual state). Keep the security
+    predicate real while replacing only the platform root and sandbox lookup.
+    """
+    synthetic_root = tmp_path / "synthetic-production-home" / ".hermes"
+    synthetic_root.mkdir(parents=True)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_self.py::test_x")
+    monkeypatch.setattr(
+        "hermes_state_guard._real_platform_state_root", lambda: synthetic_root
+    )
+    monkeypatch.setattr("hermes_state_guard._path_in_sandbox", lambda _path: False)
     yield
 
 
