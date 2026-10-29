@@ -1845,11 +1845,8 @@ def review_dispatch_enabled() -> bool:
         return True
 
 
-# Memory-aware dispatch guard: an uncapped board once OOM'd a 1 GiB host. Two
-# safeguards — a memory-DERIVED default cap when none is configured
-# (``resolve_max_in_progress``) and a live memory-PRESSURE guard inside the
-# tick (``_memory_pressure_level``) because a static cap can't see other
-# tenants. Both fail open: non-Linux / read error → no cap / "unknown".
+# Memory-aware guard: derived default concurrency cap plus live MemAvailable/PSI
+# pressure. Unknown memory preserves the cross-platform fallback.
 
 # Assumed per-worker footprint for the derived cap; deliberately conservative
 # so the cap errs toward fewer workers on small VMs.
@@ -1862,43 +1859,17 @@ DERIVED_MAX_IN_PROGRESS_CEILING = 8
 
 
 def _psi_full_avg60() -> Optional[float]:
-    """Host-wide percentage of time all runnable tasks stalled on memory.
+    """Sample host full-stall PSI (indirection preserves the test opener seam)."""
+    from hermes_cli.kanban_db_memory import read_psi_full_avg60
 
-    MemAvailable alone can look merely elevated while swap thrashing leaves
-    the entire host unable to make forward progress.  PSI is Linux-only;
-    unavailable or malformed data leaves the existing memory guard intact.
-    """
-    try:
-        with open("/proc/pressure/memory", encoding="ascii") as stream:
-            for line in stream:
-                fields = line.split()
-                if fields and fields[0] == "full":
-                    for field in fields[1:]:
-                        if field.startswith("avg60="):
-                            value = float(field.partition("=")[2])
-                            return value if 0.0 <= value <= 100.0 else None
-    except (OSError, ValueError):
-        pass
-    return None
+    return read_psi_full_avg60(globals().get("open", open))
 
 
 def _system_memory_sample() -> dict:
-    """Best-effort system memory and PSI snapshot, ``{}`` when unknown.
+    """Sample MemAvailable and PSI; keep this seam patchable by callers."""
+    from hermes_cli.kanban_db_memory import sample_system_memory
 
-    Local import keeps ``kanban_db`` importable without the gateway package.
-    Module-level indirection is also the test seam — conftest patches this to
-    ``{}`` so results don't depend on the CI runner's live memory.
-    """
-    try:
-        from gateway.lifecycle_ledger import sample_memory
-        sample = sample_memory() or {}
-        if sample:
-            full_psi = _psi_full_avg60()
-            if full_psi is not None:
-                sample["memory_full_psi_avg60"] = full_psi
-        return sample
-    except Exception:
-        return {}
+    return sample_system_memory(_psi_full_avg60)
 
 
 def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
@@ -2001,17 +1972,14 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
 
 
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
-    """Classify pressure using both MemAvailable and sustained full-stall PSI.
-
-    A high MemAvailable reading must never override severe system-wide memory
-    stalls.  Missing PSI retains the existing cross-platform classification.
-    """
+    """Classify MemAvailable and sustained PSI; retain baseline if PSI absent."""
     if sample is None:
         sample = _system_memory_sample()
     if not sample:
         return "unknown"
     try:
         from gateway.memory_status import classify_pressure
+
         baseline = classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
         full_psi = sample.get("memory_full_psi_avg60")
         if isinstance(full_psi, (int, float)) and not isinstance(full_psi, bool):
