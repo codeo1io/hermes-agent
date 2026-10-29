@@ -179,10 +179,11 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         # _disable_websocket_auto_reconnect() must still run.
         self.assertIsNone(adapter._ws_client)
 
+    @_clear_feishu_env
     @patch.dict(os.environ, {
         "FEISHU_APP_ID": "cli_app",
         "FEISHU_APP_SECRET": "secret_app",
-    }, clear=True)
+    }, clear=False)
     def test_connect_websocket_sets_channel_ua_tag_and_uses_owned_executor(self):
         """Verify the WebSocket client uses the channel tag and owned executor.
 
@@ -652,7 +653,8 @@ class TestAdapterBehavior(unittest.TestCase):
             )
         )
 
-    @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "open"}, clear=True)
+    @_clear_feishu_env
+    @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "open"}, clear=False)
     def test_group_message_matches_bot_name_when_only_name_available(self):
         """Name fallback engages when either side lacks an open_id. When BOTH
         the mention and the bot carry open_ids, IDs are authoritative — a
@@ -892,7 +894,8 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(response.status, 200)
         adapter._on_message_event.assert_called_once()
 
-    @patch.dict(os.environ, {"FEISHU_VERIFICATION_TOKEN": "expected-token"}, clear=True)
+    @_clear_feishu_env
+    @patch.dict(os.environ, {"FEISHU_VERIFICATION_TOKEN": "expected-token"}, clear=False)
     def test_url_verification_requires_configured_verification_token(self):
         """url_verification must be rejected when token is set but mismatched.
 
@@ -968,12 +971,13 @@ class TestAdapterBehavior(unittest.TestCase):
         # Reply anchors / slash-command thread checks read source.message_id, not event.message_id.
         self.assertEqual(event.source.message_id, "om_text")
 
+    @_clear_feishu_env
     @patch.dict(
         os.environ,
         {
             "HERMES_FEISHU_TEXT_BATCH_MAX_MESSAGES": "2",
         },
-        clear=True,
+        clear=False,
     )
     def test_text_batch_flushes_when_message_count_limit_is_hit(self):
         from gateway.config import PlatformConfig
@@ -1720,7 +1724,8 @@ class TestDedupTTL(unittest.TestCase):
 class TestGroupMentionAtAll(unittest.TestCase):
     """Tests for @_all (Feishu @everyone) group mention routing."""
 
-    @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "allowlist", "FEISHU_ALLOWED_USERS": "ou_allowed"}, clear=True)
+    @_clear_feishu_env
+    @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "allowlist", "FEISHU_ALLOWED_USERS": "ou_allowed"}, clear=False)
     def test_at_all_still_requires_policy_gate(self):
         """@_all bypasses mention gating but NOT the allowlist policy."""
         from gateway.config import PlatformConfig
