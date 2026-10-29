@@ -847,7 +847,11 @@ def _teardown_tui_server_sessions(mod) -> None:
 def _reset_tui_gateway_server_state():
     mod = sys.modules.get(_TUI_SERVER_MODULE)
     snapshot = None
-    if mod is not None:
+    # An import may still be in progress when a test starts. Do not snapshot
+    # incomplete module globals; its own importer will finish initialization.
+    if mod is not None and all(hasattr(mod, name) for name in (
+        "_methods", "_cfg_cache", "_cfg_sig", "_cfg_path", "_db", "_db_error", "_real_stdout",
+    )):
         snapshot = {
             "methods": dict(mod._methods),
             "cfg": (mod._cfg_cache, mod._cfg_sig, mod._cfg_path),
@@ -858,7 +862,9 @@ def _reset_tui_gateway_server_state():
     yield
 
     mod = sys.modules.get(_TUI_SERVER_MODULE)
-    if mod is None:
+    # A failed/circular import can leave a partially initialized module in
+    # sys.modules. Never mutate or teardown a module lacking its state.
+    if mod is None or not hasattr(mod, "_sessions"):
         return
 
     # This finalizer can run before the test's own monkeypatch undo, so a
