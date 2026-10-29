@@ -708,8 +708,14 @@ def _ensure_test_isolation(path: Path) -> None:
         return
     try:
         resolved = Path(path).expanduser().resolve()
-    except Exception:
-        return
+    except Exception as exc:
+        # A test I/O guard, unreadable path component, or broken symlink must
+        # never turn the production-board protection into an allow decision.
+        # In particular, the suite's real-home I/O guard refuses resolve()
+        # probes of the live board before any SQLite open can occur.
+        raise RuntimeError(
+            "kanban test-isolation guard: cannot safely resolve test DB path"
+        ) from exc
     root = _real_platform_state_root()
     if root is None:
         return
