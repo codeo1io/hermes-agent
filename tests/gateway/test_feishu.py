@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from collections import OrderedDict
+from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -16,6 +17,30 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from gateway.platforms.event import ProcessingOutcome
+
+
+def _clear_feishu_env(target):
+    """Clear Feishu configuration without escaping pytest's Hermes-home sandbox.
+
+    unittest.mock.patch.dict(clear=True) otherwise removes the per-test
+    HERMES_HOME fixture, causing adapter construction to read/write the real
+    ~/.hermes store. This decorator also supports unittest class decoration.
+    """
+    if isinstance(target, type):
+        for name, member in vars(target).items():
+            if name.startswith("test_") and callable(member):
+                setattr(target, name, _clear_feishu_env(member))
+        return target
+
+    @wraps(target)
+    def wrapped(*args, **kwargs):
+        home = os.environ.get("HERMES_HOME")
+        if not home:
+            raise AssertionError("Feishu test requires an isolated HERMES_HOME")
+        with patch.dict(os.environ, {"HERMES_HOME": home}, clear=True):
+            return target(*args, **kwargs)
+
+    return wrapped
 
 
 if TYPE_CHECKING:
@@ -219,7 +244,7 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
                          "extra_ua_tags must be ['channel'] to enable group event routing")
         self.assertEqual(submitted_executors, [owned_executor])
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_edit_message_falls_back_to_text_when_post_update_is_rejected(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -263,7 +288,7 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         )
 
 
-@patch.dict(os.environ, {}, clear=True)
+@_clear_feishu_env
 class TestDeleteMessage(unittest.TestCase):
     def test_delete_message_calls_im_message_delete(self):
         from gateway.config import PlatformConfig
@@ -372,7 +397,7 @@ def _admits_group(adapter, message, sender_id, chat_id=""):
     return adapter._admit(sender, message) is None
 
 class TestAdapterBehavior(unittest.TestCase):
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_build_event_handler_registers_reaction_and_card_processors(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -441,7 +466,7 @@ class TestAdapterBehavior(unittest.TestCase):
             calls,
         )
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_bot_origin_reactions_are_dropped_to_avoid_feedback_loops(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -462,7 +487,7 @@ class TestAdapterBehavior(unittest.TestCase):
                 adapter._on_reaction_event("im.message.reaction.created_v1", data)
             run_threadsafe.assert_not_called()
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_user_reaction_with_managed_emoji_is_still_routed(self):
         # Operator-origin filter is enough to prevent feedback loops; we must
         # not additionally swallow user-origin reactions just because their
@@ -520,7 +545,7 @@ class TestAdapterBehavior(unittest.TestCase):
         adapter.get_chat_info = AsyncMock(return_value={"name": "Test Chat"})
         return adapter
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_reaction_on_peer_bot_message_is_not_routed(self):
         # GET im/v1/messages sender for bot messages carries id=app_id; a peer
         # bot's message has a different app_id than ours, so it must be dropped.
@@ -684,7 +709,7 @@ class TestAdapterBehavior(unittest.TestCase):
             _admits_group(adapter2, SimpleNamespace(mentions=[bot_mention]), sender_id, "")
         )
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_extract_post_message_downloads_embedded_resources(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -723,7 +748,7 @@ class TestAdapterBehavior(unittest.TestCase):
             fallback_filename="spec.pdf",
         )
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_extract_audio_message_downloads_and_caches(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -752,7 +777,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(media_types, ["audio/ogg"])
         self.assertEqual(media_text_inlined, [False])
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_extract_text_message_starting_with_slash_becomes_command(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -790,7 +815,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(event.message_type.value, "command")
         self.assertEqual(event.text, "/help test")
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_extract_text_file_injects_content(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -808,7 +833,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertIn("hello from feishu", text)
         self.assertIn("[Content of", text)
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_message_event_submits_to_adapter_loop(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -843,7 +868,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         self.assertTrue(submit.called)
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_webhook_request_uses_same_message_dispatch_path(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -895,7 +920,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         self.assertEqual(response.status, 401)
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_process_inbound_message_uses_event_sender_identity_only(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.event import MessageType
@@ -1052,7 +1077,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(event.media_types, ["text/markdown"])
         self.assertEqual(event.media_text_inlined, [True])
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_media_batch_merges_rapid_photo_messages(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.event import MessageEvent, MessageType
@@ -1243,7 +1268,7 @@ class TestAdapterBehavior(unittest.TestCase):
                 second = FeishuAdapter(PlatformConfig())
                 self.assertTrue(asyncio.run(second._is_duplicate("om_same")))
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_send_document_reply_uses_thread_flag(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1298,7 +1323,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_send_uses_post_for_every_chunk_of_multi_chunk_markdown(self):
         """Regression for #26841: when a long Markdown message is split
         across multiple chunks, every chunk must go out as
@@ -1357,7 +1382,7 @@ class TestAdapterBehavior(unittest.TestCase):
         msg_types = [r.request_body.msg_type for r in captured]
         self.assertEqual(msg_types, ["post", "post"])
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_send_splits_fenced_code_blocks_into_separate_post_rows(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1426,7 +1451,7 @@ class TestPendingInboundQueue(unittest.TestCase):
     before or during adapter loop transitions must be queued for replay
     rather than silently dropped."""
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_event_queued_when_loop_not_ready(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1446,7 +1471,7 @@ class TestPendingInboundQueue(unittest.TestCase):
         # Drain scheduled flag set.
         self.assertTrue(adapter._pending_drain_scheduled)
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_drainer_replays_queued_events_when_loop_becomes_ready(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1552,7 +1577,7 @@ class TestWebhookSecurity(unittest.TestCase):
             self.assertEqual(response.status, 413)
             self.assertEqual(content.read_sizes, [_FEISHU_WEBHOOK_MAX_BODY_BYTES + 1])
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_webhook_connect_requires_inbound_auth_secret(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1565,7 +1590,7 @@ class TestWebhookSecurity(unittest.TestCase):
         )
         self.assertFalse(asyncio.run(adapter.connect()))
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_webhook_loads_auth_secrets_from_platform_extra(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1588,7 +1613,7 @@ class TestWebhookSecurity(unittest.TestCase):
 class TestDedupTTL(unittest.TestCase):
     """Tests for TTL-aware deduplication."""
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_duplicate_within_ttl_is_rejected(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1599,7 +1624,7 @@ class TestDedupTTL(unittest.TestCase):
             adapter._seen_message_order = ["om_dup"]
             self.assertTrue(asyncio.run(adapter._is_duplicate("om_dup")))
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_load_tolerates_malformed_timestamp_values(self):
         """Regression #13632 — a non-numeric timestamp in the persisted
         dedup state must not crash adapter startup.  The bad key is
@@ -1630,7 +1655,7 @@ class TestDedupTTL(unittest.TestCase):
                 assert "om_bad_str" not in adapter._seen_message_ids
                 assert "om_bad_null" not in adapter._seen_message_ids
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_persist_on_new_message_runs_off_event_loop_thread(self):
         """atomic_json_write() calls os.fsync(), which blocks until the write
         reaches stable storage. _is_duplicate() runs on the event loop for
@@ -1656,7 +1681,7 @@ class TestDedupTTL(unittest.TestCase):
         self.assertTrue(write_threads)
         self.assertTrue(all(tid != loop_thread for tid in write_threads))
 
-    @patch.dict(os.environ, {}, clear=True)
+    @_clear_feishu_env
     def test_concurrent_dedup_persists_land_in_order(self):
         """Two in-flight _is_duplicate() calls (two chats) must not let an
         older seen-ids snapshot overwrite a newer one on disk."""
