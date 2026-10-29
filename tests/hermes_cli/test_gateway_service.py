@@ -2918,6 +2918,10 @@ class TestUnitAnchoredServiceIdentity:
         monkeypatch.setattr(gateway_cli, "_SYSTEM_UNIT_DIR", unit_dir)
         monkeypatch.setattr(os, "geteuid", lambda: 0)
         monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: root_home)
+        # The simulated account's native service home must agree with the
+        # simulated platform default.  Otherwise this test depends on the
+        # CI runner's real passwd home when selecting the pre-sync unit.
+        monkeypatch.setattr(gateway_cli, "_native_service_homes", lambda: {root_home})
         monkeypatch.delenv("HERMES_HOME", raising=False)
 
         pre_sync_name = gateway_cli.get_service_name()
