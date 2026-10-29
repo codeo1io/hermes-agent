@@ -8,7 +8,6 @@ import tempfile
 import time
 import unittest
 from collections import OrderedDict
-from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -17,30 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from gateway.platforms.event import ProcessingOutcome
-
-
-def _clear_feishu_env(target):
-    """Clear Feishu configuration without escaping pytest's Hermes-home sandbox.
-
-    unittest.mock.patch.dict(clear=True) otherwise removes the per-test
-    HERMES_HOME fixture, causing adapter construction to read/write the real
-    ~/.hermes store. This decorator also supports unittest class decoration.
-    """
-    if isinstance(target, type):
-        for name, member in vars(target).items():
-            if name.startswith("test_") and callable(member):
-                setattr(target, name, _clear_feishu_env(member))
-        return target
-
-    @wraps(target)
-    def wrapped(*args, **kwargs):
-        home = os.environ.get("HERMES_HOME")
-        if not home:
-            raise AssertionError("Feishu test requires an isolated HERMES_HOME")
-        with patch.dict(os.environ, {"HERMES_HOME": home}, clear=True):
-            return target(*args, **kwargs)
-
-    return wrapped
+from tests.gateway.feishu_helpers import clear_feishu_env as _clear_feishu_env
 
 
 if TYPE_CHECKING:
@@ -287,34 +263,6 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
             captured["calls"][1].request_body.content,
             json.dumps({"text": "可以用 粗体 和 斜体。"}, ensure_ascii=False),
         )
-
-
-@_clear_feishu_env
-class TestDeleteMessage(unittest.TestCase):
-    def test_delete_message_calls_im_message_delete(self):
-        from gateway.config import PlatformConfig
-        from plugins.platforms.feishu.adapter import FeishuAdapter
-
-        captured = {"ids": []}
-
-        class _MessageAPI:
-            def delete(self, request):
-                captured["ids"].append(getattr(request, "message_id", None))
-                return SimpleNamespace(success=lambda: True)
-
-        adapter = FeishuAdapter(PlatformConfig())
-        adapter._client = SimpleNamespace(
-            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
-        )
-
-        async def _direct(func, *args, **kwargs):
-            return func(*args, **kwargs)
-
-        with patch.object(adapter, "_run_blocking", side_effect=_direct):
-            ok = asyncio.run(adapter.delete_message("oc_chat", "om_preview"))
-
-        self.assertTrue(ok)
-        self.assertEqual(captured["ids"], ["om_preview"])
 
 
 class TestAdapterModule(unittest.TestCase):
