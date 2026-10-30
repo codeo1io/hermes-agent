@@ -436,8 +436,14 @@ def _sweep_orphaned_session_rows() -> list[str]:
 # Each serve / gateway process registers a heartbeat row in ``gateway_heartbeats`` so the startup sweep can tell
 # "owned by a live but idle backend" from "truly orphaned" (else the first process to restart reaped every
 # inactive row of the other N−1). Refresh 60s default — far shorter than the 6h TTL so a refresh always lands
-# inside the staleness window. Removed at exit; a crashed row ages out.
+# inside the staleness window. Removed at exit; a crashed backend's row (no atexit ran: SIGKILL, OOM, hard
+# crash) is reclaimed by the prune in ``_refresh_backend_heartbeat`` once it crosses the prune age below.
 _HEARTBEAT_REFRESH_S = max(0.0, env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0))
+# Crash-residue tolerance: 5 refresh cycles — a live-but-stalled backend still survives a few missed cycles,
+# while a dead one's row is reclaimed within ~prune age + one refresh interval. Derived at import so raising
+# the refresh interval scales the tolerance too (runtime tweaks of the refresh knob do not re-derive it);
+# register-only mode (refresh 0) degenerates the prune to a no-op by choice.
+_HEARTBEAT_PRUNE_AGE_S = 5.0 * _HEARTBEAT_REFRESH_S
 _heartbeat_refresher_started = False
 _heartbeat_refresher_lock = threading.Lock()
 _BACKEND_NONCE = secrets.token_hex(4)
@@ -462,7 +468,10 @@ def _gateway_started_at() -> float:
 
 
 def _refresh_backend_heartbeat() -> None:
-    """Refresh this backend's heartbeat row. No-op when DB unavailable."""
+    """Refresh this backend's heartbeat row and reclaim crash residue older than the prune age.
+
+    No-op when DB unavailable; upsert and prune are each best-effort so heartbeat hygiene never breaks
+    gateway startup or the refresh loop."""
     db = _get_db()
     if db is None:
         return
@@ -472,6 +481,10 @@ def _refresh_backend_heartbeat() -> None:
             profile=_current_profile_name(), host=_reaper_hostname())
     except Exception:
         logger.debug("backend heartbeat refresh failed", exc_info=True)
+    try:
+        db.prune_stale_heartbeats(max_age_seconds=_HEARTBEAT_PRUNE_AGE_S)
+    except Exception:
+        logger.debug("stale backend heartbeat prune failed", exc_info=True)
 
 
 def _start_backend_heartbeat_refresher() -> None:
