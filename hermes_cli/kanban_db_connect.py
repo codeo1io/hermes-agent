@@ -706,10 +706,22 @@ def _ensure_test_isolation(path: Path) -> None:
         return
     if not _in_test_context():
         return
+    # Classification must never fail OPEN. Path.resolve() stats every path
+    # component, so a guarded/patched os.stat (the hermetic suite's
+    # home-io guard refuses stat under the REAL home) or any other resolve
+    # failure used to hit ``except Exception: return`` — silently PERMITTING
+    # exactly the production paths this choke exists to refuse (the
+    # 2026-10-30 main-red wave: guard tests got DID-NOT-RAISE). Fall back to
+    # a purely lexical absolute path: no stat, no symlink walk. In production
+    # resolve() still runs first, so symlinked paths keep full resolution;
+    # the lexical fallback only tightens the test-context case.
     try:
         resolved = Path(path).expanduser().resolve()
     except Exception:
-        return
+        try:
+            resolved = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+        except Exception:
+            return  # truly unclassifiable: connect()-time choke still holds
     root = _real_platform_state_root()
     if root is None:
         return
