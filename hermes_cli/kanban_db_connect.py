@@ -701,42 +701,56 @@ def _ensure_test_isolation(path: Path) -> None:
     if _KANBAN_GUARD_BYPASS or os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
         return
     try:
-        from hermes_state_guard import _in_test_context, _real_platform_state_root
+        from hermes_state_guard import (
+            _in_test_context,
+            _path_in_sandbox,
+            _real_platform_state_root,
+        )
     except ImportError:
         return
     if not _in_test_context():
         return
-    try:
-        resolved = Path(path).expanduser().resolve()
-    except Exception:
-        return
     root = _real_platform_state_root()
     if root is None:
         return
-    try:
-        from hermes_state_guard import _path_in_sandbox
 
-        if _path_in_sandbox(resolved):
+    def refuse_production(candidate: Path) -> None:
+        if _path_in_sandbox(candidate):
             return  # fixture-registered sandbox root: never production
-    except ImportError:
-        pass
-    try:
-        parts = resolved.relative_to(root).parts
-    except ValueError:
-        return
-    production = (
-        parts == ("kanban.db",)
-        or (len(parts) >= 2 and parts[0] == "kanban")
-        or (len(parts) == 3 and parts[0] == "profiles")
-    )
-    if production:
-        raise RuntimeError(
-            "kanban test-isolation guard: test attempted to open the "
-            f"production kanban DB at {resolved} (under real Hermes root {root}). "
-            "Tests must run against a temporary HERMES_HOME outside the real "
-            "root — or export HERMES_KANBAN_GUARD_BYPASS=1 for a test that "
-            "genuinely needs the live board."
+        try:
+            parts = candidate.relative_to(root).parts
+        except ValueError:
+            return
+        production = (
+            parts == ("kanban.db",)
+            or (len(parts) >= 2 and parts[0] == "kanban")
+            or (len(parts) == 3 and parts[0] == "profiles")
         )
+        if production:
+            raise RuntimeError(
+                "kanban test-isolation guard: test attempted to open the "
+                f"production kanban DB at {candidate} (under real Hermes root {root}). "
+                "Tests must run against a temporary HERMES_HOME outside the real "
+                "root — or export HERMES_KANBAN_GUARD_BYPASS=1 for a test that "
+                "genuinely needs the live board."
+            )
+
+    # Deny the lexical production path BEFORE Path.resolve(): the hermetic
+    # home-I/O guard intentionally refuses even metadata reads of the real
+    # board. Previously that refusal was swallowed by the broad except below,
+    # silently disarming this guard and letting tests escape isolation.
+    try:
+        lexical = Path(os.path.abspath(str(Path(path).expanduser())))
+    except Exception as exc:
+        raise RuntimeError("kanban test-isolation guard: cannot inspect DB path") from exc
+    refuse_production(lexical)
+    # Still resolve aliases: an external symlink can point into the real board.
+    # Resolution failure must never mean "safe to open".
+    try:
+        resolved = lexical.resolve()
+    except Exception as exc:
+        raise RuntimeError("kanban test-isolation guard: cannot resolve DB path") from exc
+    refuse_production(resolved)
 
 
 def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:
