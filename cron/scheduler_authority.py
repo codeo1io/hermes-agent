@@ -160,12 +160,12 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
 
     async def observe(call):
         nonlocal attempted
+        from hermes_cli.gateway_client import GatewayRPCError
         attempted = True
         save()
         try:
             receipt = await call('submit', params)
         except Exception as exc:
-            from hermes_cli.gateway_client import GatewayRPCError
             # A returned owner exception is definite; a transport disconnect is not. Even an
             # owner error after commit must retain the admitted identity, so verify its absence.
             if owner is not None or isinstance(exc, GatewayRPCError):
@@ -191,13 +191,17 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 await call('cancel', receipt)
             try:
                 state = await call('status', receipt)
-            except sqlite3.OperationalError as exc:
+            except (sqlite3.OperationalError, GatewayRPCError) as exc:
                 # The admission identity and receipt are durable. A transient SQLite
-                # writer lock during observation must not cause a duplicate submit
-                # or an immediate scheduler pause. Bound retries and retain the
-                # existing unknown/pause fence if the lock never clears.
-                code = getattr(exc, 'sqlite_errorcode', None)
-                if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and 'locked' not in str(exc).lower():
+                # lock (direct owner) or storage_unavailable RPC (remote owner)
+                # must not cause duplicate submission. Retain the unknown/pause
+                # fence if bounded observation retries cannot resolve the lock.
+                sqlite_busy = (isinstance(exc, sqlite3.OperationalError) and (
+                    getattr(exc, 'sqlite_errorcode', None) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                    or 'locked' in str(exc).lower()))
+                remote_busy = (isinstance(exc, GatewayRPCError) and exc.code == 5001
+                               and str(exc) == 'storage_unavailable')
+                if not (sqlite_busy or remote_busy):
                     raise
                 busy_retries += 1
                 if busy_retries > 5:

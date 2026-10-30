@@ -32,10 +32,12 @@ def _foreign_journal(job, fire):
 
 
 
-def test_transient_sqlite_busy_on_receipted_status_does_not_pause_or_resubmit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("transport", ["local", "gateway"])
+def test_transient_sqlite_busy_on_receipted_status_does_not_pause_or_resubmit(tmp_path, monkeypatch, transport):
     """A saved admission receipt makes status polling retryable without re-admission."""
     import sqlite3
     from gateway import session_cron
+    from hermes_cli.gateway_client import GatewayRPCError
 
     events = []
 
@@ -46,6 +48,8 @@ def test_transient_sqlite_busy_on_receipted_status_does_not_pause_or_resubmit(tm
                 return {"session_id": "session-1", "admission_id": "admission-1"}
             if method == "cron.status":
                 if events.count(method) == 1:
+                    if transport == "gateway":
+                        raise GatewayRPCError("storage_unavailable", code=5001)
                     raise sqlite3.OperationalError("database is locked")
                 return {"status": "terminal", "result": [True, "done", "answer", None]}
             raise AssertionError(method)
