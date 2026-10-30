@@ -3,6 +3,8 @@ pause), and a verified terminal receipt lifts the pause its own ``CronExecutionU
 from contextlib import asynccontextmanager
 import json
 
+import pytest
+
 from cron import executions, jobs, scheduler, scheduler_authority
 from hermes_cli import gateway_client
 
@@ -26,6 +28,72 @@ def _foreign_journal(job, fire):
     journal.write_text(json.dumps({'params': {'job_id': job['id'], 'request_id': fire, 'extra_prompt': None},
                                    'receipt': None}))
     return journal
+
+
+
+
+def test_transient_sqlite_busy_on_receipted_status_does_not_pause_or_resubmit(tmp_path, monkeypatch):
+    """A saved admission receipt makes status polling retryable without re-admission."""
+    import sqlite3
+    from gateway import session_cron
+
+    events = []
+
+    class Peer:
+        async def rpc(self, method, **params):
+            events.append(method)
+            if method == "cron.submit":
+                return {"session_id": "session-1", "admission_id": "admission-1"}
+            if method == "cron.status":
+                if events.count(method) == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return {"status": "terminal", "result": [True, "done", "answer", None]}
+            raise AssertionError(method)
+
+    @asynccontextmanager
+    async def connected():
+        yield Peer()
+
+    monkeypatch.setattr(gateway_client, "connect_gateway", connected)
+    monkeypatch.setattr(session_cron, "owner_for_home", lambda _home: None)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    job = {"id": "job-busy", "execution_id": "fire-busy"}
+    assert scheduler_authority.run_canonical_job(job) == (True, "done", "answer", None)
+    assert events == ["cron.submit", "cron.status", "cron.status"]
+    journal = scheduler_authority.journal_path("job-busy", "fire-busy")
+    assert json.loads(journal.read_text())["receipt"]["admission_id"] == "admission-1"
+
+
+def test_persistent_sqlite_busy_stays_unknown_and_never_resubmits(tmp_path, monkeypatch):
+    """Retry exhaustion preserves the durable admission and unknown-work fence."""
+    import sqlite3
+    from gateway import session_cron
+
+    events = []
+
+    class Peer:
+        async def rpc(self, method, **params):
+            events.append(method)
+            if method == "cron.submit":
+                return {"session_id": "session-1", "admission_id": "admission-1"}
+            if method == "cron.status":
+                raise sqlite3.OperationalError("database is locked")
+            raise AssertionError(method)
+
+    @asynccontextmanager
+    async def connected():
+        yield Peer()
+
+    monkeypatch.setattr(gateway_client, "connect_gateway", connected)
+    monkeypatch.setattr(session_cron, "owner_for_home", lambda _home: None)
+    monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+    job = {"id": "job-busy", "execution_id": "fire-busy"}
+    with pytest.raises(scheduler_authority.CronExecutionUnknown, match="database is locked"):
+        scheduler_authority.run_canonical_job(job)
+    assert events.count("cron.submit") == 1
+    assert events.count("cron.status") == 6
+    journal = scheduler_authority.journal_path("job-busy", "fire-busy")
+    assert json.loads(journal.read_text())["receipt"]["admission_id"] == "admission-1"
 
 
 def test_missing_admission_is_booked_failed_not_paused(tmp_path, monkeypatch):

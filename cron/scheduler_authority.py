@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 import uuid
 
 
@@ -184,11 +185,26 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 raise
         record['receipt'] = receipt
         save()
-        delay, progress = .1, None
+        delay, progress, busy_retries = .1, None, 0
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 await call('cancel', receipt)
-            state = await call('status', receipt)
+            try:
+                state = await call('status', receipt)
+            except sqlite3.OperationalError as exc:
+                # The admission identity and receipt are durable. A transient SQLite
+                # writer lock during observation must not cause a duplicate submit
+                # or an immediate scheduler pause. Bound retries and retain the
+                # existing unknown/pause fence if the lock never clears.
+                code = getattr(exc, 'sqlite_errorcode', None)
+                if code not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and 'locked' not in str(exc).lower():
+                    raise
+                busy_retries += 1
+                if busy_retries > 5:
+                    raise
+                await asyncio.sleep(min(.25 * 2 ** (busy_retries - 1), 2.0))
+                continue
+            busy_retries = 0
             if state.get('progress_at') not in (None, progress):
                 # The owner's agent is still working: refresh OUR ledger row (the owner's stamp is
                 # fenced to the row's owner), once per owner stamp, so the stale-claim sweep measures
