@@ -708,18 +708,21 @@ def _ensure_test_isolation(path: Path) -> None:
         return
     try:
         resolved = Path(path).expanduser().resolve()
-    except Exception:
-        return
+    except Exception as exc:
+        # A test I/O guard, unreadable path component, or broken symlink must
+        # never turn the production-board protection into an allow decision.
+        # In particular, the suite's real-home I/O guard refuses resolve()
+        # probes of the live board before any SQLite open can occur.
+        raise RuntimeError(
+            "kanban test-isolation guard: cannot safely resolve test DB path"
+        ) from exc
     root = _real_platform_state_root()
     if root is None:
         return
-    try:
-        from hermes_state_guard import _path_in_sandbox
-
-        if _path_in_sandbox(resolved):
-            return  # fixture-registered sandbox root: never production
-    except ImportError:
-        pass
+    # Production board paths are never exempted by the sandbox registry:
+    # a polluted registry (e.g. a fixture mistakenly registering the real
+    # home) must not disable the test-only write guard. Legitimate sandbox
+    # paths under <root>/tmp do not match the production predicate below.
     try:
         parts = resolved.relative_to(root).parts
     except ValueError:

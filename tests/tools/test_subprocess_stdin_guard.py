@@ -6,6 +6,7 @@ subprocess calls are added without stdin=subprocess.DEVNULL.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,13 +23,18 @@ def _load_guard():
     return mod
 
 
-def test_all_tui_subprocess_calls_have_stdin():
-    """Every subprocess.run/Popen in TUI-context code must set stdin=."""
+def test_all_tui_subprocess_calls_have_stdin(tmp_path):
+    """Scan all bundled TUI code without importing unrelated live user plugins."""
+    # The scanner still checks real user plugins when invoked normally. This
+    # repository test must not inherit a CI runner's potentially huge HOME.
+    env = dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(tmp_path))
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
+        env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=90,
         check=False,
     )
     assert result.returncode == 0, (
@@ -36,6 +42,20 @@ def test_all_tui_subprocess_calls_have_stdin():
     )
 
 
+
+
+def test_scanner_checks_explicit_user_plugin_root(tmp_path):
+    """Isolating the repo check must not disable the production plugin scan."""
+    plugin = tmp_path / 'plugins' / 'unsafe' / 'hook.py'
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("import subprocess\nsubprocess.run(['echo', 'unsafe'])\n")
+    env = dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(tmp_path))
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)], env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=90, check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert str(plugin) in result.stdout
 
 
 def test_inline_noqa_marker_exempts_a_call():

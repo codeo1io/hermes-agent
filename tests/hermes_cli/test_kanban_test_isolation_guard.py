@@ -19,7 +19,6 @@ patch timing.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -72,9 +71,21 @@ def test_default_root_dot_profile_home_keeps_existing_mapping(monkeypatch, tmp_p
 
 
 @pytest.fixture()
-def _pytest_context(monkeypatch):
-    """Arm the env-based test signal the way the hermetic conftest does."""
+def _pytest_context(monkeypatch, tmp_path):
+    """Exercise the production-path guard against a synthetic, isolated root.
+
+    A CI runner's real home can itself be a registered pytest sandbox. Using
+    that home here makes the guard correctly allow the path and the test
+    incorrectly fail (or touch the runner's actual state). Keep the security
+    predicate real while replacing only the platform root and sandbox lookup.
+    """
+    synthetic_root = tmp_path / "synthetic-production-home" / ".hermes"
+    synthetic_root.mkdir(parents=True)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_self.py::test_x")
+    monkeypatch.setattr(
+        "hermes_state_guard._real_platform_state_root", lambda: synthetic_root
+    )
+    monkeypatch.setattr("hermes_state_guard._path_in_sandbox", lambda _path: False)
     yield
 
 
@@ -151,32 +162,49 @@ def test_guard_inert_outside_test_context(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
-    """connect() refuses the live board, but a fixture that opens the live DB
-    with raw sqlite3.connect and drives kb.create_task goes through
-    write_txn — that boundary must refuse as well."""
+def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context, monkeypatch):
+    """A raw connection cannot bypass write_txn's live-board path check.
+
+    Simulate its PRAGMA database_list path without opening or creating ANY
+    file under the real Hermes home. The separate test below verifies actual
+    SQLite path discovery against an isolated temporary database.
+    """
     import sqlite3
 
     from hermes_state_guard import _real_platform_state_root
-    from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
     root = _real_platform_state_root()
     assert root is not None
-    db = root / "kanban.db"
-    # A fresh CI host has no real-home Hermes root yet, and a raw sqlite3.connect
-    # cannot create the board file through a missing parent directory. Materialize
-    # the empty live-board artifact first: the isolation guard refuses inside
-    # write_txn before any schema access, so an empty file IS the live board here.
-    db.parent.mkdir(parents=True, exist_ok=True)
-    db.touch(exist_ok=True)
-    raw = sqlite3.connect(db)
-    try:
+    with sqlite3.connect(":memory:") as raw:
+        monkeypatch.setattr(kbc, "_main_db_file", lambda _conn: str(root / "kanban.db"))
         with pytest.raises(RuntimeError, match="test-isolation guard"):
             with kbc.write_txn(raw):
-                kb.create_task(raw, title="wave8-probe", assignee="alpha")
-    finally:
-        raw.close()
+                pytest.fail("write boundary reached before isolation guard")
+
+
+def test_main_db_file_reports_isolated_connection_path(tmp_path):
+    import sqlite3
+
+    from hermes_cli import kanban_db_connect as kbc
+
+    db = tmp_path / "isolated-kanban.db"
+    with sqlite3.connect(db) as raw:
+        assert Path(kbc._main_db_file(raw)).resolve() == db.resolve()
+
+
+def test_registered_real_home_never_bypasses_kanban_guard(_pytest_context, monkeypatch):
+    from hermes_state_guard import _real_platform_state_root, pin_sandbox_root
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    root = _real_platform_state_root()
+    assert root is not None
+    monkeypatch.setattr("hermes_state_guard._SANDBOX_ROOTS", [])
+    pin_sandbox_root(root)
+    from hermes_state_guard import _SANDBOX_ROOTS
+    assert root not in _SANDBOX_ROOTS
+    with pytest.raises(RuntimeError, match="test-isolation guard"):
+        _ensure_test_isolation(root / "kanban.db")
 
 
 def test_real_platform_state_root_ignores_redirected_home(monkeypatch, tmp_path):

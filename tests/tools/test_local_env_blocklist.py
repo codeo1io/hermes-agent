@@ -1556,7 +1556,7 @@ class TestSanePathIncludesHomebrew:
 
 
 
-    def test_make_run_env_appends_homebrew_on_minimal_path(self, monkeypatch):
+    def test_make_run_env_appends_homebrew_on_minimal_path(self, monkeypatch, tmp_path):
         """When PATH is minimal, _make_run_env appends missing sane entries.
 
         POSIX: the sane-path merge appends the Homebrew dirs.  Windows:
@@ -1568,7 +1568,12 @@ class TestSanePathIncludesHomebrew:
         from tools.environments import local as local_mod
         from tools.environments.local import _SANE_PATH, _make_run_env
         monkeypatch.setattr(local_mod, "_git_bash_bin_dirs", list)
-        minimal_env = {"PATH": "/some/custom/bin"}
+        # User-tools discovery reads a package-store manifest outside the test
+        # root; it is independent of the sane-path merge under test.
+        monkeypatch.setattr(local_mod, "_user_tools_first", lambda path: path)
+        # Preserve an isolated Hermes root while clearing unrelated parent
+        # variables: this tests PATH assembly, not the real runner's profile.
+        minimal_env = {"PATH": "/some/custom/bin", "HERMES_HOME": str(tmp_path / ".hermes")}
         with patch.dict(os.environ, minimal_env, clear=True):
             result = _make_run_env({})
         path_entries = result["PATH"].split(os.pathsep)

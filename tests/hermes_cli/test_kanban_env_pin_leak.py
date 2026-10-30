@@ -56,28 +56,26 @@ def pinned_live_env(_hermetic_environment, monkeypatch, tmp_path):
     return root
 
 
-def _live_stat(root: Path) -> tuple[int, int]:
-    st = (root / "kanban.db").stat()
-    return st.st_mtime_ns, st.st_size
+@pytest.fixture
+def refuse_live_sqlite_open(monkeypatch, pinned_live_env):
+    """Detect a leaked SQLite open without probing the production DB itself.
 
+    The suite's home-I/O guard intentionally forbids even stat()/read-only
+    SQLite on the real board; a test must not bypass it to prove isolation.
+    """
+    original_connect = sqlite3.connect
+    live_path = str(pinned_live_env / "kanban.db")
+    attempted = []
 
-def _live_before(root: Path) -> tuple[int, int] | None:
-    """Pre-call live-DB state; ``None`` on hosts with no live board (CI) —
-    for those the immutability contract is "the refused calls must not CREATE
-    the live file", asserted via existence."""
-    try:
-        return _live_stat(root)
-    except FileNotFoundError:
-        return None
+    def guarded_connect(database, *args, **kwargs):
+        if live_path in str(database):
+            attempted.append(str(database))
+            raise AssertionError("test attempted to open production kanban DB")
+        return original_connect(database, *args, **kwargs)
 
-
-def _assert_live_untouched(root: Path, before: tuple[int, int] | None) -> None:
-    if before is None:
-        assert not (root / "kanban.db").exists(), (
-            "refused calls must not create the live DB on a clean host"
-        )
-    else:
-        assert _live_stat(root) == before, "refused calls must not touch the live DB"
+    monkeypatch.setattr(sqlite3, "connect", guarded_connect)
+    yield attempted
+    assert not attempted, "test attempted SQLite access to the production board"
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +84,7 @@ def _assert_live_untouched(root: Path, before: tuple[int, int] | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env):
+def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env, refuse_live_sqlite_open):
     """kanban_db_path() honors the pin (the incident's first half); connect()
     and init_db() must still refuse the live board from a test context —
     before any mkdir, lock sidecar, or sqlite touch."""
@@ -100,16 +98,15 @@ def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env
     assert resolved == pinned, (
         f"kanban_db_path() resolved {resolved}, expected the pin {pinned}"
     )
-    before = _live_before(root)
     # Either guard may fire (the autouse conftest wrapper patches connect);
     # the contract under test is: raise, never touch the live file.
-    with pytest.raises(RuntimeError, match="guard"):
+    with pytest.raises((RuntimeError, AssertionError), match="guard|TEST BUG: file I/O"):
         kbc.connect()  # no db_path arg: resolves via the pin
-    with pytest.raises(RuntimeError, match="guard"):
+    with pytest.raises((RuntimeError, AssertionError), match="guard|TEST BUG: file I/O"):
         kbc.connect(str(pinned))  # explicit live path refused too
-    with pytest.raises(RuntimeError, match="guard"):
+    with pytest.raises((RuntimeError, AssertionError), match="guard|TEST BUG: file I/O"):
         kbc.init_db()  # init path guarded as well
-    _assert_live_untouched(root, before)
+    assert not refuse_live_sqlite_open
 
 
 def test_choke_direct_refuses_pinned_live_path(pinned_live_env):
@@ -124,15 +121,13 @@ def test_choke_direct_refuses_pinned_live_path(pinned_live_env):
         kbc._ensure_test_isolation(root / "kanban" / "boards" / "second" / "kanban.db")
 
 
-def test_tool_layer_create_refuses_live_board(pinned_live_env):
+def test_tool_layer_create_refuses_live_board(pinned_live_env, refuse_live_sqlite_open):
     """kt._handle_create (the real worker tool) must not be able to write the
     live board when the env pin leaks into pytest. The handler converts
     exceptions to structured tool errors, so the contract is: error payload,
     never a successful create, and zero mutation of the live DB."""
     from tools import kanban_tools as kt
 
-    root = pinned_live_env
-    before = _live_before(root)
     out = kt._handle_create(
         {
             "title": "leak-probe-t-cd6b5114",
@@ -140,21 +135,14 @@ def test_tool_layer_create_refuses_live_board(pinned_live_env):
             "body": "regression t_cd6b5114: must never reach the live board",
         }
     )
-    assert "guard" in out, f"tool layer accepted the live-board create: {out}"
+    assert ("guard" in out or "TEST BUG: file I/O against the REAL hermes home" in out), (
+        f"tool layer accepted the live-board create: {out}"
+    )
     assert not out.startswith('{"ok"'), f"create reported success: {out}"
-    _assert_live_untouched(root, before)
-    if before is None:
-        # Clean host (no live board): the no-creation assertion above is the
-        # full contract — there is nothing to inspect for leaked rows.
-        return
-    live = sqlite3.connect(f"file:{root / 'kanban.db'}?mode=ro", uri=True)
-    try:
-        n = live.execute(
-            "SELECT COUNT(*) FROM tasks WHERE title = 'leak-probe-t-cd6b5114'"
-        ).fetchone()[0]
-    finally:
-        live.close()
-    assert n == 0, "fixture row reached the live board"
+    # The global home-I/O guard forbids filesystem access to the live board,
+    # and the explicit SQLite spy detects an attempted open without bypassing
+    # that guard or reading production task rows.
+    assert not refuse_live_sqlite_open
 
 
 # ---------------------------------------------------------------------------
@@ -220,3 +208,20 @@ def test_subprocess_pytest_with_inherited_pin_is_refused(pinned_live_env, tmp_pa
         f"child accepted the pinned live path (rc={result.returncode})\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def test_choke_fails_closed_when_path_resolution_is_denied(monkeypatch, tmp_path):
+    """A filesystem guard denying resolve() must not silently permit a DB open."""
+    from hermes_cli import kanban_db_connect as kbc
+
+    original_resolve = Path.resolve
+
+    def denied_resolve(path, *args, **kwargs):
+        if path.name == "kanban.db":
+            raise PermissionError("test filesystem guard denied path probe")
+        return original_resolve(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "resolve", denied_resolve)
+        with pytest.raises(RuntimeError, match="test-isolation guard: cannot safely resolve"):
+            kbc._ensure_test_isolation(tmp_path / "kanban.db")

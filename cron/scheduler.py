@@ -2592,6 +2592,24 @@ def run_job(
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
+    if job.get("completion_evidence_required") and not job.get("completion_evidence_root"):
+        return False, "", "", "Completion evidence required but receipt root is not configured"
+    if job.get("completion_evidence_root"):
+        if not execution_id:
+            return False, "", "", "Completion evidence gate requires a durable execution ID"
+        receipt_path = Path(job["completion_evidence_root"]) / f"{execution_id}.json"
+        prompt = (prompt or "") + (
+            "\n\nCRON COMPLETION RECEIPT (runtime-generated, identity-bound):\n"
+            f"job_id={job_id} execution_id={execution_id}\n"
+            f"Write a NEW JSON receipt at {receipt_path} containing these exact IDs, "
+            "kind=code_change|runtime_repair|validated_recovery, and a nonempty "
+            "artifacts array of actual existing files with absolute path and SHA256. "
+            "The artifact paths must be within configured completion_artifact_roots. "
+            "Only after a real change and independent validation, respond with first "
+            "line [CRON_EVIDENCE] and second line sha256:<digest of receipt bytes>. "
+            "If no verifiable work was completed, start with [CRON_FAILURE] instead. "
+            "Never invent receipts, file hashes, success, or elapsed soak time.\n"
+        )
     from run_agent import AIAgent
 
     _cron_session_id = (owner_execution[1] if owner_execution is not None else
@@ -3270,16 +3288,36 @@ def _start_owned_run(job: dict, execution_id: str) -> Optional[contextvars.Token
     return enter_cron_execution(job, execution_id, record or {})
 
 
-def _apply_agent_failure_marker(job: dict, success: bool, error, final_response):
-    """An agent can finish its own turn after a delegated child has failed. Let it explicitly
-    declare that semantic failure so the existing failure path updates status, streaks, ledger,
-    and notification routing instead of recording a false healthy result.
+def _apply_agent_failure_marker(
+    job: dict, success: bool, error, final_response, *, execution_id: str = "",
+):
+    """Fail closed on explicit failure and optional identity-bound completion evidence.
 
-    Returns ``(success, error, agent_declared)``."""
+    The optional gate is checked before saving/delivery/terminal bookkeeping. Other cron
+    jobs retain their existing semantics; an evidence-gated job cannot turn a truncated
+    response into an `ok` merely because the agent transport returned successfully.
+    """
     if success and not job.get("no_agent"):
         marker_error = _cron_failure_marker_error(final_response)
         if marker_error is not None:
             return False, marker_error, True
+        if job.get("completion_evidence_root") or job.get("completion_evidence_required"):
+            from datetime import datetime
+            from cron.completion_evidence import validate_completion_evidence
+
+            try:
+                record = get_execution(execution_id) or {}
+                claimed_at_epoch = datetime.fromisoformat(record["claimed_at"]).timestamp()
+            except Exception as exc:
+                # Deliberate fail-closed boundary: a store failure cannot certify a repair.
+                # Preserve the traceback for diagnosis instead of silently swallowing it.
+                logger.exception("Cron completion evidence claim lookup failed for %s", execution_id)
+                return False, f"Cron completion evidence gate has no durable claim: {exc}", False
+            evidence_error = validate_completion_evidence(
+                job, final_response, execution_id, claimed_at_epoch=claimed_at_epoch,
+            )
+            if evidence_error is not None:
+                return False, evidence_error, False
     return success, error, False
 
 
@@ -3374,7 +3412,8 @@ def _run_one_job_body(
             _record_fire_ownership_lost(job, fire_owner, execution_id)
             return True
 
-        success, error, agent_declared = _apply_agent_failure_marker(job, success, error, final_response)
+        success, error, agent_declared = _apply_agent_failure_marker(
+            job, success, error, final_response, execution_id=execution_id)
 
         # Agent is still live through delivery; wrap ALL of save/compose/deliver in try/finally so a
         # raise anywhere still tears the deferred agent down.

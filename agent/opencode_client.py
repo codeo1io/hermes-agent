@@ -302,6 +302,7 @@ def acquire_opencode_server(
             proc = subprocess.Popen(
                 cmd,
                 cwd=spawn_cwd if os.path.isdir(spawn_cwd) else None,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,

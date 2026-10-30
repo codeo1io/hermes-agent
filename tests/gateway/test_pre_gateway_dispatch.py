@@ -550,6 +550,8 @@ async def test_relay_resend_of_a_rewritten_media_delivery_reuses_its_admission_a
     media = ThreadingHTTPServer(("127.0.0.1", 0), _Media)
     threading.Thread(target=media.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{media.server_port}/photo.png"
+    # Allow only this test server's media URL; do not relax the production SSRF guard.
+    monkeypatch.setattr("gateway.relay.media.is_safe_url", lambda candidate: candidate == url)
 
     async def connector(ws):
         await ws.recv()  # hello
@@ -704,6 +706,8 @@ async def test_a_relay_media_delivery_no_admission_owns_retains_no_bytes(
     media = ThreadingHTTPServer(("127.0.0.1", 0), _Media)
     threading.Thread(target=media.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{media.server_port}/photo.png"
+    # Allow only this test server's media URL; do not relax the production SSRF guard.
+    monkeypatch.setattr("gateway.relay.media.is_safe_url", lambda candidate: candidate == url)
 
     def hook(**kwargs):
         fired.append(hook_name)
