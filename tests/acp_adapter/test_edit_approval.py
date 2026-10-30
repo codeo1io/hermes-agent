@@ -133,7 +133,11 @@ def test_multifile_v4a_patch_checks_every_real_path_not_the_joined_display_strin
     assert not should_auto_approve_edit(proposal, "workspace_session", str(tmp_path))
 
     # Escape target sits outside BOTH allowed roots (tempdir + session cwd).
-    escape = Path.home() / ".hermes-acp-escape-test.txt"
+    # Path.home() here is the pytest sandbox itself (the autouse home fixture
+    # re-homes the process), and tmp_path lives under the same temp root, so a
+    # plain Path.home() sibling would still be inside tempfile.gettempdir() and
+    # auto-approve. Walk up out of the temp root for a genuinely outside path.
+    escape = Path(tempfile.gettempdir()).parent / ".hermes-acp-escape-test.txt"
     hidden_escape = f"*** Update File: {tmp_path}/src/ok.py\n@@\n+ok\n*** Update File: {escape}\n@@\n+evil\n"
     proposal = build_edit_proposal("patch", {"mode": "patch", "patch": hidden_escape})
     assert not should_auto_approve_edit(proposal, "workspace_session", str(tmp_path))

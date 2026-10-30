@@ -229,6 +229,19 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
 def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # Hermeticity: with HOME/HERMES_HOME stripped the env sanitizer resolves
+    # get_hermes_home() through the passwd-backed platform default, which on a
+    # dev box (or any host whose real ~/.hermes exists) probes the REAL home's
+    # active_profile manifest and trips the home-io guard. The contract under
+    # test is the env ladder, not that probe: pin the platform default to this
+    # test's sandbox (same isolation the autouse home fixture applies).
+    import hermes_constants
+
+    monkeypatch.setattr(
+        hermes_constants,
+        "_get_platform_default_hermes_home",
+        lambda: tmp_path / "hermes_test",
+    )
 
     captured = {}
     client = _make_home_client(tmp_path)
