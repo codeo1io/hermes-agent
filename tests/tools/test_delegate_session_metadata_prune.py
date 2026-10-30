@@ -36,3 +36,32 @@ def test_durable_metadata_prune_preserves_live_and_unknown_records(monkeypatch, 
     os.utime(unknown, (99, 99))
     ds._prune_durable_metadata(root)
     assert unknown.exists()
+
+
+def test_error_metadata_survives_churn_for_same_session_recovery(monkeypatch, tmp_path):
+    """An error is resumable, not a safe terminal identity for cache eviction.
+
+    Models the M5 OpenCode recovery hazard: its native session can remain in
+    OpenCode's store while subsequent Pi metadata writes evict the Hermes
+    handle required to resume that exact session.
+    """
+    root = tmp_path / "delegate-sessions"
+    root.mkdir()
+    monkeypatch.setattr(ds, "_MAX_DURABLE_SESSIONS", 2)
+    interrupted = root / "opencode-error.json"
+    interrupted.write_text(json.dumps({
+        "session_id": "conductor-m5-opencode",
+        "backend": "opencode",
+        "native_session_id": "ses_interrupted",
+        "status": "error",
+    }))
+    os.utime(interrupted, (100, 100))
+    for index in range(5):
+        path = root / f"pi-closed-{index}.json"
+        path.write_text(json.dumps({"session_id": str(index), "status": "closed"}))
+        os.utime(path, (101 + index, 101 + index))
+
+    ds._prune_durable_metadata(root)
+    assert interrupted.exists(), "resumable OpenCode error identity was evicted"
+    assert json.loads(interrupted.read_text())["native_session_id"] == "ses_interrupted"
+    assert len(list(root.glob("pi-closed-*.json"))) < 5
