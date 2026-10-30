@@ -717,11 +717,13 @@ def _ensure_test_isolation(path: Path) -> None:
     # the lexical fallback only tightens the test-context case.
     try:
         resolved = Path(path).expanduser().resolve()
-    except Exception:
+    except (OSError, RuntimeError, AssertionError, ValueError, TypeError):
+        # The hermetic home-I/O guard deliberately raises AssertionError when
+        # resolve() probes the real home; classify lexically instead.
         try:
             resolved = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
-        except Exception:
-            return  # truly unclassifiable: connect()-time choke still holds
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            raise RuntimeError("kanban test-isolation guard cannot classify DB path") from exc
     root = _real_platform_state_root()
     if root is None:
         return
