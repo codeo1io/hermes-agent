@@ -86,6 +86,14 @@ def main():
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     from hermes_cli import kanban_db_dispatch as dispatch
+    # This fixture exercises the owned worker lifecycle, not host-pressure admission.
+    # CI runners can be under genuine memory pressure; pin a healthy synthetic
+    # sample only inside this disposable probe so lifecycle assertions are
+    # deterministic. Pressure-admission behavior has separate focused tests.
+    dispatch._system_memory_sample = lambda: {
+        "mem_total_kib": 16 * 1024 * 1024,
+        "mem_available_kib": 12 * 1024 * 1024,
+    }
     # Pin the installed launcher to this checkout for base/fixed argv comparisons.
     dispatch._resolve_hermes_argv = lambda: [sys.executable, '-m', 'hermes_cli.main']
     os.environ['HERMES_KANBAN_CRASH_GRACE_SECONDS'] = '0'
