@@ -2592,6 +2592,8 @@ def run_job(
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
+    if job.get("completion_evidence_required") and not job.get("completion_evidence_root"):
+        return False, "", "", "Completion evidence required but receipt root is not configured"
     if job.get("completion_evidence_root"):
         if not execution_id:
             return False, "", "", "Completion evidence gate requires a durable execution ID"
@@ -3299,7 +3301,7 @@ def _apply_agent_failure_marker(
         marker_error = _cron_failure_marker_error(final_response)
         if marker_error is not None:
             return False, marker_error, True
-        if job.get("completion_evidence_root"):
+        if job.get("completion_evidence_root") or job.get("completion_evidence_required"):
             from datetime import datetime
             from cron.completion_evidence import validate_completion_evidence
 

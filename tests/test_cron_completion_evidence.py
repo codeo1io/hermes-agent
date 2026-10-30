@@ -39,6 +39,25 @@ def test_unconfigured_jobs_keep_original_semantics():
     assert validate_completion_evidence({"id": "normal"}, "short", "run-1") is None
 
 
+def test_required_evidence_without_root_fails_closed():
+    job = {"id": "campaign", "completion_evidence_required": True}
+    assert "required" in validate_completion_evidence(job, "done", "run-1")
+
+
+def test_scheduler_rejects_missing_required_evidence_configuration():
+    from cron.scheduler import _apply_agent_failure_marker
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    job = {"id": "campaign", "completion_evidence_required": True}
+    with patch("cron.scheduler.get_execution", return_value={"claimed_at": datetime.now(UTC).isoformat()}):
+        success, error, _ = _apply_agent_failure_marker(
+            job, True, None, "done", execution_id="run-1"
+        )
+    assert success is False
+    assert "required" in error
+
+
 def test_identity_bound_receipt_and_hashed_artifact_pass(tmp_path):
     job, _, _, _, response = _case(tmp_path)
     assert validate_completion_evidence(job, response, "exec-abc") is None

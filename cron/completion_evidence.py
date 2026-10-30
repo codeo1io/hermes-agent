@@ -66,6 +66,8 @@ def validate_completion_evidence(
     """
     root_text = job.get("completion_evidence_root")
     if not root_text:
+        if job.get("completion_evidence_required"):
+            return "completion evidence required but receipt root is not configured"
         return None
     try:
         if not execution_id or not isinstance(root_text, str):
