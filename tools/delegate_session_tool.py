@@ -152,7 +152,7 @@ def _native_process_identity(client: Any) -> dict[str, int] | None:
     try:
         if proc.poll() is not None:
             return None
-        fields = (Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1]).split()
+        fields = (Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1]).split()
         ppid, ticks = int(fields[1]), int(fields[19])
         if ppid != os.getpid() or ticks <= 0 or proc.poll() is not None:
             return None
@@ -1615,9 +1615,8 @@ def delegate_session(
             "error_class": str((saved or {}).get("error_class") or ""),
             "retry_after": (saved or {}).get("retry_after"),
             "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
-            # U9: a fresh incarnation has no live turn, so turn_started_at
-            # resets; a banked stall triage from the prior incarnation is
-            # evidence the resumed supervisor should see, like the streak.
+            # U9: fresh incarnation resets turn_started_at, but preserves
+            # prior stall triage so the resumed supervisor sees the evidence.
             "turn_started_at": None,
             "last_turn_triage": (saved or {}).get("last_turn_triage") or None,
             # Recovery lineage threaded from the bootstrap above (chain root
