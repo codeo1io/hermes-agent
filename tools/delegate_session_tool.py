@@ -1449,7 +1449,12 @@ def delegate_session(
                 **client_kwargs,
             )
             if native_session_id and hasattr(created, "native_session_id"):
-                created.native_session_id = native_session_id
+                # A new OpenCode handle is not yet a native OpenCode ID.
+                # Only restore a verified persisted binding; otherwise
+                # OpenCodeClient.start() must create the first session.
+                # Pi uses the handle as its native ID on initial creation.
+                if backend_name != "opencode" or native_hint:
+                    created.native_session_id = native_session_id
             return created
 
         requested_native = native_hint or handle
