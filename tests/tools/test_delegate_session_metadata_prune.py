@@ -48,7 +48,8 @@ def test_error_metadata_survives_churn_for_same_session_recovery(monkeypatch, tm
     root = tmp_path / "delegate-sessions"
     root.mkdir()
     monkeypatch.setattr(ds, "_MAX_DURABLE_SESSIONS", 2)
-    interrupted = root / "opencode-error.json"
+    monkeypatch.setattr(ds, "_session_store_root", lambda: root)
+    interrupted = ds._metadata_path("conductor-m5-opencode")
     interrupted.write_text(json.dumps({
         "session_id": "conductor-m5-opencode",
         "backend": "opencode",
@@ -63,5 +64,8 @@ def test_error_metadata_survives_churn_for_same_session_recovery(monkeypatch, tm
 
     ds._prune_durable_metadata(root)
     assert interrupted.exists(), "resumable OpenCode error identity was evicted"
-    assert json.loads(interrupted.read_text())["native_session_id"] == "ses_interrupted"
+    restored = ds._load_metadata("conductor-m5-opencode")
+    assert restored is not None
+    assert restored["backend"] == "opencode"
+    assert restored["native_session_id"] == "ses_interrupted"
     assert len(list(root.glob("pi-closed-*.json"))) < 5
