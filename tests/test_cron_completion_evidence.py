@@ -90,6 +90,16 @@ def test_receipt_without_typed_artifact_fails(tmp_path):
     assert "artifacts" in validate_completion_evidence(job, response, "exec-abc")
 
 
+def test_empty_artifact_cannot_certify_execution(tmp_path):
+    job, receipt, path, artifact, _ = _case(tmp_path)
+    for payload in (b"", b" \n\t"):
+        artifact.write_bytes(payload)
+        receipt["artifacts"][0]["sha256"] = hashlib.sha256(payload).hexdigest()
+        path.write_text(json.dumps(receipt))
+        response = "[CRON_EVIDENCE]\nsha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        assert "empty" in validate_completion_evidence(job, response, "exec-abc")
+
+
 def test_artifact_content_change_fails(tmp_path):
     job, _, _, artifact, response = _case(tmp_path)
     artifact.write_text("tampered")

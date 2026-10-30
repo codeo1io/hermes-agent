@@ -52,6 +52,8 @@ def _validate_artifacts(
                 continue
         if data is None or hashlib.sha256(data).hexdigest() != item.get("sha256"):
             raise ValueError("artifact missing, out of scope, or digest mismatch")
+        if not data.strip():
+            raise ValueError("completion artifact is empty")
         if path.stat().st_mtime + 1 < claimed_at_epoch:
             raise ValueError("artifact predates this execution")
 
