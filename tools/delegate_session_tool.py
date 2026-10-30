@@ -137,6 +137,30 @@ def _client_last_activity_at(client: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _native_process_identity(client: Any) -> dict[str, int] | None:
+    """Bind one live Pi process incarnation to its durable session.
+
+    Durable created_at is the session's original creation time, NOT the
+    birth time of a resumed process. Capture kernel PID/startticks once,
+    immediately after a successful bootstrap. Missing/ambiguous evidence
+    must never authorize an external process reaper.
+    """
+    proc = getattr(client, "_proc", None)
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        if proc.poll() is not None:
+            return None
+        fields = (Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1]).split()
+        ppid, ticks = int(fields[1]), int(fields[19])
+        if ppid != os.getpid() or ticks <= 0 or proc.poll() is not None:
+            return None
+        return {"pid": pid, "start_ticks": ticks, "ppid": ppid}
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
 def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
     client = record.get("client")
     activity = getattr(client, "last_turn_activity_at", None)
@@ -153,6 +177,8 @@ def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # Exact Pi process incarnation. Never infer process birth from created_at.
+        "native_process": record.get("native_process"),
         # v4: outcome evidence — a stalled/circuit-broken session must survive
         # restart with its failure class, not just prose, so the supervisor
         # that resumes it (or the operator reading the file) can tell a dead
@@ -1577,6 +1603,7 @@ def delegate_session(
             "owner_scope": _scope_for_workspace(cwd),
             "cwd": cwd,
             "client": client,
+            "native_process": _native_process_identity(client) if backend_name == "pi" else None,
             "status": "idle",
             "created_at": (saved or {}).get("created_at") or now,
             "updated_at": now,
