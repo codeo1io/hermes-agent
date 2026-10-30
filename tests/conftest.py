@@ -130,7 +130,11 @@ if _HERMES_EXPORTED_TMP:
 from hermes_state_guard import _real_platform_state_root
 
 _real_test_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
-_guarded_tmp_roots = [_real_test_root]
+# Guard both the OS account's real root and the platform root projected by a
+# disposable HOME/LOCALAPPDATA. Subprocess fixtures intentionally replace HOME;
+# protecting only the passwd-root would leave TMPDIR inside that fixture's
+# .hermes tree and let pytest allocate its own scratch there before isolation.
+_guarded_tmp_roots = [_real_test_root, _get_platform_default_hermes_home().resolve()]
 _custom_test_home = os.environ.get("HERMES_HOME")
 if _custom_test_home:
     _guarded_tmp_roots.append(Path(_custom_test_home).expanduser().resolve())
