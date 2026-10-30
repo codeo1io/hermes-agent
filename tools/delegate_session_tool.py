@@ -216,18 +216,19 @@ def _metadata_files_newest(root: Path) -> list[Path]:
 
 
 def _prune_durable_metadata(root: Path) -> None:
-    """Prune old terminal metadata without losing resumable live bindings.
+    """Prune explicitly closed metadata without losing resumable bindings.
 
-    A session can stay idle or running across many unrelated delegations.
-    Evicting its durable identity solely because 500 newer records appeared
-    makes recovery after a supervisor restart impossible. Only a verified
-    terminal (closed/error) record is eligible; unknown/corrupt records are
-    preserved rather than silently destroying potential recovery state.
+    An error is NOT a terminal close: a failed/interrupted native turn may
+    still have a resumable OpenCode/Pi session. Under heavy Pi churn, pruning
+    error records at the 500-record limit can erase the backend/native
+    session mapping before the recovery controller can resume them.
+    Only explicitly closed records are eligible. Unknown/corrupt records
+    also remain protected; no native process or session is touched.
     """
     for stale in _metadata_files_newest(root)[_MAX_DURABLE_SESSIONS:]:
         try:
             payload = json.loads(stale.read_text(encoding="utf-8-sig"))
-            if not isinstance(payload, dict) or payload.get("status") not in {"closed", "error"}:
+            if not isinstance(payload, dict) or payload.get("status") != "closed":
                 continue
             stale.unlink()
         except (OSError, ValueError):
