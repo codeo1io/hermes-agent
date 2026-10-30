@@ -64,6 +64,10 @@ def main():
     home.mkdir(parents=True, exist_ok=True)
     Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
     os.environ['HERMES_KANBAN_HOME'] = str(home)
+    # This disposable lifecycle probe creates and dispatches its task in one
+    # tick. Production's 300s anti-churn admission delay is tested separately;
+    # pin zero only inside this isolated child process.
+    os.environ['HERMES_KANBAN_DISPATCH_MIN_AGE'] = '0'
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     peer.mode = os.environ.get('KANBAN_PROBE_MODE', 'complete')
