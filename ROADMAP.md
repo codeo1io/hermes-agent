@@ -13,11 +13,11 @@
 
 ## Open items
 
-### Add test coverage for 20 untested module(s)
+### Reassess test coverage using tracked source paths
 - id: `rm-002` | track: reliability | priority: 100.0 | status: candidate
-- signals: reliability.no_tests:.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/__main__.py, reliability.no_tests:.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/auth.py, reliability.no_tests:.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/catalog.py, reliability.no_tests:.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/commands.py, reliability.no_tests:.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/content.py (+15 more)
-- acceptance: Every module in ['.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/__main__.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/auth.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/catalog.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/commands.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/content.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/edit_approval.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/elicitation.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/entry.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/events.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/gateway_commands.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/gateway_media.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/gateway_reply.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/gateway_server.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/gateway_session_meta.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/model_catalog.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/modes.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/permissions.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/provenance.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/server.py', '.worktrees/nrm-feishu-clear-env-20261029/acp_adapter/session.py'] has a corresponding test file with at least one passing test
-- evidence: full suite green (python -m pytest -q) at HEAD; conductor validation digest validation:v1:<sha> recorded in the shipping PR
+- signals: reliability.no_tests:.github/scripts/run-workspace-checks.mjs
+- acceptance: Recompute the untested-module cohort from git-tracked source on a clean checkout, excluding ignored worktrees and generated outputs; verify each candidate genuinely lacks coverage before adding tests. Never count scratch copies as independent untested modules.
+- evidence: clean tracked-source inventory, reproducible test mapping and targeted test output
 
 ### Restore main's required CI checks to green
 - id: `rm-078` | track: reliability | priority: 100.0 | status: candidate
@@ -34,11 +34,11 @@
 - acceptance: (1) the engines contract is re-pointed at pm's node provisioning (or install.sh regains gates for every engines arm) and tests-js/engines-satisfiable.test.ts passes from a clean checkout without network; (2) the JS & TS lane installs libx11-dev/libxi-dev (or otherwise compiles/skips the x11 monitor) and is green on a main push run
 - evidence: campaign-recorded in hermes-agent ROADMAP.md
 
-### Refactor 20 high-complexity function(s)
+### Refactor verified tracked complexity hotspots
 - id: `rm-001` | track: reliability | priority: 90.0 | status: candidate
-- signals: reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1, reliability.complexity_hot:hermes_cli/web_dist/assets/react-vendor-BoVnYuL4.js::L1 (+15 more)
-- acceptance: Each flagged function is decomposed below the branch threshold with behavior locked by characterization tests
-- evidence: ast-based branch-count check passes at HEAD (full suite green; conductor validation digest validation:v1:<sha> recorded in the shipping PR)
+- signals: reliability.complexity_hot:agent/auxiliary_client.py::L1
+- acceptance: Recompute branch complexity from tracked source files only, exclude ignored web_dist bundles, then characterize and refactor a verified hotspot without changing behavior.
+- evidence: clean tracked-source complexity report, characterization tests and focused validation
 
 ### Guard the roadmap render to tracked signals
 - id: `rm-081` | track: reliability | priority: 90.0 | status: candidate
