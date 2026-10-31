@@ -1231,26 +1231,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _gateway_is_draining() -> bool:
         """Whether the owning gateway currently refuses new agent turns.
 
-        This runs on the owner loop inside the first request of every HTTP door,
-        so it must never import ``gateway.run``: its module body pulls the whole
-        gateway graph (slash commands → account usage → ``httpx`` → ``rich``)
-        through ``importlib`` — ~0.4s cold on an idle host, seconds on a loaded
-        one — stalling every session, timer and socket behind one drain check. A
-        ``gateway.run`` that was never imported cannot own a runner (the ref is
-        set only by ``GatewayRunner.__init__``), so a missing module is exactly
-        "not draining" — the same ``sys.modules.get`` hygiene
-        ``tools/cronjob_tools.py`` uses for the same reason.
-        """
+        Runs on the owner loop inside the first request of every HTTP door, so
+        it never imports ``gateway.run`` — see
+        ``gateway/platforms/api_server_runner_ref.py``."""
         try:
-            import sys
+            from gateway.platforms.api_server_runner_ref import gateway_is_draining
 
-            from gateway.platforms.api_server_fire_startup import runner_is_draining
-
-            gateway_run = sys.modules.get('gateway.run')
-            if gateway_run is None:
-                return False
-            runner = gateway_run._gateway_runner_ref()
-            return bool(runner) and runner_is_draining(runner)
+            return gateway_is_draining()
         except Exception:
             return False
 
@@ -2117,34 +2104,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return "hermes_browser" if text == "browser" else text
 
     def _session_model_override_for(self, session_key: Optional[str]) -> Optional[dict[str, Any]]:
-        """The gateway's per-session ``/model`` override for *session_key*, if any — a
-        user-issued ``/model`` always wins over static route config.
+        """The gateway's per-session ``/model`` override for *session_key* (owner-loop-safe;
+        see ``gateway/platforms/api_server_runner_ref.py``)."""
+        from gateway.platforms.api_server_runner_ref import session_model_override_for
 
-        Never imports ``gateway.run`` (owner-loop import hygiene — see
-        ``_gateway_is_draining``): a module that was never imported cannot own a
-        runner, so there is no override to consult."""
-        if not session_key:
-            return None
-        try:
-            import sys
-
-            gateway_run = sys.modules.get('gateway.run')
-            if gateway_run is None:
-                return None
-            runner = gateway_run._gateway_runner_ref()
-            if runner is None:
-                return None
-            try:
-                rehydrate = getattr(runner, "_rehydrate_session_model_override", None)
-                if callable(rehydrate):
-                    rehydrate(session_key)
-            except Exception:
-                logger.debug(
-                    "api_server failed to rehydrate session /model override for %s", session_key, exc_info=True)
-            override = runner._session_model_overrides.get(session_key)
-            return dict(override) if isinstance(override, dict) else None
-        except Exception:
-            return None
+        return session_model_override_for(session_key, logger)
 
     def _request_route_conflict_error(
         self, *, session_id: Optional[str], gateway_session_key: Optional[str], requested_model: Optional[str],
