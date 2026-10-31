@@ -148,9 +148,14 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
     from hermes_cli.local_runtime import processes
 
     marker = tmp_path / 'child executed'
-    jobs, children, handles = [], [], []
+    jobs, children, handles, creation_flags = [], [], [], []
     real_init = processes._WindowsJob.__init__
     real_assign = processes._WindowsJob.assign
+    real_popen = subprocess.Popen
+
+    def track_popen(*args, **kwargs):
+        creation_flags.append(kwargs.get('creationflags', 0))
+        return real_popen(*args, **kwargs)
 
     def track_job(job):
         jobs.append(job)
@@ -174,7 +179,10 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
 
     def assign(job, proc):
         children.append(proc)
-        assert psutil.Process(proc.pid).status() == psutil.STATUS_STOPPED
+        # psutil may report a CREATE_SUSPENDED Windows process as 'running'
+        # before the kernel thread state is reflected in its process snapshot.
+        # Verify the actual creation flag at Popen and the observable no-run gate.
+        assert creation_flags and creation_flags[-1] & 0x00000004
         assert not marker.exists()
         # Query the actual kernel object, not implementation source/constants.
         limits = processes._ExtendedLimits()
@@ -208,9 +216,15 @@ def test_failed_setup_never_runs_child_and_releases_handles(tmp_path, monkeypatc
            [sys.executable, '-c', 'from pathlib import Path; import sys; '
             'Path(sys.argv[1]).write_text("ran")', str(marker)])
     try:
-        with pytest.raises((OSError, KeyboardInterrupt)):
-            processes.spawn_server(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE)
+        with monkeypatch.context() as launch_patch:
+            launch_patch.setattr(subprocess, 'Popen', track_popen)
+            with pytest.raises((OSError, KeyboardInterrupt)):
+                processes.spawn_server(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE)
+        if failure == 'configure':
+            assert not creation_flags, 'job configuration must precede child creation'
+        else:
+            assert creation_flags and all(flags & 0x00000004 for flags in creation_flags)
         assert not marker.exists()
         assert jobs and jobs[0]._handle is None
         for proc in children:

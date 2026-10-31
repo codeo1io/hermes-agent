@@ -151,10 +151,20 @@ def test_guard_inert_outside_test_context(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.allow_real_home_io
 def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
     """connect() refuses the live board, but a fixture that opens the live DB
     with raw sqlite3.connect and drives kb.create_task goes through
-    write_txn — that boundary must refuse as well."""
+    write_txn — that boundary must refuse as well.
+
+    allow_real_home_io: this test deliberately touches a file under the REAL
+    home (an empty placeholder at the live-board path) to prove the CHOKE
+    fires before sqlite opens anything. The autouse home-io guard wraps
+    sqlite3.connect and refuses the real-home path with its own AssertionError
+    BEFORE the choke under test can raise, turning the test into a permanent
+    red (2026-10-30 main-red wave). The guard-behavior escape hatch is the
+    established mechanism for exactly this shape.
+    """
     import sqlite3
 
     from hermes_state_guard import _real_platform_state_root
@@ -191,3 +201,30 @@ def test_real_platform_state_root_ignores_redirected_home(monkeypatch, tmp_path)
     assert _real_platform_state_root() == real, (
         "deny-root must not follow a redirected HOME env"
     )
+
+
+def test_guard_fails_closed_when_resolution_is_denied(_pytest_context, monkeypatch, tmp_path):
+    """#536's fail-closed contract, adapted to the union (#539) semantics:
+    a metadata guard denying resolve() on a PRODUCTION-shaped path must not
+    silently allow a DB open — the lexical fallback must still refuse it.
+    A benign sandbox path under the same denial classifies (no crash)."""
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    root = _real_platform_state_root()
+    assert root is not None
+    original_resolve = Path.resolve
+
+    def denied_resolve(path, *args, **kwargs):
+        if path.name == "kanban.db":
+            raise PermissionError("metadata denied")
+        return original_resolve(path, *args, **kwargs)
+
+    sandbox = tmp_path / "scratch" / "kanban.db"
+    with monkeypatch.context() as isolated:
+        isolated.setattr(Path, "resolve", denied_resolve)
+        # Production-shaped path: lexical fallback must STILL refuse it.
+        with pytest.raises(RuntimeError, match="test-isolation guard"):
+            _ensure_test_isolation(root / "kanban.db")
+        # Benign sandbox path: classified lexically, no crash, no refusal.
+        _ensure_test_isolation(sandbox)

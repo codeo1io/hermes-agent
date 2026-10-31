@@ -35,9 +35,20 @@ class TestGetDefaultHermesRoot:
 
         assert get_default_hermes_root() == tmp_path / ".hermes"
 
+    def test_native_nested_sandbox_keeps_its_own_root(self, tmp_path, monkeypatch):
+        """A nested pytest TMPDIR is not the account's production Hermes root."""
+        native = tmp_path / ".hermes"
+        sandbox = native / "tmp" / "pytest" / "hermes_test"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(sandbox))
+        assert get_default_hermes_root() == sandbox
 
-
-
+    def test_native_named_profile_still_shares_native_root(self, tmp_path, monkeypatch):
+        """Normal named profile resolution remains unchanged."""
+        native = tmp_path / ".hermes"
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(native / "profiles" / "coder"))
+        assert get_default_hermes_root() == native
 
     def test_docker_profile_active(self, tmp_path, monkeypatch):
         """When a Docker profile is active (HERMES_HOME=<root>/profiles/<name>),

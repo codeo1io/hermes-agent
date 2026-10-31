@@ -229,6 +229,10 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
 def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # A clean parent environment must not probe the runner's real
+    # ~/.hermes/active_profile while resolving its fallback home.
+    monkeypatch.setattr("hermes_constants._get_platform_default_hermes_home",
+                        lambda: tmp_path / "platform-default-hermes")
 
     captured = {}
     client = _make_home_client(tmp_path)

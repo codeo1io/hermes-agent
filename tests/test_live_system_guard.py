@@ -89,8 +89,16 @@ def test_default_home_unmarked_tmpdir_is_relocated_before_pytest_uses_it(tmp_pat
     env = dict(os.environ, HOME=str(operator_home), TMPDIR=str(scratch))
     env.pop("HERMES_HOME", None)
     env.pop("HERMES_SCRATCH_DIR", None)
+    # The production guard deliberately reads the passwd home, not HOME. In
+    # this disposable child only, simulate that passwd home so the fixture
+    # actually exercises default-root protection without touching real state.
+    child_code = (
+        "import os, pathlib, tempfile, hermes_state_guard; "
+        "hermes_state_guard._capture_real_home = lambda: pathlib.Path(os.environ['HOME']); "
+        "import tests.conftest; print(tempfile.gettempdir())"
+    )
     result = subprocess.run(
-        [sys.executable, "-c", "import tempfile, tests.conftest; print(tempfile.gettempdir())"],
+        [sys.executable, "-c", child_code],
         env=env, capture_output=True, text=True, check=True,
     )
     assert not result.stdout.strip().startswith(str(operator_home / ".hermes"))

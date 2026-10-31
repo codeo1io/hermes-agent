@@ -33,6 +33,13 @@ import pytest
 
 from hermes_state_guard import _real_platform_state_root
 
+# allow_real_home_io on the two live-immutability tests: they stat / read the
+# REAL live board before and after the refused calls to prove zero mutation.
+# The autouse home-io guard (upstream v0.22.4) refuses any stat under the real
+# home, so without the marker these regression tests error out before their
+# first assertion (2026-10-30 main-red wave). The third test (choke_direct)
+# never touches the filesystem and keeps the guard armed.
+
 _REPO = Path(__file__).resolve().parents[2]
 
 
@@ -86,6 +93,7 @@ def _assert_live_untouched(root: Path, before: tuple[int, int] | None) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.allow_real_home_io
 def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env):
     """kanban_db_path() honors the pin (the incident's first half); connect()
     and init_db() must still refuse the live board from a test context —
@@ -124,6 +132,7 @@ def test_choke_direct_refuses_pinned_live_path(pinned_live_env):
         kbc._ensure_test_isolation(root / "kanban" / "boards" / "second" / "kanban.db")
 
 
+@pytest.mark.allow_real_home_io
 def test_tool_layer_create_refuses_live_board(pinned_live_env):
     """kt._handle_create (the real worker tool) must not be able to write the
     live board when the env pin leaks into pytest. The handler converts
@@ -220,3 +229,33 @@ def test_subprocess_pytest_with_inherited_pin_is_refused(pinned_live_env, tmp_pa
         f"child accepted the pinned live path (rc={result.returncode})\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+def test_choke_fails_closed_when_path_resolution_is_denied(monkeypatch, tmp_path):
+    """A filesystem guard denying resolve() must not silently permit a DB open.
+
+    Union contract (#539 lexical-fallback semantics, kept over #543's
+    raise-on-denial variant): resolve() denial falls back to lexical
+    classification, which still refuses production-shaped paths — an
+    attacker/fixture cannot dodge the choke by making resolve() raise. A
+    benign sandbox path under the same denial simply classifies (no crash).
+    """
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli import kanban_db_connect as kbc
+
+    original_resolve = Path.resolve
+
+    def denied_resolve(path, *args, **kwargs):
+        if path.name == "kanban.db":
+            raise PermissionError("test filesystem guard denied path probe")
+        return original_resolve(path, *args, **kwargs)
+
+    root = _real_platform_state_root()
+    assert root is not None
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "resolve", denied_resolve)
+        # Production-shaped path: lexical fallback must STILL refuse it.
+        with pytest.raises(RuntimeError, match="test-isolation guard"):
+            kbc._ensure_test_isolation(root / "kanban.db")
+        # Benign sandbox path: classified lexically, no crash, no refusal.
+        kbc._ensure_test_isolation(tmp_path / "kanban.db")

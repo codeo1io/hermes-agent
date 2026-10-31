@@ -396,7 +396,11 @@ function Test-CheckoutLockHeld {
     if (-not $path -or -not [System.IO.File]::Exists($path)) { return $false }
     $fs = $null
     try {
-        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+        # LockFileEx takes an exclusive byte-range lock. Open a writable
+        # handle for that probe: on Windows a read-only FileStream can reject
+        # Lock() with AccessDenied even when no updater holds any byte. A
+        # genuinely unwritable/denied file still fails closed in the catch.
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite,
             ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
     } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] { return $false } catch { return $true }
     try {
