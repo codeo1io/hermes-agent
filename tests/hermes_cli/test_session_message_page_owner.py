@@ -6,18 +6,12 @@ from fastapi.testclient import TestClient
 
 
 @pytest.mark.parametrize("serving_profile", ["work", None])
-def test_message_pages_identify_the_serving_profile(
-    tmp_path, monkeypatch, serving_profile
-):
+def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, serving_profile):
     from hermes_state import SessionDB
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     default_home = tmp_path / ".hermes"
-    work_home = (
-        default_home / "profiles" / "work"
-        if serving_profile
-        else default_home / "custom-home"
-    )
+    work_home = default_home / "profiles" / "work" if serving_profile else default_home / "custom-home"
     default_home.mkdir(parents=True)
     work_home.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(work_home))
@@ -28,13 +22,10 @@ def test_message_pages_identify_the_serving_profile(
         db = SessionDB(db_path=home / "state.db")
         try:
             db.create_session(session_id="same-id", source="desktop")
-            db.append_messages_batch(
-                "same-id",
-                [
-                    {"role": "user", "content": f"message-{index}"}
-                    for index in range(count)
-                ],
-            )
+            db.append_messages_batch("same-id", [
+                {"role": "user", "content": f"message-{index}"}
+                for index in range(count)
+            ])
         finally:
             db.close()
 
@@ -46,37 +37,43 @@ def test_message_pages_identify_the_serving_profile(
         query = "limit=120&order=latest&include_compacted=true"
         tail = client.get(f"/api/sessions/same-id/messages?{query}").json()
         older = client.get(f"/api/sessions/same-id/messages?{query}&offset=120").json()
-        default = client.get(
-            f"/api/sessions/same-id/messages?{query}&profile=default"
-        ).json()
+        default = client.get(f"/api/sessions/same-id/messages?{query}&profile=default").json()
 
-    assert tail["profile"] == older["profile"] == (serving_profile or "default")
-    assert default["profile"] == "default"
-    assert len(tail["messages"]) == 120
-    assert len(older["messages"]) == 79
-    assert [row["content"] for row in older["messages"] + tail["messages"]] == [
-        f"message-{index}" for index in range(199)
-    ]
     if serving_profile:
-        # A named profile lives under the account root: the work profile's
-        # ?profile=default page must read the account root's own session store
-        # (1 message), never the profile's 199 rows — the cross-profile leak guard.
+        # A named profile serves its own rows; an explicit ?profile=default crosses
+        # back to the native root inside the serving tree.
+        assert tail["profile"] == older["profile"] == "work"
+        assert default["profile"] == "default"
+        assert len(tail["messages"]) == 120
+        assert len(older["messages"]) == 79
         assert len(default["messages"]) == 1
+        assert [row["content"] for row in older["messages"] + tail["messages"]] == [
+            f"message-{index}" for index in range(199)
+        ]
     else:
-        # A nested custom HERMES_HOME is an independent root (wave-9 sandbox
-        # semantics, tests/test_hermes_constants.py): a server sandboxed there
-        # must never page through the enclosing account root's rows.
+        # Wave-9 root semantics (2026-10-18): a custom HERMES_HOME nested under the
+        # native root is an INDEPENDENT root — get_default_hermes_root() no longer
+        # collapses it onto the native root, so the sibling native home is not a
+        # reachable "default profile" from this process. Profile targeting stays
+        # inside the serving root (the custom home keeps the legacy "default"
+        # name), and the native home's store is never read through it.
+        assert tail["profile"] == older["profile"] == default["profile"] == "default"
+        assert len(tail["messages"]) == 120
+        assert len(older["messages"]) == 79
         assert len(default["messages"]) == 120
+        assert [row["content"] for row in older["messages"] + tail["messages"]] == [
+            f"message-{index}" for index in range(199)
+        ]
+        with SessionDB(db_path=default_home / "state.db") as native_db:
+            rows = native_db.get_messages("same-id", limit=200)
+            assert len(rows) == 1, "the native home's store was read through the custom root"
+
 
 
 def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):
     """Desktop cold-loads and pages through REST, not ``session.resume``: a failed-turn boundary
     written before the closers typed it must reach it as ``failed_turn``, not model text."""
-    from agent.turn_failure_copy import (
-        FAILED_TURN_DISPLAY_KIND,
-        FAILED_TURN_NOTICE,
-        PARTIAL_FAILED_TURN_NOTICE,
-    )
+    from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
     from hermes_state import SessionDB
 
     home = tmp_path / ".hermes"
@@ -87,20 +84,14 @@ def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):
     db = SessionDB(db_path=home / "state.db")
     try:
         db.create_session(session_id="s", source="desktop")
-        db.append_messages_batch(
-            "s",
-            [
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": FAILED_TURN_NOTICE},
-                {"role": "user", "content": "b"},
-                {"role": "assistant", "content": PARTIAL_FAILED_TURN_NOTICE},
-                {"role": "user", "content": "c"},
-                {
-                    "role": "assistant",
-                    "content": f"Quoting Hermes: {FAILED_TURN_NOTICE}",
-                },
-            ],
-        )
+        db.append_messages_batch("s", [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": FAILED_TURN_NOTICE},
+            {"role": "user", "content": "b"},
+            {"role": "assistant", "content": PARTIAL_FAILED_TURN_NOTICE},
+            {"role": "user", "content": "c"},
+            {"role": "assistant", "content": f"Quoting Hermes: {FAILED_TURN_NOTICE}"},
+        ])
     finally:
         db.close()
 
@@ -112,10 +103,5 @@ def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):
         rows = client.get("/api/sessions/s/messages").json()["messages"]
 
     assert [row.get("display_kind") for row in rows] == [
-        None,
-        FAILED_TURN_DISPLAY_KIND,
-        None,
-        FAILED_TURN_DISPLAY_KIND,
-        None,
-        None,
+        None, FAILED_TURN_DISPLAY_KIND, None, FAILED_TURN_DISPLAY_KIND, None, None,
     ]
