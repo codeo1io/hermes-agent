@@ -184,7 +184,15 @@ class WorkerRPC:
             request_id = self.request_id
             message = json.dumps({'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': params})
             try:
-                link = self._connection()
+                try:
+                    link = self._connection()
+                except TimeoutError:
+                    # The dial timed out before any byte was sent (the library's open-phase
+                    # handshake deadline under CI load): like a close that lands before the
+                    # frame is written, the outcome is known-undelivered, so redial once --
+                    # the same one retry as the send path below, never a broadcast storm.
+                    self._drop()
+                    link = self._connection()
                 try:
                     link.send(request_id, message)
                 except ConnectionClosed:
