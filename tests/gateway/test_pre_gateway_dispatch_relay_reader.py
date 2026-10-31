@@ -73,10 +73,7 @@ async def _relay(tmp_path, monkeypatch, media=None):
         authority = await initialize_session_authority(runner, profile_id="default", instance_id="relay-reader")
         adapter = RelayAdapter(PlatformConfig(enabled=True), descriptor, transport)
         if media is not None:
-            fixture_url = f"http://127.0.0.1:{media.server_port}/photo.png"
-            # Only this fixture's media may bypass the SSRF guard in this test.
-            monkeypatch.setattr("gateway.relay.media.is_safe_url", lambda candidate: candidate == fixture_url)
-            adapter._media_client = RelayMediaClient(f"http://127.0.0.1:{media.server_port}", None, None)
+            adapter._media_client = RelayMediaClient(f"http://127.0.0.1:{media.server_port}", "fixture-gateway", "fixture-secret")
         adapter.gateway_runner = runner
         runner.adapters[Platform.RELAY] = adapter
         runner._wire_adapter_handlers(adapter)
@@ -95,7 +92,7 @@ async def _media_server():
     media = ThreadingHTTPServer(("127.0.0.1", 0), _Media)
     threading.Thread(target=media.serve_forever, daemon=True).start()
     try:
-        yield media, f"http://127.0.0.1:{media.server_port}/photo.png"
+        yield media, f"http://127.0.0.1:{media.server_port}/relay/media/photo.png"
     finally:
         media.shutdown()
         media.server_close()

@@ -42,10 +42,12 @@ async def test_redelivered_media_message_returns_its_receipt_and_changed_bytes_c
     monkeypatch.setenv('DISCORD_ALLOWED_USERS', '42')
     server = ThreadingHTTPServer(('127.0.0.1', 0), _Media)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f'http://127.0.0.1:{server.server_port}/photo.png'
-    # Only the exact local HTTP fixture is trusted here; production SSRF checks stay intact.
-    monkeypatch.setattr('gateway.relay.media.is_safe_url', lambda candidate: candidate == url)
-    client = RelayMediaClient(f'http://127.0.0.1:{server.server_port}', None, None)
+    # A connector re-host reference (bearer + /relay/media/ path): the operator's
+    # connector is operator configuration and may legitimately live on the loopback
+    # of an isolated CI host, so this path is exempt from the anonymous SSRF gate
+    # (``tools/url_safety.py``) rather than silently blocked on a clean env.
+    url = f'http://127.0.0.1:{server.server_port}/relay/media/photo.png'
+    client = RelayMediaClient(f'http://127.0.0.1:{server.server_port}', 'fixture-gateway', 'fixture-secret')
     runner = GatewayRunner(GatewayConfig())
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token='fixture-token', typing_indicator=False))
     runner.adapters = {Platform.DISCORD: adapter}
