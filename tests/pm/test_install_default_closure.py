@@ -23,7 +23,8 @@ import pm.cli
 
 @pytest.fixture()
 def install_spy(monkeypatch):
-    calls = {"names": None, "verified": None, "sync_extras": None, "activated": [], "fail": set()}
+    calls = {"names": None, "verified": None, "sync_extras": None, "sync_explicit": None,
+             "activated": [], "fail": set()}
 
     def fake_install_names(names, target=None, *, verify=True):
         # Accumulate: optional defaults install in their own call after the

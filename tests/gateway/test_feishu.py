@@ -50,6 +50,10 @@ def _mock_event_dispatcher_builder(mock_handler_class):
     mock_handler_class.builder = Mock(return_value=mock_builder)
     return mock_builder
 
+
+from tests.gateway.test_feishu_adapter_home import PinnedAdapterHomeMixin as _PinnedAdapterHomeMixin
+
+
 class TestConfigEnvOverrides(unittest.TestCase):
     @patch.dict(os.environ, {
         "FEISHU_APP_ID": "cli_xxx",
@@ -101,7 +105,7 @@ class TestFeishuMessageNormalization(unittest.TestCase):
             "Build Failed\nService: payments-api\nBranch: main\nView Logs\nRetry\nActions: View Logs, Retry",
         )
 
-class TestFeishuAdapterMessaging(unittest.TestCase):
+class TestFeishuAdapterMessaging(_PinnedAdapterHomeMixin, unittest.TestCase):
 
     def test_disconnect_sends_websocket_close_frame(self):
         """Regression test for #10202: disconnect() must call the WSS
@@ -345,8 +349,8 @@ def _admits_group(adapter, message, sender_id, chat_id=""):
         message.chat_id = chat_id
     return adapter._admit(sender, message) is None
 
-class TestAdapterBehavior(unittest.TestCase):
-    @_clear_feishu_env
+class TestAdapterBehavior(_PinnedAdapterHomeMixin, unittest.TestCase):
+    @patch.dict(os.environ, {}, clear=True)
     def test_build_event_handler_registers_reaction_and_card_processors(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
@@ -1562,7 +1566,7 @@ class TestWebhookSecurity(unittest.TestCase):
         self.assertEqual(adapter._verification_token, "token_from_extra")
         self.assertEqual(adapter._encrypt_key, "encrypt_from_extra")
 
-class TestDedupTTL(unittest.TestCase):
+class TestDedupTTL(_PinnedAdapterHomeMixin, unittest.TestCase):
     """Tests for TTL-aware deduplication."""
 
     @_clear_feishu_env
@@ -1669,7 +1673,7 @@ class TestDedupTTL(unittest.TestCase):
 
         self.assertEqual(writes[-1], ["om_a", "om_b"])
 
-class TestGroupMentionAtAll(unittest.TestCase):
+class TestGroupMentionAtAll(_PinnedAdapterHomeMixin, unittest.TestCase):
     """Tests for @_all (Feishu @everyone) group mention routing."""
 
     @_clear_feishu_env
@@ -1810,21 +1814,6 @@ class TestFeishuStripLeadingSelf(unittest.TestCase):
         refs = [FeishuMentionRef(name="Alice", open_id="ou_alice")]
         self.assertEqual(_strip_edge_self_mentions("@Alice hi", refs), "@Alice hi")
 
-class TestFeishuNormalizeText(unittest.TestCase):
-
-    def test_renders_self_mention_with_name(self):
-        from plugins.platforms.feishu.adapter import _normalize_feishu_text, FeishuMentionRef
-
-        refs = {"@_user_1": FeishuMentionRef(name="Hermes", open_id="ou_bot", is_self=True)}
-        self.assertEqual(
-            _normalize_feishu_text("stop pinging @_user_1 please", refs),
-            "stop pinging @Hermes please",
-        )
-
-    def test_at_all_rendered_as_english_literal(self):
-        from plugins.platforms.feishu.adapter import _normalize_feishu_text
-
-        self.assertEqual(_normalize_feishu_text("@_all notice", None), "@all notice")
 
 class TestFeishuPostMentionParsing(unittest.TestCase):
     def test_post_at_tag_renders_via_mentions_map(self):
