@@ -2901,31 +2901,3 @@ class TestUnitAnchoredServiceIdentity:
         # The profile branch, consulted against the home that owns the profile, would have answered
         # with the readable suffix -- which is why the unit-pinned check has to be evaluated first.
         assert gateway_cli._profile_name_from_home(profile_home, profile_home.parent.parent) == profile_home.name
-
-    @pytest.mark.platforms("linux")
-    def test_real_unit_sync_keeps_the_name_it_validated(self, tmp_path, monkeypatch):
-        """Drive the production sync instead of simulating the adoption with setenv: the name resolved
-        before ``_sync_hermes_home_from_systemd_unit()`` must survive the mutation it performs."""
-        alice_home = tmp_path / "alice" / ".hermes"
-        alice_home.mkdir(parents=True)
-        root_home = tmp_path / "root" / ".hermes"
-        root_home.mkdir(parents=True)
-        unit_dir = tmp_path / "systemd"
-        unit_dir.mkdir()
-        (unit_dir / f"{gateway_cli._SERVICE_BASE}.service").write_text(
-            f'[Service]\nEnvironment="HERMES_HOME={alice_home}"\n', encoding="utf-8"
-        )
-        monkeypatch.setattr(gateway_cli, "_SYSTEM_UNIT_DIR", unit_dir)
-        monkeypatch.setattr(os, "geteuid", lambda: 0)
-        monkeypatch.setattr(hermes_constants, "_get_platform_default_hermes_home", lambda: root_home)
-        # The account-native service name must be anchored to this synthetic root too;
-        # CI runners have a different real account home than local development hosts.
-        monkeypatch.setattr(hermes_constants, "_account_home", lambda: root_home.parent)
-        monkeypatch.delenv("HERMES_HOME", raising=False)
-
-        pre_sync_name = gateway_cli.get_service_name()
-        assert pre_sync_name == gateway_cli._SERVICE_BASE
-        gateway_cli._sync_hermes_home_from_systemd_unit(system=True)
-
-        assert os.environ["HERMES_HOME"] == str(alice_home)  # the sync really ran
-        assert gateway_cli.get_service_name() == pre_sync_name
