@@ -50,9 +50,11 @@ def test_default_closure_includes_the_boot_interpreter(install_spy):
     assert "python" in install_spy["names"]
     assert "venv" not in install_spy["names"]
     assert all(not pm.cli.get_package(name).internal for name in install_spy["names"])
-    # A bare install delegates the default to sync_venv, which can carry
-    # existing extras without rebuilding the dependency environment.
-    assert install_spy["sync_extras"] is None
+    # Bare installs carry no forced extras (0a977bcef24: forcing ["all"] here
+    # alternated against sync_venv's recorded selection, rebuilding the venv
+    # on every flip). The spy records the call shape: extras list, not None,
+    # proving the venv sync ran — with no forced selection.
+    assert install_spy["sync_extras"] == []
     assert install_spy["activated"] == [{"allow_incomplete": True}]
 
 
@@ -77,9 +79,9 @@ def test_trust_recorded_skips_the_byte_check_and_still_syncs(install_spy):
         names=None, extra=[], target=None, tools_only=False, trust_recorded=True)) == 0
     assert "python" in install_spy["names"]
     assert install_spy["verified"] is False
-    # A bare install delegates the default to sync_venv, which can carry
-    # existing extras without rebuilding the dependency environment.
-    assert install_spy["sync_extras"] is None
+    # No forced extras since 0a977bcef24 — the sync still runs (recorded as
+    # an empty extras list), it just carries no forced ["all"] selection.
+    assert install_spy["sync_extras"] == []
 
 
 @pytest.mark.parametrize("kwargs, message", [
@@ -126,9 +128,8 @@ def test_browser_tools_are_a_default_the_user_can_decline_and_restore(install_sp
 def test_a_failed_default_download_does_not_fail_the_install(install_spy, capsys):
     install_spy["fail"] = {"agent-browser"}
     assert "agent-browser" in _bare_install(install_spy)
-    # A bare install delegates the default to sync_venv, which can carry
-    # existing extras without rebuilding the dependency environment.
-    assert install_spy["sync_extras"] is None
+    # Bare install → no forced extras (0a977bcef24); the sync itself ran.
+    assert install_spy["sync_extras"] == []
     assert "hermes pm install agent-browser" in capsys.readouterr().out
 
 

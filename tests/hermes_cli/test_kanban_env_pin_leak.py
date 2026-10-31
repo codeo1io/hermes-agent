@@ -33,6 +33,13 @@ import pytest
 
 from hermes_state_guard import _real_platform_state_root
 
+# allow_real_home_io on the two live-immutability tests: they stat / read the
+# REAL live board before and after the refused calls to prove zero mutation.
+# The autouse home-io guard (upstream v0.22.4) refuses any stat under the real
+# home, so without the marker these regression tests error out before their
+# first assertion (2026-10-30 main-red wave). The third test (choke_direct)
+# never touches the filesystem and keeps the guard armed.
+
 _REPO = Path(__file__).resolve().parents[2]
 
 
@@ -84,7 +91,8 @@ def refuse_live_sqlite_open(monkeypatch, pinned_live_env):
 # ---------------------------------------------------------------------------
 
 
-def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env, refuse_live_sqlite_open):
+@pytest.mark.allow_real_home_io
+def test_connect_refuses_live_db_with_env_pin_and_sandboxed_home(pinned_live_env):
     """kanban_db_path() honors the pin (the incident's first half); connect()
     and init_db() must still refuse the live board from a test context —
     before any mkdir, lock sidecar, or sqlite touch."""
@@ -121,7 +129,8 @@ def test_choke_direct_refuses_pinned_live_path(pinned_live_env):
         kbc._ensure_test_isolation(root / "kanban" / "boards" / "second" / "kanban.db")
 
 
-def test_tool_layer_create_refuses_live_board(pinned_live_env, refuse_live_sqlite_open):
+@pytest.mark.allow_real_home_io
+def test_tool_layer_create_refuses_live_board(pinned_live_env):
     """kt._handle_create (the real worker tool) must not be able to write the
     live board when the env pin leaks into pytest. The handler converts
     exceptions to structured tool errors, so the contract is: error payload,
