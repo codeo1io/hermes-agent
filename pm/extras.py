@@ -300,10 +300,14 @@ def legacy_selection(project_root: Path) -> list[str]:
     # that declares other extras but not `all` (a PM-managed plugin
     # workspace, an embedded/test core) must not have it fabricated — uv
     # resolves extras against the workspace's own optional-dependencies and
-    # refuses unknown names.
+    # refuses unknown names. A root with no pyproject at all declares
+    # nothing, so `all` is equally fabricated there: fabricating it forces a
+    # rebuild of a recorded environment whose stamp has no extras (a venv
+    # seeded from the lock alone) and the build then dies reading the
+    # missing manifest (pm.workspace._generate_pyproject).
     from pm.features import declared_extras
 
     manifest = root / "pyproject.toml"
-    if manifest.is_file() and "all" not in declared_extras(root):
+    if not manifest.is_file() or "all" not in declared_extras(root):
         return carried
     return ["all", *carried]
