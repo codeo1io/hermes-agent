@@ -436,7 +436,8 @@ def _sweep_orphaned_session_rows() -> list[str]:
 # Each serve / gateway process registers a heartbeat row in ``gateway_heartbeats`` so the startup sweep can tell
 # "owned by a live but idle backend" from "truly orphaned" (else the first process to restart reaped every
 # inactive row of the other N−1). Refresh 60s default — far shorter than the 6h TTL so a refresh always lands
-# inside the staleness window. Removed at exit; a crashed row ages out.
+# inside the staleness window. Removed at exit; a row whose writer died without exit cleanup
+# (SIGKILL, crash, reboot) is reclaimed by any live refresher once past the staleness window.
 _HEARTBEAT_REFRESH_S = max(0.0, env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0))
 _heartbeat_refresher_started = False
 _heartbeat_refresher_lock = threading.Lock()
@@ -474,6 +475,26 @@ def _refresh_backend_heartbeat() -> None:
         logger.debug("backend heartbeat refresh failed", exc_info=True)
 
 
+def _reclaim_stale_backend_heartbeats() -> None:
+    """Reclaim heartbeat rows whose writer died without exit cleanup (SIGKILL, crash, reboot).
+    Rows past the sweep-staleness window (``2 * _SESSION_TTL_S`` — the same semantics the orphan
+    sweep uses for heartbeat ownership, so a pruned row protected no session) are dropped by any
+    live refresher. Best-effort: no-op when DB unavailable; never raises."""
+    try:
+        db = _get_db()
+        if db is None:
+            return
+        ttl = _SESSION_TTL_S  # call-time read: the knob lives in server's namespace (rebinding contract)
+        window = ttl * 2.0 if ttl > 0 else 43_200.0  # sweep disabled → rows are pure diagnostics: literal 12 h
+        removed = db.prune_stale_heartbeats(max_age_seconds=window)
+        if removed:
+            logger.info(
+                "Reclaimed %d stale gateway heartbeat row(s) from dead backend(s): %s",
+                len(removed), ", ".join(removed))
+    except Exception:
+        logger.debug("stale heartbeat reclaim failed", exc_info=True)
+
+
 def _start_backend_heartbeat_refresher() -> None:
     """Register this backend and start the refresher thread (once per process). The first refresh writes the row
     synchronously so this process's own sweep sees itself in the heartbeat table. ``_HEARTBEAT_REFRESH_S <= 0``
@@ -487,6 +508,7 @@ def _start_backend_heartbeat_refresher() -> None:
         _refresh_backend_heartbeat()
     except Exception:
         logger.debug("initial backend heartbeat write failed", exc_info=True)
+    _reclaim_stale_backend_heartbeats()  # before the register-once early-return: a disabled refresher still heals the table
     if _HEARTBEAT_REFRESH_S <= 0:
         return
     stop_event = threading.Event()
@@ -497,6 +519,7 @@ def _start_backend_heartbeat_refresher() -> None:
                 _refresh_backend_heartbeat()
             except Exception:
                 logger.debug("heartbeat refresh loop iteration failed", exc_info=True)
+            _reclaim_stale_backend_heartbeats()
             stop_event.wait(_HEARTBEAT_REFRESH_S)
 
     def _atexit_clear():
