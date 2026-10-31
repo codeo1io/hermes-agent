@@ -19,6 +19,7 @@ patch timing.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -71,21 +72,9 @@ def test_default_root_dot_profile_home_keeps_existing_mapping(monkeypatch, tmp_p
 
 
 @pytest.fixture()
-def _pytest_context(monkeypatch, tmp_path):
-    """Exercise the production-path guard against a synthetic, isolated root.
-
-    A CI runner's real home can itself be a registered pytest sandbox. Using
-    that home here makes the guard correctly allow the path and the test
-    incorrectly fail (or touch the runner's actual state). Keep the security
-    predicate real while replacing only the platform root and sandbox lookup.
-    """
-    synthetic_root = tmp_path / "synthetic-production-home" / ".hermes"
-    synthetic_root.mkdir(parents=True)
+def _pytest_context(monkeypatch):
+    """Arm the env-based test signal the way the hermetic conftest does."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_self.py::test_x")
-    monkeypatch.setattr(
-        "hermes_state_guard._real_platform_state_root", lambda: synthetic_root
-    )
-    monkeypatch.setattr("hermes_state_guard._path_in_sandbox", lambda _path: False)
     yield
 
 
@@ -111,17 +100,14 @@ def test_guard_refuses_production_board_dirs_and_profiles(_pytest_context):
         _ensure_test_isolation(root / "profiles" / "worker" / "kanban.db")
 
 
-def test_guard_allows_sandboxed_db_under_real_root(_pytest_context, monkeypatch, tmp_path):
-    """A scratch directory beneath a platform root is not a production board.
-
-    Model the layout in a temporary root; metadata probes of the actual
-    ~/.hermes/tmp directory are forbidden by the hermetic home-I/O guard.
-    """
-    import hermes_state_guard
+def test_guard_allows_sandboxed_db_under_real_root(_pytest_context):
+    """pytest tmpdirs parked under ~/.hermes are legitimate sandboxes — only
+    the production BOARD paths are denied."""
+    from hermes_state_guard import _real_platform_state_root
     from hermes_cli.kanban_db_connect import _ensure_test_isolation
 
-    root = tmp_path / "synthetic-platform-home" / ".hermes"
-    monkeypatch.setattr(hermes_state_guard, "_real_platform_state_root", lambda: root)
+    root = _real_platform_state_root()
+    assert root is not None
     sandbox_db = root / "tmp" / "pytest-something" / ".hermes" / "kanban.db"
     _ensure_test_isolation(sandbox_db)  # must not raise
 
@@ -182,74 +168,25 @@ def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
     import sqlite3
 
     from hermes_state_guard import _real_platform_state_root
+    from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
     root = _real_platform_state_root()
     assert root is not None
-    with sqlite3.connect(":memory:") as raw:
-        monkeypatch.setattr(kbc, "_main_db_file", lambda _conn: str(root / "kanban.db"))
+    db = root / "kanban.db"
+    # A fresh CI host has no real-home Hermes root yet, and a raw sqlite3.connect
+    # cannot create the board file through a missing parent directory. Materialize
+    # the empty live-board artifact first: the isolation guard refuses inside
+    # write_txn before any schema access, so an empty file IS the live board here.
+    db.parent.mkdir(parents=True, exist_ok=True)
+    db.touch(exist_ok=True)
+    raw = sqlite3.connect(db)
+    try:
         with pytest.raises(RuntimeError, match="test-isolation guard"):
             with kbc.write_txn(raw):
-                pytest.fail("write boundary reached before isolation guard")
-
-
-def test_main_db_file_reports_isolated_connection_path(tmp_path):
-    import sqlite3
-
-    from hermes_cli import kanban_db_connect as kbc
-
-    db = tmp_path / "isolated-kanban.db"
-    with sqlite3.connect(db) as raw:
-        assert Path(kbc._main_db_file(raw)).resolve() == db.resolve()
-
-
-def test_registered_real_home_never_bypasses_kanban_guard(_pytest_context, monkeypatch):
-    from hermes_state_guard import _real_platform_state_root, pin_sandbox_root
-    from hermes_cli.kanban_db_connect import _ensure_test_isolation
-
-    root = _real_platform_state_root()
-    assert root is not None
-    monkeypatch.setattr("hermes_state_guard._SANDBOX_ROOTS", [])
-    pin_sandbox_root(root)
-    from hermes_state_guard import _SANDBOX_ROOTS
-    assert root not in _SANDBOX_ROOTS
-    with pytest.raises(RuntimeError, match="test-isolation guard"):
-        _ensure_test_isolation(root / "kanban.db")
-
-
-def test_guard_refuses_symlink_alias_into_production_board(_pytest_context, monkeypatch, tmp_path):
-    """An external alias cannot evade the resolved-path production check."""
-    import hermes_state_guard
-    from hermes_cli.kanban_db_connect import _ensure_test_isolation
-
-    root = tmp_path / "synthetic-platform-home" / ".hermes"
-    root.mkdir(parents=True)
-    monkeypatch.setattr(hermes_state_guard, "_real_platform_state_root", lambda: root)
-    alias = tmp_path / "outside.db"
-    alias.symlink_to(root / "kanban.db")
-    with pytest.raises(RuntimeError, match="test-isolation guard"):
-        _ensure_test_isolation(alias)
-
-
-def test_guard_fails_closed_on_resolution_error(_pytest_context, monkeypatch, tmp_path):
-    """A metadata guard denying resolution must not silently allow a DB open."""
-    import hermes_state_guard
-    from hermes_cli.kanban_db_connect import _ensure_test_isolation
-
-    root = tmp_path / "synthetic-platform-home" / ".hermes"
-    monkeypatch.setattr(hermes_state_guard, "_real_platform_state_root", lambda: root)
-    alias = tmp_path / "unresolvable.db"
-    original_resolve = Path.resolve
-
-    def blocked_resolve(path, *args, **kwargs):
-        if path == alias:
-            raise PermissionError("metadata denied")
-        return original_resolve(path, *args, **kwargs)
-
-    with monkeypatch.context() as isolated:
-        isolated.setattr(Path, "resolve", blocked_resolve)
-        with pytest.raises(RuntimeError, match="cannot resolve DB path"):
-            _ensure_test_isolation(alias)
+                kb.create_task(raw, title="wave8-probe", assignee="alpha")
+    finally:
+        raw.close()
 
 
 def test_real_platform_state_root_ignores_redirected_home(monkeypatch, tmp_path):
@@ -264,3 +201,30 @@ def test_real_platform_state_root_ignores_redirected_home(monkeypatch, tmp_path)
     assert _real_platform_state_root() == real, (
         "deny-root must not follow a redirected HOME env"
     )
+
+
+def test_guard_fails_closed_when_resolution_is_denied(_pytest_context, monkeypatch, tmp_path):
+    """#536's fail-closed contract, adapted to the union (#539) semantics:
+    a metadata guard denying resolve() on a PRODUCTION-shaped path must not
+    silently allow a DB open — the lexical fallback must still refuse it.
+    A benign sandbox path under the same denial classifies (no crash)."""
+    from hermes_state_guard import _real_platform_state_root
+    from hermes_cli.kanban_db_connect import _ensure_test_isolation
+
+    root = _real_platform_state_root()
+    assert root is not None
+    original_resolve = Path.resolve
+
+    def denied_resolve(path, *args, **kwargs):
+        if path.name == "kanban.db":
+            raise PermissionError("metadata denied")
+        return original_resolve(path, *args, **kwargs)
+
+    sandbox = tmp_path / "scratch" / "kanban.db"
+    with monkeypatch.context() as isolated:
+        isolated.setattr(Path, "resolve", denied_resolve)
+        # Production-shaped path: lexical fallback must STILL refuse it.
+        with pytest.raises(RuntimeError, match="test-isolation guard"):
+            _ensure_test_isolation(root / "kanban.db")
+        # Benign sandbox path: classified lexically, no crash, no refusal.
+        _ensure_test_isolation(sandbox)

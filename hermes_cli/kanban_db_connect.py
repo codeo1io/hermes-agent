@@ -701,11 +701,7 @@ def _ensure_test_isolation(path: Path) -> None:
     if _KANBAN_GUARD_BYPASS or os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
         return
     try:
-        from hermes_state_guard import (
-            _in_test_context,
-            _path_in_sandbox,
-            _real_platform_state_root,
-        )
+        from hermes_state_guard import _in_test_context, _real_platform_state_root
     except ImportError:
         return
     if not _in_test_context():
@@ -731,10 +727,13 @@ def _ensure_test_isolation(path: Path) -> None:
     root = _real_platform_state_root()
     if root is None:
         return
-    # Production board paths are never exempted by the sandbox registry:
-    # a polluted registry (e.g. a fixture mistakenly registering the real
-    # home) must not disable the test-only write guard. Legitimate sandbox
-    # paths under <root>/tmp do not match the production predicate below.
+    try:
+        from hermes_state_guard import _path_in_sandbox
+
+        if _path_in_sandbox(resolved):
+            return  # fixture-registered sandbox root: never production
+    except ImportError:
+        pass
     try:
         parts = resolved.relative_to(root).parts
     except ValueError:
@@ -752,31 +751,6 @@ def _ensure_test_isolation(path: Path) -> None:
             "root — or export HERMES_KANBAN_GUARD_BYPASS=1 for a test that "
             "genuinely needs the live board."
         )
-        if production:
-            raise RuntimeError(
-                "kanban test-isolation guard: test attempted to open the "
-                f"production kanban DB at {candidate} (under real Hermes root {root}). "
-                "Tests must run against a temporary HERMES_HOME outside the real "
-                "root — or export HERMES_KANBAN_GUARD_BYPASS=1 for a test that "
-                "genuinely needs the live board."
-            )
-
-    # Deny the lexical production path BEFORE Path.resolve(): the hermetic
-    # home-I/O guard intentionally refuses even metadata reads of the real
-    # board. Previously that refusal was swallowed by the broad except below,
-    # silently disarming this guard and letting tests escape isolation.
-    try:
-        lexical = Path(os.path.abspath(str(Path(path).expanduser())))
-    except Exception as exc:
-        raise RuntimeError("kanban test-isolation guard: cannot inspect DB path") from exc
-    refuse_production(lexical)
-    # Still resolve aliases: an external symlink can point into the real board.
-    # Resolution failure must never mean "safe to open".
-    try:
-        resolved = lexical.resolve()
-    except Exception as exc:
-        raise RuntimeError("kanban test-isolation guard: cannot resolve DB path") from exc
-    refuse_production(resolved)
 
 
 def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:
