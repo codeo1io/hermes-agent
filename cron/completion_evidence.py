@@ -13,6 +13,9 @@ import stat
 
 
 _MARKER = "[CRON_EVIDENCE]"
+# Exact gateway final-response wrapper observed on a SHA-valid canonical execution.
+# Only this bounded, literal prefix is permitted; arbitrary prose remains invalid.
+_KNOWN_GATEWAY_PREAMBLE = "All work verified and checkpointed. Final response:"
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _ALLOWED_KINDS = frozenset({"code_change", "runtime_repair", "validated_recovery"})
@@ -80,6 +83,10 @@ def validate_completion_evidence(
         if not root.is_absolute() or root == Path("/"):
             raise ValueError("completion evidence root must be an absolute directory")
         lines = (response or "").splitlines()
+        if lines and lines[0] == _KNOWN_GATEWAY_PREAMBLE:
+            lines = lines[1:]
+            if lines and lines[0] == "":
+                lines = lines[1:]
         if len(lines) < 2 or lines[0].strip() != _MARKER:
             raise ValueError("missing explicit completion evidence marker")
         prefix = "sha256:"
