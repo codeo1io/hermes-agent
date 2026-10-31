@@ -1229,11 +1229,27 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @staticmethod
     def _gateway_is_draining() -> bool:
-        """Whether the owning gateway currently refuses new agent turns."""
+        """Whether the owning gateway currently refuses new agent turns.
+
+        This runs on the owner loop inside the first request of every HTTP door,
+        so it must never import ``gateway.run``: its module body pulls the whole
+        gateway graph (slash commands → account usage → ``httpx`` → ``rich``)
+        through ``importlib`` — ~0.4s cold on an idle host, seconds on a loaded
+        one — stalling every session, timer and socket behind one drain check. A
+        ``gateway.run`` that was never imported cannot own a runner (the ref is
+        set only by ``GatewayRunner.__init__``), so a missing module is exactly
+        "not draining" — the same ``sys.modules.get`` hygiene
+        ``tools/cronjob_tools.py`` uses for the same reason.
+        """
         try:
+            import sys
+
             from gateway.platforms.api_server_fire_startup import runner_is_draining
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
+
+            gateway_run = sys.modules.get('gateway.run')
+            if gateway_run is None:
+                return False
+            runner = gateway_run._gateway_runner_ref()
             return bool(runner) and runner_is_draining(runner)
         except Exception:
             return False
@@ -2102,12 +2118,20 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _session_model_override_for(self, session_key: Optional[str]) -> Optional[dict[str, Any]]:
         """The gateway's per-session ``/model`` override for *session_key*, if any — a
-        user-issued ``/model`` always wins over static route config."""
+        user-issued ``/model`` always wins over static route config.
+
+        Never imports ``gateway.run`` (owner-loop import hygiene — see
+        ``_gateway_is_draining``): a module that was never imported cannot own a
+        runner, so there is no override to consult."""
         if not session_key:
             return None
         try:
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
+            import sys
+
+            gateway_run = sys.modules.get('gateway.run')
+            if gateway_run is None:
+                return None
+            runner = gateway_run._gateway_runner_ref()
             if runner is None:
                 return None
             try:
