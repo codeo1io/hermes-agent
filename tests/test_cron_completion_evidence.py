@@ -68,6 +68,27 @@ def test_truncated_or_planning_only_response_fails(tmp_path):
     assert "marker" in validate_completion_evidence(job, "I will investigate", "exec-abc")
 
 
+def test_exact_gateway_final_response_preamble_preserves_valid_receipt(tmp_path):
+    job, _, _, _, response = _case(tmp_path)
+    prefix = "All work verified and checkpointed. Final response:"
+    for separator in ("\n", "\n\n"):
+        assert validate_completion_evidence(job, prefix + separator + response, "exec-abc") is None
+
+
+def test_unrecognized_or_extended_preamble_remains_fail_closed(tmp_path):
+    job, _, _, _, response = _case(tmp_path)
+    prefix = "All work verified and checkpointed. Final response:"
+    for text in ("Done.\n" + response, prefix + " extra\n" + response,
+                 prefix + "\n\n\n" + response):
+        assert "marker" in validate_completion_evidence(job, text, "exec-abc")
+
+
+def test_bounded_preamble_does_not_waive_receipt_digest(tmp_path):
+    job, _, _, _, _ = _case(tmp_path)
+    response = "All work verified and checkpointed. Final response:\n[CRON_EVIDENCE]\nsha256:" + "0" * 64
+    assert "digest mismatch" in validate_completion_evidence(job, response, "exec-abc")
+
+
 def test_receipt_digest_mismatch_fails(tmp_path):
     job, _, _, _, _ = _case(tmp_path)
     response = "[CRON_EVIDENCE]\nsha256:" + "0" * 64
