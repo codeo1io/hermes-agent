@@ -437,7 +437,8 @@ def _sweep_orphaned_session_rows() -> list[str]:
 # "owned by a live but idle backend" from "truly orphaned" (else the first process to restart reaped every
 # inactive row of the other N−1). Refresh 60s default — far shorter than the 6h TTL so a refresh always lands
 # inside the staleness window. Removed at exit; a row whose writer died without exit cleanup
-# (SIGKILL, crash, reboot) is reclaimed by any live refresher once past the staleness window.
+# (SIGKILL, crash, reboot) is reclaimed by any live refresher once past the staleness window — and on
+# the same host, as soon as the writer's pid provably no longer exists.
 _HEARTBEAT_REFRESH_S = max(0.0, env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0))
 _heartbeat_refresher_started = False
 _heartbeat_refresher_lock = threading.Lock()
@@ -479,7 +480,9 @@ def _reclaim_stale_backend_heartbeats() -> None:
     """Reclaim heartbeat rows whose writer died without exit cleanup (SIGKILL, crash, reboot).
     Rows past the sweep-staleness window (``2 * _SESSION_TTL_S`` — the same semantics the orphan
     sweep uses for heartbeat ownership, so a pruned row protected no session) are dropped by any
-    live refresher. Best-effort: no-op when DB unavailable; never raises."""
+    live refresher; the same-host dead-pid rider below then also drops rows whose writer's pid
+    provably no longer exists, well inside that window. Best-effort: no-op when DB unavailable;
+    never raises."""
     try:
         db = _get_db()
         if db is None:
@@ -487,12 +490,44 @@ def _reclaim_stale_backend_heartbeats() -> None:
         ttl = _SESSION_TTL_S  # call-time read: the knob lives in server's namespace (rebinding contract)
         window = ttl * 2.0 if ttl > 0 else 43_200.0  # sweep disabled → rows are pure diagnostics: literal 12 h
         removed = db.prune_stale_heartbeats(max_age_seconds=window)
+        removed += _reclaim_dead_local_peer_heartbeats(db)
         if removed:
             logger.info(
                 "Reclaimed %d stale gateway heartbeat row(s) from dead backend(s): %s",
                 len(removed), ", ".join(removed))
     except Exception:
         logger.debug("stale heartbeat reclaim failed", exc_info=True)
+
+
+def _reclaim_dead_local_peer_heartbeats(db) -> list[str]:
+    """Same-host dead-pid rider: a local peer whose pid provably no longer exists is reclaimed
+    within ~2 refresh ticks of its death instead of the 12 h staleness window, bounding the
+    post-crash transient an external staleness check could still count (the observed daily
+    unclean-death restart chain). Safety invariants: a LIVE local writer's row is never touched
+    at any staleness (its pid exists — this protects even a hung backend, stricter than the
+    window); cross-host rows are never pid-probed (a pid is not a cross-host identity — the
+    window is the only cross-host judge); rows within ``max(2 * _HEARTBEAT_REFRESH_S, 120 s)``
+    are skipped, so a peer refreshing at cadence never reaches the probe. Liveness goes through
+    ``gateway.status._pid_exists`` (psutil-preferred, zombie-aware, Windows-safe; never raw
+    ``os.kill`` — that terminates the target on Windows; EPERM reads as alive)."""
+    from gateway.status import _pid_exists  # function-level late import: tui_gateway → gateway cycle hygiene
+
+    floor = max(_HEARTBEAT_REFRESH_S * 2.0, 120.0)  # call-time read: knob lives in server's namespace
+    hostname = _reaper_hostname()
+    now = time.time()
+    removed: list[str] = []
+    for row in db.list_backend_heartbeats():
+        if str(row.get("host") or "") != hostname:
+            continue
+        if now - float(row.get("last_heartbeat") or 0.0) <= floor:
+            continue
+        pid = int(row.get("pid") or 0)
+        if pid <= 0 or _pid_exists(pid):
+            continue
+        backend_id = str(row.get("backend_id") or "")
+        if backend_id and db.clear_backend_heartbeat(backend_id):
+            removed.append(backend_id)
+    return removed
 
 
 def _start_backend_heartbeat_refresher() -> None:

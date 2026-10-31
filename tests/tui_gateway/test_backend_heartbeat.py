@@ -20,6 +20,9 @@ refreshes it periodically.  This file verifies:
 from __future__ import annotations
 
 import io
+import os
+import subprocess
+import sys
 import threading
 import time
 
@@ -101,7 +104,9 @@ class TestStaleHeartbeatReclamation:
     """A live refresher reclaims heartbeat rows whose writer died without exit cleanup:
     every row with ``last_heartbeat`` older than the sweep-staleness window
     (``2 * _SESSION_TTL_S``, literal 43 200 s when the sweep is disabled) is dropped
-    at refresher start and on every refresh tick."""
+    at refresher start and on every refresh tick; on the same host, a row whose
+    writer's pid provably no longer exists is dropped within ~2 refresh ticks
+    instead of waiting out the window (the dead-pid rider)."""
 
     @staticmethod
     def _rows(db):
@@ -279,6 +284,144 @@ class TestStaleHeartbeatReclamation:
         server._start_backend_heartbeat_refresher()  # must not raise
 
         assert "test-backend-A" in self._rows(db)
+
+    # ── Unit 2: same-host dead-pid fast reclamation rider ──────────────────
+
+    @staticmethod
+    def _spawn_dead_pid() -> int:
+        """Pid of a provably dead, fully reaped process (spawn-and-reap; PID reuse inside
+        the test window is negligible)."""
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait(timeout=10)
+        return proc.pid
+
+    def _register_local_peer(self, db, *, backend_id, pid, age_s, host=None):
+        """Register a peer heartbeat ``age_s`` seconds stale on this (or the given) host."""
+        from tui_gateway import server
+
+        ts = time.time() - age_s
+        db.register_backend_heartbeat(
+            backend_id=backend_id, pid=pid, started_at=ts - 3600,
+            last_heartbeat=ts, profile="p",
+            host=host if host is not None else server._reaper_hostname())
+
+    @staticmethod
+    def _patch_refresher(monkeypatch, db):
+        """Standard refresher harness: tmp DB, register-once mode, 12 h window."""
+        from tui_gateway import server
+
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_HEARTBEAT_REFRESH_S", 0.0)  # register-once
+        monkeypatch.setattr(server, "_SESSION_TTL_S", float(IDLE_S))  # window = 12 h
+        monkeypatch.setattr(server, "_heartbeat_refresher_started", False)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "test-backend-A")
+
+    def test_start_reclaims_same_host_dead_pid_row_within_window(self, db, monkeypatch):
+        """The rider: a same-host row only 5 min stale (well inside the 12 h window) whose
+        writer's pid provably no longer exists is reclaimed at refresher start — bounded
+        by ~2 refresh ticks, not the staleness window."""
+        from tui_gateway import server
+
+        dead_pid = self._spawn_dead_pid()
+        self._register_local_peer(db, backend_id="dead-local-peer", pid=dead_pid, age_s=300.0)
+        self._patch_refresher(monkeypatch, db)
+
+        server._start_backend_heartbeat_refresher()
+
+        rows = self._rows(db)
+        assert "dead-local-peer" not in rows
+        assert "test-backend-A" in rows
+
+    def test_live_local_pid_row_survives_reclaim(self, db, monkeypatch):
+        """R3 invariant, stricter than the window: a same-host row past the floor whose
+        pid is LIVE (this very process) is never reclaimed — even a hung local backend
+        keeps its sessions' sweep protection."""
+        from tui_gateway import server
+
+        self._register_local_peer(db, backend_id="hung-local-peer", pid=os.getpid(), age_s=300.0)
+        self._patch_refresher(monkeypatch, db)
+
+        server._start_backend_heartbeat_refresher()
+
+        assert set(self._rows(db)) == {"hung-local-peer", "test-backend-A"}
+
+    def test_cross_host_dead_pid_row_within_window_survives(self, db, monkeypatch):
+        """The pid probe is same-host only: a foreign host's row is judged by the window
+        alone (pid-probing across hosts is unsound — a pid is not a cross-host identity)."""
+        from tui_gateway import server
+
+        dead_pid = self._spawn_dead_pid()
+        self._register_local_peer(
+            db, backend_id="far-peer", pid=dead_pid, age_s=300.0, host="other-host")
+        self._patch_refresher(monkeypatch, db)
+
+        server._start_backend_heartbeat_refresher()
+
+        assert set(self._rows(db)) == {"far-peer", "test-backend-A"}
+
+    def test_same_host_dead_pid_row_within_floor_survives(self, db, monkeypatch):
+        """Floor guard: a row younger than max(2 x _HEARTBEAT_REFRESH_S, 120 s) is never
+        probed, so a peer refreshing at cadence can never lose its row to the rider."""
+        from tui_gateway import server
+
+        dead_pid = self._spawn_dead_pid()
+        self._register_local_peer(db, backend_id="young-dead-peer", pid=dead_pid, age_s=30.0)
+        self._patch_refresher(monkeypatch, db)
+
+        server._start_backend_heartbeat_refresher()
+
+        assert set(self._rows(db)) == {"young-dead-peer", "test-backend-A"}
+
+    def test_sweep_reaps_dead_local_writer_orphan_after_rider(self, db, monkeypatch):
+        """The documented tightening, end-to-end: a dead local writer's idle session
+        becomes sweep-reapable at the next sweep once the rider clears its heartbeat,
+        instead of staying grace-protected for the remaining staleness window."""
+        from tui_gateway import server
+
+        now = time.time()
+        dead_pid = self._spawn_dead_pid()
+        # The dead writer: heartbeat 5 min stale (inside the 12 h staleness window) with a
+        # started_at old enough to own the session below (the sweep's grace predicate).
+        db.register_backend_heartbeat(
+            backend_id="dead-local-writer", pid=dead_pid, started_at=now - 48 * 3600,
+            last_heartbeat=now - 300.0, profile="p", host=server._reaper_hostname())
+        # Its session: idle 13 h (> TTL 6 h), still open, tui-owned.
+        db.create_session("orphaned-session", source="tui")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = 'orphaned-session'", (now - 13 * 3600,))
+        db.append_message("orphaned-session", role="user", content="hello")
+        db._conn.execute(
+            "UPDATE messages SET timestamp = ? WHERE session_id = 'orphaned-session'",
+            (now - 13 * 3600,))
+        db._conn.commit()
+        self._patch_refresher(monkeypatch, db)
+
+        server._start_backend_heartbeat_refresher()
+        assert "dead-local-writer" not in self._rows(db)  # rider cleared it at start
+
+        swept = db.sweep_orphaned_sessions(max_idle_seconds=IDLE_S, sources=("tui",))
+
+        assert "orphaned-session" in swept
+        reason = db._conn.execute(
+            "SELECT end_reason FROM sessions WHERE id = 'orphaned-session'").fetchone()
+        assert reason and reason[0] == "startup_orphan_reap"
+
+    def test_rider_failure_does_not_break_start(self, db, monkeypatch):
+        """The rider's error path: a failing heartbeat listing must never break refresher
+        startup (the reclaim helper swallows failures exactly like the refresh does)."""
+        from tui_gateway import server
+
+        def _boom():
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(db, "list_backend_heartbeats", _boom)
+        self._patch_refresher(monkeypatch, db)
+
+        server._start_backend_heartbeat_refresher()  # must not raise
+
+        ids = {str(r[0]) for r in db._conn.execute(
+            "SELECT backend_id FROM gateway_heartbeats").fetchall()}
+        assert "test-backend-A" in ids
 
 
 class TestEntryAndWsWiring:
