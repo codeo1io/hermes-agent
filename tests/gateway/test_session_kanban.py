@@ -62,7 +62,14 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
     repo = Path(__file__).resolve().parents[2]
     from tests.gateway.fixtures.local_recovery_probe import child_env
     env = child_env()
-    env.update(HOME=str(tmp_path / 'home'), USERPROFILE=str(tmp_path / 'home'), HERMES_HOME=str(tmp_path / 'state'), PYTHONPATH=str(repo), KANBAN_PROBE_MODE=mode)
+    # HERMES_KANBAN_DISPATCH_MIN_AGE=0: the wave-12 min-age gate (v0.22.4)
+    # makes rows younger than 300s invisible to dispatch_once, so the probe's
+    # create→dispatch-in-the-same-second assertion saw spawned=[] forever.
+    # tests/hermes_cli/conftest.py carries the same neutralizer for in-process
+    # tests; the probe runs in a child with a whitelisted env (child_env()),
+    # so the knob must be exported here explicitly.
+    env.update(HOME=str(tmp_path / 'home'), USERPROFILE=str(tmp_path / 'home'), HERMES_HOME=str(tmp_path / 'state'), PYTHONPATH=str(repo), KANBAN_PROBE_MODE=mode,
+               HERMES_KANBAN_DISPATCH_MIN_AGE='0')
     result = subprocess.run([sys.executable, str(Path(__file__).parent / 'fixtures' / 'kanban_owner_probe.py')],
         env=env, cwd=repo, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=150, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
