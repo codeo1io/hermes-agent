@@ -189,6 +189,34 @@ public static class HermesUpdateJob {
         } finally { Marshal.FreeHGlobal(buffer); }
     }
 
+    // Separate CPU (100ns ticks) from transferred bytes so the idle watchdog
+    // cannot mistake a sleeping PowerShell child's tiny accounting increments
+    // for meaningful progress. Unavailable counters are both -1.
+    public static long[] ActivityBreakdown(IntPtr job) {
+        if (job == IntPtr.Zero) return new long[] { -1, -1 };
+        const int size = 96;
+        IntPtr buffer = Marshal.AllocHGlobal(size);
+        try {
+            if (!QueryInformationJobObjectRaw(job, 8, buffer, size, IntPtr.Zero))
+                return new long[] { -1, -1 };
+            return new long[] {
+                Marshal.ReadInt64(buffer, 0) + Marshal.ReadInt64(buffer, 8),
+                Marshal.ReadInt64(buffer, 72) + Marshal.ReadInt64(buffer, 80) + Marshal.ReadInt64(buffer, 88)
+            };
+        } finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    // Compare cumulative counters against the last genuine progress point.
+    // Tiny timer/housekeeping increments from a sleeping child are not work.
+    public static bool HasMeaningfulActivity(long[] baseline, long[] current) {
+        if (baseline == null || current == null || baseline.Length < 2 || current.Length < 2)
+            return false;
+        if (baseline[0] < 0 || current[0] < 0 || baseline[1] < 0 || current[1] < 0)
+            return false;
+        return current[0] - baseline[0] >= 2500000L ||
+               current[1] - baseline[1] >= 65536L;
+    }
+
     public static StartedProcess StartAssigned(string executable, string arguments) {
         IntPtr job = IntPtr.Zero;
         IntPtr outRead = IntPtr.Zero, outWrite = IntPtr.Zero;

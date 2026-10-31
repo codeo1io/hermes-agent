@@ -16,7 +16,8 @@ preconditions composed on the guard-absent base:
    ``HERMES_HOME`` under the native root onto the native root itself, so
    ``kanban_home()`` resolved those sandboxes to the PRODUCTION board.
 
-This file pins the whole topology against the REAL platform root:
+This file reproduces the same topology under a synthetic account root, so CI
+never writes to the real platform root:
 
 * the collapsed resolution is gone — a sandbox under the real root stays a
   sandbox (``get_default_hermes_root`` / ``kanban_home`` / ``kanban_db_path``);
@@ -48,13 +49,34 @@ _WAVE9_FILES = (
 
 @pytest.fixture
 def wave9_ci_topology(_hermetic_environment, monkeypatch, tmp_path):
-    """Replay the wave-9 CI step env: TMPDIR parked UNDER the real root, no
-    HERMES_KANBAN_* pins anywhere (the burst processes carried none)."""
-    root = _real_platform_state_root()
-    assert root is not None, "platform state root must resolve for this regression"
+    """Reproduce the incident topology inside a disposable account home.
+
+    The real account's ~/.hermes is protected by the test I/O guard. A synthetic
+    account home preserves the crucial native-root/TMPDIR nesting without
+    creating or modifying any production state, including on shared CI runners.
+    """
+    import hermes_state_guard
+
+    fake_home = tmp_path / "wave9-account"
+    root = fake_home / ".hermes"
     tmpdir = root / "tmp" / "wave9-regression"
     tmpdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("TMPDIR", str(tmpdir))
+    # The choke is tested against a synthetic production root in-process.
+    # Never weaken the actual production-root guard or its subprocess behavior.
+    monkeypatch.setattr(hermes_state_guard, "_real_platform_state_root", lambda: root)
+    original_sandbox = hermes_state_guard._path_in_sandbox
+    monkeypatch.setattr(
+        hermes_state_guard, "_path_in_sandbox",
+        lambda path: False if Path(path).resolve() == (root / "kanban.db").resolve()
+        else original_sandbox(path),
+    )
+    # A schema-bearing sentinel detects accidental fixture writes in the
+    # nested child pytest process, without ever touching the live board.
+    with sqlite3.connect(root / "kanban.db") as conn:
+        conn.execute("CREATE TABLE tasks (id TEXT, title TEXT, assignee TEXT, created_by TEXT)")
+        conn.execute("INSERT INTO tasks VALUES ('sentinel', 'sentinel', 'default', NULL)")
     for var in (
         "HERMES_KANBAN_DB",
         "HERMES_KANBAN_HOME",
@@ -78,7 +100,7 @@ def _sandbox_fixture_dbs(root: Path) -> list[Path]:
 
 
 def test_sandbox_under_real_root_resolves_to_itself(wave9_ci_topology):
-    """Precondition 2 is dead: HERMES_HOME under the native root (and not a
+    """Precondition 2 is dead: HERMES_HOME under the simulated native root (and not a
     ``profiles/<name>`` home) must resolve as its own root, never collapse to
     the production board root."""
     import tempfile
@@ -94,7 +116,7 @@ def test_sandbox_under_real_root_resolves_to_itself(wave9_ci_topology):
     tempfile.tempdir = os.environ["TMPDIR"]
     sandbox = Path(tempfile.mkdtemp(prefix="kanban_per_profile_cap_test_"))
     tempfile.tempdir = None
-    assert sandbox.resolve().is_relative_to(root), "test premise: sandbox under the real root"
+    assert sandbox.resolve().is_relative_to(root), "test premise: sandbox under the simulated native root"
     os.environ["HERMES_HOME"] = str(sandbox)
     try:
         resolved_root = get_default_hermes_root()
@@ -110,17 +132,12 @@ def test_sandbox_under_real_root_resolves_to_itself(wave9_ci_topology):
 
 def test_choke_refuses_live_board_from_test_context(wave9_ci_topology):
     """Belt: even with every resolver regressed, the connect-time choke must
-    refuse the production board before any sqlite touch."""
+    refuse the simulated production board before any sqlite touch."""
     from hermes_cli import kanban_db_connect as kbc
 
     root, _ = wave9_ci_topology
     live = root / "kanban.db"
-    # Fresh CI hosts have no live board yet; the choke's refusal (and this
-    # belt's mtime assertion) needs only the clean-host artifact — an empty
-    # board file, the same schema-less shape _live_wave_rows below documents.
-    if not live.exists():
-        live.parent.mkdir(parents=True, exist_ok=True)
-        live.touch()
+    assert live.is_file(), "synthetic native board sentinel missing"
     before = live.stat().st_mtime_ns
     with pytest.raises(RuntimeError, match="test-isolation guard"):
         kbc._ensure_test_isolation(live)
@@ -129,16 +146,14 @@ def test_choke_refuses_live_board_from_test_context(wave9_ci_topology):
 
 def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
     """The named wave-9 test files, run as real pytest subprocesses under the
-    incident topology (TMPDIR under the real root, inherited-by-nothing), must
+    incident topology (TMPDIR under a simulated native root), must
     pass AND leave the live board byte-identical. Their fixture rows may exist
     only inside the sandbox DB the fixture created."""
     root, _ = wave9_ci_topology
     live = root / "kanban.db"
-    if not live.exists():
-        pytest.skip("no live board on this host (not the runner machine)")
-    # The live board is a BUSY production DB (real workers heartbeat into it
-    # every few seconds), so global mtime/size is not a stable signal. Scope
-    # the leak assertion to exactly the wave-9 fingerprint rows.
+    assert live.is_file(), "synthetic native board sentinel missing"
+    # The simulated board has a sentinel row. Scope the leak assertion to
+    # exactly the wave-9 fingerprint rows; child fixtures must not touch it.
     def _live_wave_rows() -> list[tuple]:
         conn = sqlite3.connect(f"file:{live}?mode=ro", uri=True)
         try:
@@ -147,12 +162,6 @@ def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
                 "(?,?,?,?,?,?,?,?,?) AND created_by IS NULL",
                 wave_titles,
             ).fetchall()
-        except sqlite3.OperationalError as exc:
-            if "no such table" in str(exc):
-                # A schema-less kanban.db artifact (created empty on clean CI
-                # hosts) is not a live board — nothing can leak into it.
-                pytest.skip("live kanban.db has no board schema (clean host artifact)")
-            raise
         finally:
             conn.close()
 

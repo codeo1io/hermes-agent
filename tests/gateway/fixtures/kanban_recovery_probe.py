@@ -34,6 +34,9 @@ def main():
     owner = home / 'profiles/assigned' if mode == 'cross_profile' else home
     owner.mkdir(parents=True, exist_ok=True)
     os.environ['HERMES_KANBAN_HOME'] = str(home / 'shared')
+    # Only this disposable recovery probe may bypass the production 300s
+    # anti-churn admission age: it creates and dispatches a fresh task.
+    os.environ['HERMES_KANBAN_DISPATCH_MIN_AGE'] = '0'
     board_path = home / 'custom.sqlite' if mode == 'custom' else home / 'shared/kanban/boards/owned/kanban.db'
     os.environ['HERMES_KANBAN_DB'] = str(board_path)
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)

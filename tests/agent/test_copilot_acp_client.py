@@ -229,6 +229,13 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
 def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # Keep the process-level fallback inside this test's sandbox. With both
+    # variables absent, the fallback's active_profile probe would otherwise
+    # inspect the runner's real ~/.hermes before the mocked ACP spawn.
+    monkeypatch.setattr(
+        "hermes_constants._get_platform_default_hermes_home",
+        lambda: tmp_path / ".hermes",
+    )
 
     captured = {}
     client = _make_home_client(tmp_path)

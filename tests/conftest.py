@@ -130,7 +130,11 @@ if _HERMES_EXPORTED_TMP:
 from hermes_state_guard import _real_platform_state_root
 
 _real_test_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
-_guarded_tmp_roots = [_real_test_root]
+# Guard both the OS account's real root and the platform root projected by a
+# disposable HOME/LOCALAPPDATA. Subprocess fixtures intentionally replace HOME;
+# protecting only the passwd-root would leave TMPDIR inside that fixture's
+# .hermes tree and let pytest allocate its own scratch there before isolation.
+_guarded_tmp_roots = [_real_test_root, _get_platform_default_hermes_home().resolve()]
 _custom_test_home = os.environ.get("HERMES_HOME")
 if _custom_test_home:
     _guarded_tmp_roots.append(Path(_custom_test_home).expanduser().resolve())
@@ -847,7 +851,11 @@ def _teardown_tui_server_sessions(mod) -> None:
 def _reset_tui_gateway_server_state():
     mod = sys.modules.get(_TUI_SERVER_MODULE)
     snapshot = None
-    if mod is not None:
+    # An import may still be in progress when a test starts. Do not snapshot
+    # incomplete module globals; its own importer will finish initialization.
+    if mod is not None and all(hasattr(mod, name) for name in (
+        "_methods", "_cfg_cache", "_cfg_sig", "_cfg_path", "_db", "_db_error", "_real_stdout",
+    )):
         snapshot = {
             "methods": dict(mod._methods),
             "cfg": (mod._cfg_cache, mod._cfg_sig, mod._cfg_path),
@@ -858,7 +866,9 @@ def _reset_tui_gateway_server_state():
     yield
 
     mod = sys.modules.get(_TUI_SERVER_MODULE)
-    if mod is None:
+    # A failed/circular import can leave a partially initialized module in
+    # sys.modules. Never mutate or teardown a module lacking its state.
+    if mod is None or not hasattr(mod, "_sessions"):
         return
 
     # This finalizer can run before the test's own monkeypatch undo, so a

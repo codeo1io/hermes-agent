@@ -64,6 +64,10 @@ def main():
     home.mkdir(parents=True, exist_ok=True)
     Path(os.environ['HOME']).mkdir(parents=True, exist_ok=True)
     os.environ['HERMES_KANBAN_HOME'] = str(home)
+    # This disposable lifecycle probe creates and dispatches its task in one
+    # tick. Production's 300s anti-churn admission delay is tested separately;
+    # pin zero only inside this isolated child process.
+    os.environ['HERMES_KANBAN_DISPATCH_MIN_AGE'] = '0'
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
     peer.mode = os.environ.get('KANBAN_PROBE_MODE', 'complete')
@@ -86,6 +90,14 @@ def main():
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect
     from hermes_cli import kanban_db_dispatch as dispatch
+    # This fixture exercises the owned worker lifecycle, not host-pressure admission.
+    # CI runners can be under genuine memory pressure; pin a healthy synthetic
+    # sample only inside this disposable probe so lifecycle assertions are
+    # deterministic. Pressure-admission behavior has separate focused tests.
+    dispatch._system_memory_sample = lambda: {
+        "mem_total_kib": 16 * 1024 * 1024,
+        "mem_available_kib": 12 * 1024 * 1024,
+    }
     # Pin the installed launcher to this checkout for base/fixed argv comparisons.
     dispatch._resolve_hermes_argv = lambda: [sys.executable, '-m', 'hermes_cli.main']
     os.environ['HERMES_KANBAN_CRASH_GRACE_SECONDS'] = '0'
