@@ -75,12 +75,13 @@ jobs:
       - name: Set up Python 3.11
         uses: ./.github/actions/retry
         with:
-          command: uv python install 3.11
+          command: uv python install 3.14.7
 
       - name: Install Python dependencies
         uses: ./.github/actions/retry
         with:
-          command: uv sync --locked --python 3.11 --extra all --extra dev
+          command: uv sync --locked --python 3.14.7 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+
 
       # An ephemeral conductor validation snapshot may pair these workflows
       # with a tree from before the desktop e2e core suite existed; skip
