@@ -302,6 +302,7 @@ def acquire_opencode_server(
             proc = subprocess.Popen(
                 cmd,
                 cwd=spawn_cwd if os.path.isdir(spawn_cwd) else None,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -453,12 +454,14 @@ class OpenCodeClient:
         self._ready_timeout = timeout
         self._ready_stages = list(stages) if stages is not None else None
         if self.native_session_id:
-            # Reopen a persisted session: verify it is still addressable.
-            try:
-                self._request("GET", f"/session/{self.native_session_id}")
-                return {"sessionId": self.native_session_id}
-            except RuntimeError:
-                logger.info("Stored opencode session %s missing; creating a new one", self.native_session_id)
+            # A persisted native identity is a recovery fence. A missing
+            # session (404) or transient server failure (5xx) must NOT mint
+            # a replacement: the old session may still have side effects,
+            # and silently switching IDs defeats same-session adoption.
+            # Surface the error so the existing owner can retry or explicitly
+            # reconcile the original identity before any fresh admission.
+            self._request("GET", f"/session/{self.native_session_id}")
+            return {"sessionId": self.native_session_id}
         if self._server_handle is None and self._transport_factory is None:
             # Real transport: acquire the shared server NOW (not lazily in
             # _http()) so the readiness ladder governs the spawn. Injected

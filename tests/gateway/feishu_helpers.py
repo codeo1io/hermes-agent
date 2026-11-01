@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from functools import wraps
+from unittest.mock import patch
 import threading
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -67,3 +70,27 @@ def install_dedup_state(adapter: Any, seen: Optional[dict] = None) -> None:
 
 def stub_mention(adapter: Any, mentions_self: bool) -> None:
     adapter._mentions_self = lambda _message: mentions_self
+
+
+def clear_feishu_env(target):
+    """Clear Feishu configuration without escaping pytest's Hermes-home sandbox.
+
+    unittest.mock.patch.dict(clear=True) otherwise removes the per-test
+    HERMES_HOME fixture, causing adapter construction to read/write the real
+    ~/.hermes store. This decorator also supports unittest class decoration.
+    """
+    if isinstance(target, type):
+        for name, member in vars(target).items():
+            if name.startswith("test_") and callable(member):
+                setattr(target, name, clear_feishu_env(member))
+        return target
+
+    @wraps(target)
+    def wrapped(*args, **kwargs):
+        home = os.environ.get("HERMES_HOME")
+        if not home:
+            raise AssertionError("Feishu test requires an isolated HERMES_HOME")
+        with patch.dict(os.environ, {"HERMES_HOME": home}, clear=True):
+            return target(*args, **kwargs)
+
+    return wrapped

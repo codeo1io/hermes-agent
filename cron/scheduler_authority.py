@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 import uuid
 
 
@@ -159,12 +160,12 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
 
     async def observe(call):
         nonlocal attempted
+        from hermes_cli.gateway_client import GatewayRPCError
         attempted = True
         save()
         try:
             receipt = await call('submit', params)
         except Exception as exc:
-            from hermes_cli.gateway_client import GatewayRPCError
             # A returned owner exception is definite; a transport disconnect is not. Even an
             # owner error after commit must retain the admitted identity, so verify its absence.
             if owner is not None or isinstance(exc, GatewayRPCError):
@@ -184,11 +185,30 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 raise
         record['receipt'] = receipt
         save()
-        delay, progress = .1, None
+        delay, progress, busy_retries = .1, None, 0
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 await call('cancel', receipt)
-            state = await call('status', receipt)
+            try:
+                state = await call('status', receipt)
+            except (sqlite3.OperationalError, GatewayRPCError) as exc:
+                # The admission identity and receipt are durable. A transient SQLite
+                # lock (direct owner) or storage_unavailable RPC (remote owner)
+                # must not cause duplicate submission. Retain the unknown/pause
+                # fence if bounded observation retries cannot resolve the lock.
+                sqlite_busy = (isinstance(exc, sqlite3.OperationalError) and (
+                    getattr(exc, 'sqlite_errorcode', None) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                    or 'locked' in str(exc).lower()))
+                remote_busy = (isinstance(exc, GatewayRPCError) and exc.code == 5001
+                               and str(exc) == 'storage_unavailable')
+                if not (sqlite_busy or remote_busy):
+                    raise
+                busy_retries += 1
+                if busy_retries > 5:
+                    raise
+                await asyncio.sleep(min(.25 * 2 ** (busy_retries - 1), 2.0))
+                continue
+            busy_retries = 0
             if state.get('progress_at') not in (None, progress):
                 # The owner's agent is still working: refresh OUR ledger row (the owner's stamp is
                 # fenced to the row's owner), once per owner stamp, so the stale-claim sweep measures

@@ -92,13 +92,69 @@ def _handoff(tmp_path: Path, *args: str, verify: str = 'pass\n', timeout: int = 
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)], capture_output=True, check=False)
-        out, _ = proc.communicate()
+        try:
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(proc.pid)],
+                           capture_output=True, check=False, timeout=15)
+        except subprocess.TimeoutExpired:
+            pass  # continue bounded owner cleanup if taskkill itself stalls
+        # A detached grandchild may inherit the PowerShell stdout pipe even
+        # after taskkill kills the owner. An unbounded second communicate()
+        # then hangs the whole CI file instead of reporting the real timeout.
+        try:
+            out, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            # Closing our reader is safe after the owner has been killed and
+            # prevents an unrelated descendant from holding CI hostage.
+            if proc.stdout is not None:
+                proc.stdout.close()
+            proc.wait(timeout=5)
+            out = '<stdout pipe retained by a descendant after taskkill>'
         pytest.fail(f'hand-off did not finish within {timeout}s: {out}')
     argv = [json.loads(line) for line in calls.read_text(encoding='utf-8-sig').splitlines()] if calls.exists() else []
     result_path = home / '.hermes-update-result.json'
     result = json.loads(result_path.read_text(encoding='utf-8-sig')) if result_path.is_file() else None
     return proc.returncode, out, argv, result, home
+
+
+def test_handoff_timeout_cleanup_never_waits_on_inherited_stdout(tmp_path: Path, monkeypatch) -> None:
+    """An orphaned stdout writer must not defeat the test harness timeout."""
+    import io
+
+    class StuckProcess:
+        pid = 12345
+
+        def __init__(self):
+            self.stdout = io.StringIO()
+            self.communicate_timeouts = []
+            self.killed = False
+            self.wait_timeout = None
+
+        def communicate(self, timeout=None):
+            self.communicate_timeouts.append(timeout)
+            raise subprocess.TimeoutExpired("powershell", timeout)
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            self.wait_timeout = timeout
+            return 1
+
+    proc = StuckProcess()
+    monkeypatch.setattr(sys.modules[__name__], "publish_fixture_launcher",
+                        lambda install, _cli: (install / "hermes_cli").mkdir(parents=True))
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: proc)
+
+    def stalled_taskkill(*args, **kwargs):
+        assert kwargs["timeout"] == 15
+        raise subprocess.TimeoutExpired("taskkill", 15)
+
+    monkeypatch.setattr(subprocess, "run", stalled_taskkill)
+    with pytest.raises(pytest.fail.Exception, match="stdout pipe retained"):
+        _handoff(tmp_path, timeout=30)
+    assert proc.communicate_timeouts == [30, 10]
+    assert proc.killed and proc.stdout.closed and proc.wait_timeout == 5
 
 
 @pytest.mark.platforms('windows')

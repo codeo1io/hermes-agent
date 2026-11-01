@@ -1845,11 +1845,8 @@ def review_dispatch_enabled() -> bool:
         return True
 
 
-# Memory-aware dispatch guard: an uncapped board once OOM'd a 1 GiB host. Two
-# safeguards — a memory-DERIVED default cap when none is configured
-# (``resolve_max_in_progress``) and a live memory-PRESSURE guard inside the
-# tick (``_memory_pressure_level``) because a static cap can't see other
-# tenants. Both fail open: non-Linux / read error → no cap / "unknown".
+# Memory-aware guard: derived default concurrency cap plus live MemAvailable/PSI
+# pressure. Unknown memory preserves the cross-platform fallback.
 
 # Assumed per-worker footprint for the derived cap; deliberately conservative
 # so the cap errs toward fewer workers on small VMs.
@@ -1861,18 +1858,18 @@ DERIVED_MAX_IN_PROGRESS_FLOOR = 2
 DERIVED_MAX_IN_PROGRESS_CEILING = 8
 
 
-def _system_memory_sample() -> dict:
-    """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
+def _psi_full_avg60() -> Optional[float]:
+    """Sample host full-stall PSI (indirection preserves the test opener seam)."""
+    from hermes_cli.kanban_db_memory import read_psi_full_avg60
 
-    Local import keeps ``kanban_db`` importable without the gateway package.
-    Module-level indirection is also the test seam — conftest patches this to
-    ``{}`` so results don't depend on the CI runner's live memory.
-    """
-    try:
-        from gateway.lifecycle_ledger import sample_memory
-        return sample_memory() or {}
-    except Exception:
-        return {}
+    return read_psi_full_avg60(globals().get("open", open))
+
+
+def _system_memory_sample() -> dict:
+    """Sample MemAvailable and PSI; keep this seam patchable by callers."""
+    from hermes_cli.kanban_db_memory import sample_system_memory
+
+    return sample_system_memory(_psi_full_avg60)
 
 
 def derive_default_max_in_progress(sample: Optional[Mapping[str, Any]] = None) -> Optional[int]:
@@ -1975,20 +1972,22 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
 
 
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
-    """Classify system memory pressure: ok/elevated/critical/unknown.
-
-    Reuses :func:`gateway.memory_status.classify_pressure` so "critical" matches
-    the dashboard banner and lifecycle-ledger OOM heuristics. ``unknown``
-    (non-Linux, read failure) imposes no restriction — never brick dispatch
-    where /proc is unavailable.
-    """
+    """Classify MemAvailable and sustained PSI; retain baseline if PSI absent."""
     if sample is None:
         sample = _system_memory_sample()
     if not sample:
         return "unknown"
     try:
         from gateway.memory_status import classify_pressure
-        return classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
+
+        baseline = classify_pressure(sample.get("mem_available_kib"), sample.get("mem_total_kib"))
+        full_psi = sample.get("memory_full_psi_avg60")
+        if isinstance(full_psi, (int, float)) and not isinstance(full_psi, bool):
+            if 10.0 <= full_psi <= 100.0:
+                return "critical"
+            if 5.0 <= full_psi < 10.0 and baseline != "critical":
+                return "elevated"
+        return baseline
     except Exception:
         return "unknown"
 

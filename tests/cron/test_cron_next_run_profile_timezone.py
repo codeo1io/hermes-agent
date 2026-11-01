@@ -70,7 +70,15 @@ def test_foreign_process_tick_persists_owning_profile_offset(
         reset_hermes_home_override(token)
 
     next_run = datetime.fromisoformat(job["next_run_at"])
-    expected_offset = datetime.now(ZoneInfo("America/New_York")).utcoffset()
+    # The offset must be the one correct FOR THE PERSISTED INSTANT in the
+    # profile's zone, not "now"'s: on a DST-transition day (e.g. America/
+    # New_York on the fallback Sunday) "now" and the next fire instant can
+    # legitimately sit in different offset regimes — asserting equality
+    # with now's offset is unsatisfiable on those days and turned this
+    # regression pin into a guaranteed red on every transition day.
+    expected_offset = next_run.astimezone(
+        ZoneInfo("America/New_York")
+    ).utcoffset()
     assert next_run.utcoffset() == expected_offset, (
         f"next_run_at {job['next_run_at']} persisted with foreign offset "
         f"{next_run.utcoffset()} instead of the owning profile's "

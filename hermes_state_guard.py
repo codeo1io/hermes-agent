@@ -48,6 +48,17 @@ def pin_sandbox_root(root: "os.PathLike[str] | str") -> None:
     longer see the sandbox."""
     try:
         resolved = Path(root).expanduser().resolve()
+        # A fixture must never register the real production root (or one of
+        # its ancestors) as a sandbox: that would disable every DB guard in
+        # this process. Production board/profile directories are likewise
+        # never test-owned, even when a caller mislabels them.
+        real = _real_platform_state_root()
+        if real is not None and (
+            real.is_relative_to(resolved)
+            or resolved.is_relative_to(real / "kanban")
+            or resolved.is_relative_to(real / "profiles")
+        ):
+            return
         with _SANDBOX_LOCK:
             if resolved not in _SANDBOX_ROOTS:
                 _SANDBOX_ROOTS.append(resolved)

@@ -320,7 +320,10 @@ def _install_python_environments(extras: list[str], *, sync: bool, test_environm
             # when nothing is recorded yet. Defaulting to ['all'] here used
             # to alternate against that carry, rebuilding the venv on every
             # flip. sync_venv unions, so lazy extras already recorded survive.
-            sync_venv(extras, explicit=True)
+            # `extras` here is [] when the user named none — pass None so the
+            # default actually applies (an empty list is an explicit "no
+            # extras" and would freeze the selection at []).
+            sync_venv(extras or None, explicit=True)
             print(f"✓ venv{' +' + ' +'.join(extras) if extras else ''}")
         except InstallError as e:
             print(f"✗ {e}")

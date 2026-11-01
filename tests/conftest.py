@@ -118,6 +118,12 @@ def _hermes_home_points_at_production(value: str) -> bool:
 # relocate even user-set temp directories inside a guarded home. Pin the
 # system default so the import-time hook stays a no-op. The parallel runner
 # exports its own disk-backed TMPDIR anyway.
+#
+# HERMES_TEST_PRESERVE_TMPDIR opts a run out of the relocation BELOW: the
+# wave-9 incident-topology replay (test_kanban_wave9_guard_absent_ci_leak.py)
+# spawns a child pytest whose TMPDIR MUST stay inside its synthetic hermes
+# root — that nesting is the very topology under test. The child writes only
+# to disposable fixture state, so the guard has nothing to protect there.
 from hermes_constants import SCRATCH_DIR_MARKER_ENV, SCRATCH_TMP_ENV_VARS
 
 _HERMES_EXPORTED_TMP = os.environ.get(SCRATCH_DIR_MARKER_ENV, "")
@@ -130,16 +136,21 @@ if _HERMES_EXPORTED_TMP:
 from hermes_state_guard import _real_platform_state_root
 
 _real_test_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
-_guarded_tmp_roots = [_real_test_root]
+# Guard both the OS account's real root and the platform root projected by a
+# disposable HOME/LOCALAPPDATA. Subprocess fixtures intentionally replace HOME;
+# protecting only the passwd-root would leave TMPDIR inside that fixture's
+# .hermes tree and let pytest allocate its own scratch there before isolation.
+_guarded_tmp_roots = [_real_test_root, _get_platform_default_hermes_home().resolve()]
 _custom_test_home = os.environ.get("HERMES_HOME")
 if _custom_test_home:
     _guarded_tmp_roots.append(Path(_custom_test_home).expanduser().resolve())
-for _key in SCRATCH_TMP_ENV_VARS:
-    _value = os.environ.get(_key)
-    if _value:
-        _path = Path(_value).expanduser().resolve()
-        if any(_path.is_relative_to(_root) for _root in _guarded_tmp_roots):
-            del os.environ[_key]
+if not os.environ.get("HERMES_TEST_PRESERVE_TMPDIR"):
+    for _key in SCRATCH_TMP_ENV_VARS:
+        _value = os.environ.get(_key)
+        if _value:
+            _path = Path(_value).expanduser().resolve()
+            if any(_path.is_relative_to(_root) for _root in _guarded_tmp_roots):
+                del os.environ[_key]
 tempfile.tempdir = None  # re-resolve after stripping guarded temp directories
 os.environ.setdefault("TMPDIR", tempfile.gettempdir())
 
@@ -847,7 +858,11 @@ def _teardown_tui_server_sessions(mod) -> None:
 def _reset_tui_gateway_server_state():
     mod = sys.modules.get(_TUI_SERVER_MODULE)
     snapshot = None
-    if mod is not None:
+    # An import may still be in progress when a test starts. Do not snapshot
+    # incomplete module globals; its own importer will finish initialization.
+    if mod is not None and all(hasattr(mod, name) for name in (
+        "_methods", "_cfg_cache", "_cfg_sig", "_cfg_path", "_db", "_db_error", "_real_stdout",
+    )):
         snapshot = {
             "methods": dict(mod._methods),
             "cfg": (mod._cfg_cache, mod._cfg_sig, mod._cfg_path),
@@ -858,7 +873,9 @@ def _reset_tui_gateway_server_state():
     yield
 
     mod = sys.modules.get(_TUI_SERVER_MODULE)
-    if mod is None:
+    # A failed/circular import can leave a partially initialized module in
+    # sys.modules. Never mutate or teardown a module lacking its state.
+    if mod is None or not hasattr(mod, "_sessions"):
         return
 
     # This finalizer can run before the test's own monkeypatch undo, so a

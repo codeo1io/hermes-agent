@@ -43,7 +43,13 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
     assert default["profile"] == "default"
     assert len(tail["messages"]) == 120
     assert len(older["messages"]) == 79
-    assert len(default["messages"]) == 1
+    if serving_profile:
+        # A named profile shares the native default root.
+        assert len(default["messages"]) == 1
+    else:
+        # An arbitrary nested HERMES_HOME is an independent root. Explicit
+        # profile=default must not escape it to the native account database.
+        assert default["messages"] == tail["messages"]
     assert [row["content"] for row in older["messages"] + tail["messages"]] == [
         f"message-{index}" for index in range(199)
     ]

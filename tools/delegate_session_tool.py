@@ -35,6 +35,11 @@ from agent.delegate_start_budget import (
 from agent.opencode_client import OpenCodeClient
 from agent.pi_rpc_client import PiRPCClient, pending_question_for_owner
 from agent.runtime_cwd import resolve_agent_cwd
+from tools.delegate_provider_health import (
+    _circuit_open_error,
+    _ledger_record_failure,
+    _ledger_record_success,
+)
 from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
@@ -137,6 +142,30 @@ def _client_last_activity_at(client: Any) -> Optional[float]:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _native_process_identity(client: Any) -> dict[str, int] | None:
+    """Bind one live Pi process incarnation to its durable session.
+
+    Durable created_at is the session's original creation time, NOT the
+    birth time of a resumed process. Capture kernel PID/startticks once,
+    immediately after a successful bootstrap. Missing/ambiguous evidence
+    must never authorize an external process reaper.
+    """
+    proc = getattr(client, "_proc", None)
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    try:
+        if proc.poll() is not None:
+            return None
+        fields = (Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1]).split()
+        ppid, ticks = int(fields[1]), int(fields[19])
+        if ppid != os.getpid() or ticks <= 0 or proc.poll() is not None:
+            return None
+        return {"pid": pid, "start_ticks": ticks, "ppid": ppid}
+    except (OSError, ValueError, IndexError, AttributeError):
+        return None
+
+
 def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
     client = record.get("client")
     activity = getattr(client, "last_turn_activity_at", None)
@@ -153,6 +182,8 @@ def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "cwd": record.get("cwd"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
+        # Exact Pi process incarnation. Never infer process birth from created_at.
+        "native_process": record.get("native_process"),
         # v4: outcome evidence — a stalled/circuit-broken session must survive
         # restart with its failure class, not just prose, so the supervisor
         # that resumes it (or the operator reading the file) can tell a dead
@@ -179,6 +210,10 @@ def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "recovery_of_native_id": record.get("recovery_of_native_id") or None,
         "recovery_reason": _bounded(record.get("recovery_reason"), 400) or None,
         "recovered_at": record.get("recovered_at") or None,
+        # v4 stop semantics: this error-status record was stopped by an
+        # explicit release (spool reap) rather than never being touched —
+        # the interruption evidence is preserved, only the client ended.
+        "stopped_while_interrupted": bool(record.get("stopped_while_interrupted")) or None,
         # Durable forward-progression evidence (additive, version-compatible):
         # how far the session got and what it last said, so a replacement
         # supervisor restart-continues instead of guessing. Stamped only by
@@ -216,18 +251,19 @@ def _metadata_files_newest(root: Path) -> list[Path]:
 
 
 def _prune_durable_metadata(root: Path) -> None:
-    """Prune old terminal metadata without losing resumable live bindings.
+    """Prune explicitly closed metadata without losing resumable bindings.
 
-    A session can stay idle or running across many unrelated delegations.
-    Evicting its durable identity solely because 500 newer records appeared
-    makes recovery after a supervisor restart impossible. Only a verified
-    terminal (closed/error) record is eligible; unknown/corrupt records are
-    preserved rather than silently destroying potential recovery state.
+    An error is NOT a terminal close: a failed/interrupted native turn may
+    still have a resumable OpenCode/Pi session. Under heavy Pi churn, pruning
+    error records at the 500-record limit can erase the backend/native
+    session mapping before the recovery controller can resume them.
+    Only explicitly closed records are eligible. Unknown/corrupt records
+    also remain protected; no native process or session is touched.
     """
     for stale in _metadata_files_newest(root)[_MAX_DURABLE_SESSIONS:]:
         try:
             payload = json.loads(stale.read_text(encoding="utf-8-sig"))
-            if not isinstance(payload, dict) or payload.get("status") not in {"closed", "error"}:
+            if not isinstance(payload, dict) or payload.get("status") != "closed":
                 continue
             stale.unlink()
         except (OSError, ValueError):
@@ -936,6 +972,28 @@ def _delegate_dead(client: Any) -> bool:
     return callable(is_dead) and bool(is_dead())
 
 
+def _stop_settles_record(record: dict[str, Any]) -> None:
+    """Apply stop's durable semantics to a session record under _SESSION_LOCK.
+
+    The client is closed by the caller; this only settles status. An
+    interrupted session (status=error) stays resumable: its native
+    conversation may still exist in the backend's own store, and this
+    durable record is the only mapping from the Hermes delegate handle to
+    that native session id. Rewriting error->closed here would (a) make the
+    record eligible for LRU eviction (_prune_durable_metadata spares
+    "error" but reaps "closed") and (b) misreport the session as cleanly
+    finished to a later recovery reader. Clean sessions still close.
+    """
+    with _SESSION_LOCK:
+        prior_status = record.get("status")
+        if prior_status == "error":
+            record["stopped_while_interrupted"] = True
+            # status stays "error": resumable interruption evidence
+        else:
+            record["status"] = "closed"
+        record["updated_at"] = time.time()
+
+
 def _mark_dead_delegate(record: dict[str, Any]) -> bool:
     client = record.get("client")
     if client is None or record.get("status") in {"closed", "error"}:
@@ -969,58 +1027,6 @@ def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
         zero_activity=bool(getattr(exc, "zero_activity", False)),
     )
     return error_class, retry_after
-
-
-def _circuit_open_error(backend: str, model: str, ledger=None) -> Optional[str]:
-    """Dispatch-time fail-fast guard (A2 breaker): ``None`` lets the turn
-    through; a message refuses it while the (backend, model) provider circuit
-    is open. Retrying a confirmed-dead provider multiplies wall-clock damage
-    (the A4 storm re-entered the same outage for 30-76 minutes per attempt).
-    Fail-open: any internal error lets the dispatch through — the breaker
-    must never become a new way to fail closed.
-
-    ``ledger`` pins the dispatching profile's registry: the turn thread does
-    not inherit the home-override contextvar, so worker calls pass the ledger
-    captured at dispatch time; parent-side gates may omit it and resolve at
-    call time.
-    """
-    try:
-        circuit = (ledger or get_delegate_health_ledger()).check((backend, model))
-    except Exception:
-        logger.debug("delegate provider gate failed open", exc_info=True)
-        return None
-    if circuit is None:
-        return None
-    return (
-        "delegate provider unavailable (error_class=provider_unavailable): "
-        f"{backend}/{model or 'default'} circuit open after "
-        f"{circuit.consecutive} provider-class failures "
-        f"(last: {circuit.last_error_class}); "
-        f"retry after {circuit.retry_after_s:.0f}s"
-    )
-
-
-def _ledger_record_success(key: tuple[str, str], ledger=None) -> None:
-    # ``ledger`` pins the dispatching profile's registry for turn-thread calls
-    # (plain threads do not inherit the home-override contextvar).
-    try:
-        (ledger or get_delegate_health_ledger()).record_success(key)
-    except Exception:
-        logger.debug("delegate health record_success failed (fail-open)", exc_info=True)
-
-
-def _ledger_record_failure(key: tuple[str, str], error_class: str, ledger=None) -> None:
-    # ``ledger`` pins the dispatching profile's registry for turn-thread calls
-    # (plain threads do not inherit the home-override contextvar).
-    # Forward EVERY terminal class, provider or not (R-fold): the ledger
-    # itself decides provider classes escalate the breaker while
-    # non-provider classes merely resolve an in-flight half-open probe (a
-    # probe turn that dies agent_stall/transport must not wedge the key
-    # closed).
-    try:
-        (ledger or get_delegate_health_ledger()).record_failure(key, error_class)
-    except Exception:
-        logger.debug("delegate health record_failure failed (fail-open)", exc_info=True)
 
 
 def _observer_loop(record: dict[str, Any]) -> None:
@@ -1449,7 +1455,12 @@ def delegate_session(
                 **client_kwargs,
             )
             if native_session_id and hasattr(created, "native_session_id"):
-                created.native_session_id = native_session_id
+                # A new OpenCode handle is not yet a native OpenCode ID.
+                # Only restore a verified persisted binding; otherwise
+                # OpenCodeClient.start() must create the first session.
+                # Pi uses the handle as its native ID on initial creation.
+                if backend_name != "opencode" or native_hint:
+                    created.native_session_id = native_session_id
             return created
 
         requested_native = native_hint or handle
@@ -1577,6 +1588,7 @@ def delegate_session(
             "owner_scope": _scope_for_workspace(cwd),
             "cwd": cwd,
             "client": client,
+            "native_process": _native_process_identity(client) if backend_name == "pi" else None,
             "status": "idle",
             "created_at": (saved or {}).get("created_at") or now,
             "updated_at": now,
@@ -1588,9 +1600,8 @@ def delegate_session(
             "error_class": str((saved or {}).get("error_class") or ""),
             "retry_after": (saved or {}).get("retry_after"),
             "consecutive_failures": int((saved or {}).get("consecutive_failures") or 0),
-            # U9: a fresh incarnation has no live turn, so turn_started_at
-            # resets; a banked stall triage from the prior incarnation is
-            # evidence the resumed supervisor should see, like the streak.
+            # U9: fresh incarnation resets turn_started_at, but preserves
+            # prior stall triage so the resumed supervisor sees the evidence.
             "turn_started_at": None,
             "last_turn_triage": (saved or {}).get("last_turn_triage") or None,
             # Recovery lineage threaded from the bootstrap above (chain root
@@ -1818,9 +1829,7 @@ def delegate_session(
         except Exception:
             logger.debug("Delegate abort failed before close", exc_info=True)
         client.close()
-        with _SESSION_LOCK:
-            record["status"] = "closed"
-            record["updated_at"] = time.time()
+        _stop_settles_record(record)
         _persist_metadata(record)
         return json.dumps(
             {"success": True, "closed": True, **_summary(record)}, ensure_ascii=False

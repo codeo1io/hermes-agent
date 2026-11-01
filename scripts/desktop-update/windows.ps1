@@ -1073,7 +1073,7 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
     $abandoned = $false
     $lastProgressAt = Get-Date
     $progressLogStamp = Get-StepProgressLogStamp
-    $jobActivity = [HermesUpdateJob]::Activity($job)
+    $jobActivity = [HermesUpdateJob]::ActivityBreakdown($job)
     $stalled = $false
     while ($true) {
         $moved = $false
@@ -1081,12 +1081,15 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
         $errDone = Step-PipeDrain $stderrReader ([ref]$errTask) $errBuffer $errSink ([ref]$moved)
         if ($moved) {
             $lastProgressAt = Get-Date
+            $jobActivity = [HermesUpdateJob]::ActivityBreakdown($job)
         } elseif ($job -ne [IntPtr]::Zero) {
-            # CPU or I/O spent inside the job is progress too: a pipe-silent
-            # wheel download or extraction is busy, not stalled. One cheap
-            # kernel query per idle pass; never on the hot drain path.
-            $currentActivity = [HermesUpdateJob]::Activity($job)
-            if ($currentActivity -ne $jobActivity) {
+            # Sleeping PowerShell children accrue tiny CPU/IO accounting
+            # increments, so *any* counter change would indefinitely reset
+            # the idle watchdog. Require actual work since the last progress:
+            # >=250ms of job CPU or >=64KiB transferred. Log growth below
+            # independently preserves quiet but productive update builds.
+            $currentActivity = [HermesUpdateJob]::ActivityBreakdown($job)
+            if ([HermesUpdateJob]::HasMeaningfulActivity($jobActivity, $currentActivity)) {
                 $jobActivity = $currentActivity
                 $lastProgressAt = Get-Date
             }

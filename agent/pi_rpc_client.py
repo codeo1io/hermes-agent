@@ -1049,6 +1049,7 @@ class PiRPCClient:
             proc = subprocess.run(
                 ["git", "-C", self._cwd, "status", "--porcelain"],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 timeout=15,
                 check=False,

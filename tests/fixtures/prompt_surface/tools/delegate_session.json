@@ -1,0 +1,60 @@
+{
+  "description": "Delegate coding work to Pi or OpenCode through a persistent native session. Use this instead of delegate_task when the worker should be an external coding agent. The native conversation survives across turns: start a session, send follow-ups, steer a running turn, inspect status or messages, and stop/resume the same native session. Backend questions are answered automatically by the supervising Hermes agent rather than forwarded to the user. Pi is the default backend; pass backend='opencode' to delegate to OpenCode via its server API. delegate_task remains the Hermes child-agent primitive.",
+  "name": "delegate_session",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "Session lifecycle/control action. Omit for start.",
+        "enum": [
+          "start",
+          "resume",
+          "send",
+          "steer",
+          "status",
+          "wait",
+          "messages",
+          "list",
+          "stop"
+        ],
+        "type": "string"
+      },
+      "backend": {
+        "description": "External agent backend for the session: 'pi' (default) or 'opencode'. Applies at start/resume; control actions use the stored backend.",
+        "enum": [
+          "pi",
+          "opencode"
+        ],
+        "type": "string"
+      },
+      "context": {
+        "description": "Initial background/context passed with goal when starting the session.",
+        "type": "string"
+      },
+      "goal": {
+        "description": "Initial coding objective for action='start'. The turn runs asynchronously in the persistent native session.",
+        "type": "string"
+      },
+      "message": {
+        "description": "Follow-up for send, or live course correction for steer. Delegate questions are answered automatically by Hermes.",
+        "type": "string"
+      },
+      "session_id": {
+        "description": "Persistent delegation/session id returned by start. Required for all actions except start/list.",
+        "type": "string"
+      },
+      "timeout": {
+        "description": "Maximum seconds of delegate inactivity before the turn is considered stalled (default 900). This is not an absolute turn runtime limit.",
+        "minimum": 10,
+        "type": "integer"
+      },
+      "wait_seconds": {
+        "description": "Maximum seconds action='wait' blocks for a meaningful state change. Expiry is nonfatal and does not stop the delegated worker (default 120).",
+        "maximum": 3600,
+        "minimum": 0,
+        "type": "number"
+      }
+    },
+    "required": [],
+    "type": "object"
+  }
+}

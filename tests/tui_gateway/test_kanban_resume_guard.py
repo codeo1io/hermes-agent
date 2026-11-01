@@ -6,6 +6,7 @@ of the dispatcher's ownership env, invisible to the Kanban board.
 """
 
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,7 +27,7 @@ def server():
     import tui_gateway.server_requests
     import tui_gateway.transport
     with patch.dict("sys.modules", {
-        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value="/tmp/hermes_test")),
+        "hermes_constants": MagicMock(get_hermes_home=MagicMock(return_value=Path("/tmp/hermes_test"))),
         "hermes_cli.env_loader": MagicMock(),
         "hermes_cli.banner": MagicMock(),
         "hermes_state": MagicMock(),
@@ -111,3 +112,16 @@ def test_gateway_resume_ordinary_session_unchanged(server, monkeypatch):
     assert "error" not in response, response
     # omit_messages reads the tip segment — proof the guard was survived.
     assert ("tip", "chat-1") in db.reads
+
+
+def test_global_gateway_teardown_skips_partially_imported_module(monkeypatch):
+    """An interrupted/circular gateway import must not break global test cleanup."""
+    import types
+    from tests import conftest
+
+    partial = types.ModuleType("tui_gateway.server")
+    monkeypatch.setitem(sys.modules, "tui_gateway.server", partial)
+    cleanup = conftest._reset_tui_gateway_server_state.__wrapped__()
+    next(cleanup)
+    with pytest.raises(StopIteration):
+        next(cleanup)
