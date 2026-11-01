@@ -186,6 +186,14 @@ def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
     # the child's fixture sandboxes MUST land under this root. Opt the child
     # out; it writes only disposable fixture state.
     env["HERMES_TEST_PRESERVE_TMPDIR"] = "1"
+    # The incident processes carried no HERMES_HOME pin — and inheriting the
+    # per-file runner's sandbox home arms the child's session reaper
+    # (_reap_session_hermes_processes) against every process using that home,
+    # including THIS parent: the child SIGTERMs us at its teardown and the
+    # file dies as "killed by SIGTERM". Unpinned, the child builds its own
+    # session sandbox and its reaper stays scoped to it.
+    for pin in ("HERMES_HOME", "HERMES_TEST_SANDBOX_HOME"):
+        env.pop(pin, None)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", *_WAVE9_FILES, "-q", "--no-header", "-p", "no:cacheprovider"],
         cwd=_REPO,
