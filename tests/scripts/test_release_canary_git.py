@@ -156,6 +156,40 @@ def test_tag_shape_and_prune_use_canonical_receipts(canary_repo, monkeypatch, ca
     assert set(git("tag", "--list").splitlines()) == set(tags)
 
 
+def test_foreign_channel_authority_is_an_honest_no_op(canary_repo, monkeypatch, capsys):
+    """A fork sharing the upstream archive reads the upstream's stable record.
+
+    The daily canary must not crash on the authority mismatch: this repo owns
+    no canary line, so the fire is the same honest no-op as a quiet day. No
+    tag, draft, or desktop-build dispatch may happen (they could never
+    publish: the R2 head is authoritative for the other repository).
+    """
+    git, _remote, calls = canary_repo
+    git("commit", "--allow-empty", "-qm", "stable")
+    git("tag", "v1.2.3")
+    git("commit", "--allow-empty", "-qm", "feat: next")
+
+    from hermes_cli.release_channels import ChannelAuthorityMismatch
+    from scripts.releases import versioning
+
+    def foreign_stable(repository, **_kwargs):
+        raise ChannelAuthorityMismatch(
+            f"Channel authority 'NousResearch/hermes-agent' is not {repository!r}",
+            declared="NousResearch/hermes-agent",
+        )
+
+    monkeypatch.setattr(versioning, "published_stable_identity", foreign_stable)
+    args = SimpleNamespace(date="20260818T103000Z", publish=True, no_changelog=True, remote="origin")
+
+    release.cmd_canary(args)  # must not raise
+
+    out = capsys.readouterr().out
+    assert "NousResearch/hermes-agent" in out
+    assert "nothing to do" in out
+    assert calls == []
+    assert git("tag", "--list", "v*+canary.*") == ""
+
+
 def test_stable_dispatch_and_failure(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(release, "REPO_ROOT", tmp_path)
