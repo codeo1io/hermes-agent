@@ -6,6 +6,7 @@ refresh in the background: a slow or hung usage endpoint can't be allowed to sta
 
 import threading
 import time
+from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone, UTC
 
 from agent import account_usage
@@ -28,19 +29,34 @@ def test_picker_reads_cached_usage_and_refreshes_without_waiting(monkeypatch):
 
     def slow_usage_api(_base_url, _api_key):
         called.set()
-        release.wait(10)
+        release.wait(30)
         return next(answers)
 
     monkeypatch.setitem(account_usage._USAGE_FETCHERS, "openrouter", slow_usage_api)
     ctx = load_picker_context()
 
-    started = time.monotonic()
-    first = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
-    assert time.monotonic() - started < 5, "the picker waited on the usage API"
-    assert "usage" not in first, "nothing cached yet, so nothing to show"
-    assert called.wait(5), "opening the picker must start a background usage refresh"
+    picker_result = Future()
 
-    release.set()
+    def read_picker():
+        try:
+            row = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
+            picker_result.set_result(row)
+        except BaseException as exc:
+            picker_result.set_exception(exc)
+
+    picker_thread = threading.Thread(target=read_picker, daemon=True)
+    picker_thread.start()
+    try:
+        assert called.wait(15), "opening the picker must start a background usage refresh"
+        # The usage API is deliberately blocked until after this assertion.
+        # This tests nonblocking behavior without a wall-clock performance
+        # threshold that can fail under parallel CI runner contention.
+        first = picker_result.result(timeout=15)
+        assert "usage" not in first, "nothing cached yet, so nothing to show"
+    finally:
+        release.set()
+        picker_thread.join(timeout=15)
+    assert not picker_thread.is_alive(), "picker did not exit after usage API release"
     deadline = time.monotonic() + 5
     while cached_account_usage("openrouter") is None and time.monotonic() < deadline:
         time.sleep(0.05)

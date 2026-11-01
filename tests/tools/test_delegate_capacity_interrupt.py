@@ -234,7 +234,11 @@ def test_rejected_background_child_stops_with_parent(
         assert not outcome.done(), "dispatch returned while its child still owned resources"
         assert child.close_count == 0
         child.allow_finish.set()
-        result = outcome.result(timeout=5)
+        # The child must finish and close before the synchronous fallback can
+        # return. Observe that lifecycle event directly instead of racing the
+        # dispatch thread against a five-second wall-clock budget under CI load.
+        assert child.closed.wait(20), "cancelled child did not finish cleanup"
+        result = outcome.result(timeout=20)
         if background_child is None:
             assert "SYNCHRONOUSLY" in result["note"]
             assert result["results"][0]["status"] == "interrupted"
