@@ -56,18 +56,26 @@ def test_exact_gateway_final_response_preamble_preserves_valid_receipt(tmp_path)
         assert validate_completion_evidence(job, prefix + separator + response, "exec-abc") is None
 
 
-def test_bounded_leading_summary_before_marker_preserves_valid_receipt(tmp_path):
-    # Production incident 2026-11-01T17:41Z (execution 0e4484a8): a fully verified
-    # repair with a valid identity-bound receipt was booked `error` solely because a
-    # one-line summary preceded the marker. The receipt digest chain is the proof;
-    # marker position is convention. At most ONE prose line is tolerated.
+def test_exact_incident_summary_before_marker_preserves_valid_receipt(tmp_path):
+    # Production incident 0e4484a8: allow only the literal observed summary.
+    job, _, _, _, response = _case(tmp_path)
+    lead = (
+        "All gates closed: merge ✅, post-merge main CI **SUCCESS** at "
+        "`0639f3c847` ✅, deploy ✅, E2E verification ✅, receipts ✅, worktrees cleaned ✅.\n\n"
+    )
+    assert validate_completion_evidence(job, lead + response, "exec-abc") is None
+
+
+def test_arbitrary_summary_or_whitespace_before_marker_fails_closed(tmp_path):
     job, _, _, _, response = _case(tmp_path)
     for lead in (
-        "All gates closed: merge, post-merge CI, deploy, E2E verification, receipts.\n\n",
         "Short status line.\n",
+        "All gates closed: merge, post-merge CI, deploy, E2E verification, receipts.\n\n",
         "\n",
+        "  ",
+        "All work verified and checkpointed. Final response:\nUnrecognized summary.\n",
     ):
-        assert validate_completion_evidence(job, lead + response, "exec-abc") is None
+        assert "marker" in validate_completion_evidence(job, lead + response, "exec-abc")
 
 
 def test_second_prose_line_before_marker_remains_fail_closed(tmp_path):
@@ -82,13 +90,11 @@ def test_second_prose_line_before_marker_remains_fail_closed(tmp_path):
 
 
 def test_prose_after_gateway_preamble_line_remains_fail_closed(tmp_path):
-    # The exact gateway literal is stripped once; any prose line after it consumes
-    # the single-prose budget, so summary + gateway wrapper + marker is accepted but
-    # two prose lines after the wrapper are not.
+    # An exact gateway wrapper cannot be combined with arbitrary model prose.
     job, _, _, _, response = _case(tmp_path)
     prefix = "All work verified and checkpointed. Final response:"
-    assert validate_completion_evidence(
-        job, prefix + "\nSummary line.\n" + response, "exec-abc") is None
+    assert "marker" in validate_completion_evidence(
+        job, prefix + "\nSummary line.\n" + response, "exec-abc")
     assert "marker" in validate_completion_evidence(
         job, prefix + "\nLine one.\nLine two.\n" + response, "exec-abc")
 
