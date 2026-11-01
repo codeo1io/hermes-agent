@@ -16,13 +16,13 @@ _MARKER = "[CRON_EVIDENCE]"
 # Exact gateway final-response wrapper observed on a SHA-valid canonical execution.
 # Only this bounded, literal prefix is permitted; arbitrary prose remains invalid.
 _KNOWN_GATEWAY_PREAMBLE = "All work verified and checkpointed. Final response:"
-# A verified repair may legitimately lead with a short summary line before the marker
-# (production incident 2026-11-01T17:41Z: a valid identity-bound receipt was booked
-# `error` because one prose line preceded the marker). Tolerance is strictly bounded:
-# the optional gateway preamble is an exact literal, and at most ONE additional prose
-# line (plus blank lines) may precede the marker — a second prose line means the
-# marker is buried in a report and the response is rejected exactly as before.
-_MAX_PREAMBLE_SCAN_LINES = 6
+# Exact, observed production wrapper from execution 0e4484a820dd4e77a58d146ef3241fb9.
+# Do not accept arbitrary prose as a wrapper: identity and SHA checks are necessary
+# but not a substitute for an explicit leading evidence marker.
+_KNOWN_INCIDENT_PREAMBLE = (
+    "All gates closed: merge ✅, post-merge main CI **SUCCESS** at "
+    "`0639f3c847` ✅, deploy ✅, E2E verification ✅, receipts ✅, worktrees cleaned ✅."
+)
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _ALLOWED_KINDS = frozenset({"code_change", "runtime_repair", "validated_recovery"})
@@ -86,25 +86,12 @@ def validate_completion_evidence(
         if not root.is_absolute() or root == Path("/"):
             raise ValueError("completion evidence root must be an absolute directory")
         lines = (response or "").splitlines()
-        if lines and lines[0] == _KNOWN_GATEWAY_PREAMBLE:
+        if lines and lines[0] in (_KNOWN_GATEWAY_PREAMBLE, _KNOWN_INCIDENT_PREAMBLE):
             lines = lines[1:]
-        # Bounded preamble tolerance: blank lines are skipped, and at most ONE prose
-        # line may precede the marker (a short summary, as in production incident
-        # 2026-11-01T17:41Z). A second prose line means the marker is buried in a
-        # report and the response is rejected exactly as before.
-        prose_lines = 0
-        marker_index = None
-        for offset, line in enumerate(lines[:_MAX_PREAMBLE_SCAN_LINES]):
-            if line.strip() == _MARKER:
-                marker_index = offset
-                break
-            if line.strip():
-                prose_lines += 1
-                if prose_lines > 1:
-                    break
-        if marker_index is None:
+            if lines and lines[0] == "":
+                lines = lines[1:]
+        if len(lines) < 2 or lines[0] != _MARKER:
             raise ValueError("missing explicit completion evidence marker")
-        lines = lines[marker_index:]
         prefix = "sha256:"
         if len(lines) < 2 or not lines[1].startswith(prefix):
             raise ValueError("missing receipt digest")
