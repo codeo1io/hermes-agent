@@ -282,3 +282,31 @@ c4f2aaf11ae21f36ededff7dae139d2ad24eb616:tests/agent/test_fallback_restore_codex
 980a38e64694bb2dcc98875e3778ccf004dcf856:tests/hermes_cli/test_debug.py:generic-api-key:545
 093c10a2eef90348f545c97f3b2097b3e204c6d3:tests/hermes_cli/test_shared_metrics_model_attribution.py:generic-api-key:19
 980a38e64694bb2dcc98875e3778ccf004dcf856:tests/hermes_cli/test_shared_metrics_model_attribution.py:generic-api-key:20
+
+# 2026-11-01: post-v0.22.5 adoption full-history rescan (run 41298858881):
+# 21 findings on upstream-adopted test files — all triaged synthetic fixtures
+# (test-key-1234567890, owned-relay-fixture-secret, "[REDACTED PRIVATE KEY]"
+# literal, sk-...-shape masked fixtures). NEW commits stay fail-closed.
+0bbe37401b2f66e800bc22d03ba5bff625105764:tests/gateway/test_relay_authority.py:generic-api-key:40
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/agent/test_setup_beat_card_round.py:generic-api-key:68
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/gateway/test_local_session_info_fields.py:generic-api-key:23
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/gateway/test_relay_authority.py:generic-api-key:236
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/gateway/test_relay_authority.py:generic-api-key:41
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/hermes_cli/test_keyed_provider_credential_pool.py:generic-api-key:228
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/hermes_cli/test_keyed_provider_credential_pool.py:generic-api-key:229
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/hermes_cli/test_runtime_provider_openai_runtime.py:generic-api-key:106
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/hermes_cli/test_sessions_export_md_cli.py:generic-api-key:73
+26c5401ad28268a2fa65f139dffb47cc962d4892:tests/hermes_cli/test_keyed_provider_credential_pool.py:generic-api-key:228
+26c5401ad28268a2fa65f139dffb47cc962d4892:tests/hermes_cli/test_keyed_provider_credential_pool.py:generic-api-key:229
+2e7fb2cde5171ac6e72ae1551632bf658c5a3502:tests/gateway/test_local_session_info_fields.py:generic-api-key:23
+322a249c252f46def949e957ac20f264736dc4f3:tests/tools/test_delegated_output_redaction.py:private-key:226
+3ccb8e6c0f1a938f0a331800659a6959e4e41b4b:tests/hermes_cli/test_runtime_provider_openai_runtime.py:generic-api-key:106
+4a23324a395405d7c05ada88aa20d280c2288929:tests/agent/test_setup_beat_card_round.py:generic-api-key:68
+81a2c242a1bcdb80c1f3a850d4adf3c3c222c84f:tests/agent/test_credits_usage_window.py:generic-api-key:1126
+81a2c242a1bcdb80c1f3a850d4adf3c3c222c84f:tests/hermes_cli/test_web_delegation_routing.py:generic-api-key:35
+8956747661cd5a7dd2b3a1c0d2e3dd160489e330:tests/gateway/test_relay_authority.py:generic-api-key:210
+9a94b98cf177902f8f2fdac51eb87268139a127a:tests/agent/test_credits_usage_window.py:generic-api-key:1126
+ca2c115d193555f9f6f0470129f9e60e0dc6a0f4:tests/hermes_cli/test_runtime_provider_resolution.py:generic-api-key:2380
+fdaffcb9fb04c2fbd5607b8019773b1cface9888:tests/hermes_cli/test_web_delegation_routing.py:generic-api-key:35
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:hermes_cli/left_core_migration.py:generic-api-key:206
+1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/hermes_cli/test_custom_entry_shadow_key_env.py:generic-api-key:316
