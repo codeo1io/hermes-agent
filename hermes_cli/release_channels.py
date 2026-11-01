@@ -27,6 +27,19 @@ class ChannelNotFound(ChannelError):
     pass
 
 
+class ChannelAuthorityMismatch(ChannelError):
+    """The archive's channel record names a different repository as its authority.
+
+    A fork sharing the default public archive reads the upstream record and
+    cannot treat it as its own; carries the declared authority so callers can
+    distinguish "this repo has no channel here" from a genuinely corrupt read.
+    """
+
+    def __init__(self, message: str, *, declared: str):
+        super().__init__(message)
+        self.declared = declared
+
+
 def _match(pattern: str, value: object, label: str) -> str:
     if not isinstance(value, str) or re.fullmatch(pattern, value, re.ASCII) is None:
         raise ChannelError(f"Invalid {label}")
@@ -210,7 +223,9 @@ def validate_record(value: object, *, name: str | None = None, repository: str |
         raise ChannelError("Channel name does not match object key")
     actual_repo = validate_repository(record.get("repository"))
     if repository is not None and actual_repo.casefold() != repository.casefold():
-        raise ChannelError("Channel repository authority mismatch")
+        raise ChannelAuthorityMismatch(
+            f"Channel authority {actual_repo} is not this repository", declared=actual_repo
+        )
     if record.get("policy") not in _POLICIES or record.get("state") not in ("active", "retired"):
         raise ChannelError("Invalid channel policy or state")
     _integer(record.get("revision"), "channel revision", maximum=2**53 - 1)

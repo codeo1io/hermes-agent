@@ -284,6 +284,26 @@ def test_malformed_wire_types_are_channel_errors(field, value):
         validate_record(record)
 
 
+def test_foreign_authority_still_fails_closed_and_names_the_declared_repository():
+    """A record authoritative for another repo is never readable as this one's.
+
+    The check itself stays fail-closed: only the type carries the declared
+    authority so the canary lane can distinguish "not ours" from corruption.
+    """
+    from hermes_cli.release_channels import ChannelAuthorityMismatch, ChannelError, validate_record
+    from scripts.releases.channels import preview_identity
+    record = {"schema": 1, "name": "stable", "repository": "NousResearch/hermes-agent",
+              "policy": "stable-release", "state": "active", "revision": 1, "nextSequence": 1,
+              "head": None, "identity": preview_identity("stable", "a" * 16)}
+    with pytest.raises(ChannelAuthorityMismatch) as exc_info:
+        validate_record(record, name="stable", repository="codeo1io/hermes-agent")
+    assert exc_info.value.declared == "NousResearch/hermes-agent"
+    # Still a ChannelError for every fail-closed consumer of the base type.
+    assert isinstance(exc_info.value, ChannelError)
+    # The upstream's own authority reads the same record fine (case-insensitive).
+    validate_record(record, name="stable", repository="nousresearch/hermes-agent")
+
+
 def stable_request(version="1.2.3", archive_ref=None):
     from scripts.releases.channels import preview_identity
     request = {"schema": 1, "buildId": "a" * 32, "channel": "stable", "sequence": 1,

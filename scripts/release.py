@@ -508,7 +508,20 @@ def cmd_canary(args) -> None:
                 print(f"✓ No new commits since {prev_canary} — nothing to do.")
             return
     from scripts.releases.versioning import published_stable_identity
-    stable_version, stable_commit = published_stable_identity(gh_repo)
+    from hermes_cli.release_channels import ChannelAuthorityMismatch
+    try:
+        stable_version, stable_commit = published_stable_identity(gh_repo)
+    except ChannelAuthorityMismatch as mismatch:
+        # The public archive's channel record names another repository (a fork
+        # sharing the upstream archive reads the upstream's stable head). This
+        # repo owns no canary line to advance; daily canary fires are an honest
+        # no-op, not a crash — the same quiet-day semantics as "nothing to do"
+        # above. The authority check itself stays fail-closed everywhere else.
+        print(
+            f"✓ Channel authority {mismatch.declared!r} is not {gh_repo!r} — "
+            "this repository owns no canary line; nothing to do."
+        )
+        return
     tag_name = canary_tag_for_date(stable_version, date_utc)
 
     since = prev_canary or stable_commit
