@@ -123,6 +123,22 @@ jobs:
           test-environment: 'true'
           prune-python-cache: true
 
+      - name: Restore per-file test durations
+        # Same restore tests.yml (Linux lane) does for the per-file timeout
+        # scaler (run_tests_parallel.py::_effective_file_timeout: a file gets
+        # max(300s, 3x last known-good runtime)). Without this restore the
+        # scaler is inert on the OS lanes: the Windows desktop_update files
+        # (100s+ of nested PowerShell trees under the lane's 3-worker cap)
+        # were SIGKILL'd at the flat 300s cap on every run — red lane with
+        # zero test failures (union #544/#545/#554 CI, main's own Windows
+        # check). PRs read, only main writes (same policy as tests.yml).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: test_durations.json
+          key: test-durations-never-exact
+          restore-keys: |
+            test-durations-
+
       - name: Run ${{ matrix.marker }} tests
         # scripts/run_tests.sh — the canonical runner, same as every other
         # lane: per-file subprocess isolation (run_tests_parallel.py). It
