@@ -34,12 +34,17 @@ NEEDS_JSON_OUTPUT = "needs-json"
 # toJSON(needs); a selected consumer cannot skip merely because this is a PR
 # rather than a release.
 _UPDATE_CONSUMER_LANES = {
-    "tests": ("python", "e2e", "e2e_upgrade"),
     "tests-os": ("python", "desktop_updater", "e2e", "e2e_upgrade"),
     "e2e-desktop-update": ("e2e_desktop_update",),
     "remote-backends": ("remote_backends",),
     "catalog-tests": ("catalog",),
 }
+
+# The two Python workflows are mutually exclusive: conductor validation runs
+# `tests`, while ordinary PRs and pushes run `tests-standard`. The selected
+# lane must have exactly one successful consumer, not both or neither.
+_PYTHON_CONSUMERS = frozenset(("tests", "tests-standard"))
+_PYTHON_KEYS = ("python", "e2e", "e2e_upgrade")
 
 
 def evaluate_gate(
@@ -57,6 +62,15 @@ def evaluate_gate(
     lanes = (entries.get("detect") or {}).get("outputs") or {}
     required = {job for job, keys in _UPDATE_CONSUMER_LANES.items()
                 if any(lanes.get(key) in ("true", True) for key in keys)}
+    python_selected = any(lanes.get(key) in ("true", True) for key in _PYTHON_KEYS)
+    python_successes = sum(
+        (entries.get(job) or {}).get("result") == "success"
+        for job in _PYTHON_CONSUMERS
+    )
+    if python_selected:
+        required.update(_PYTHON_CONSUMERS)
+        if python_successes > 1:
+            failed.extend(_PYTHON_CONSUMERS)  # both ran: invalid routing
     if not entries:
         failed.append("<no-needs>")
     failed.extend(required - entries.keys())
@@ -64,13 +78,17 @@ def evaluate_gate(
         result = (info or {}).get("result")
         if result == "success":
             continue
+        if (result == "skipped" and name in _PYTHON_CONSUMERS
+                and python_selected and python_successes == 1):
+            allowed_skips.append(name)  # the other Python workflow ran
+            continue
         if result == "skipped" and name not in required and (not release or name in EXCLUDED_JOBS):
             allowed_skips.append(name)
             continue
         failed.append(name)
     return {
         "ok": not failed,
-        "failed": sorted(failed),
+        "failed": sorted(set(failed)),
         "allowed_skips": sorted(allowed_skips),
     }
 
