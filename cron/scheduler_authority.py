@@ -219,7 +219,6 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 # must skip this refresh (the same owner stamp retries on the next poll) rather
                 # than fail a fire whose admission and receipt are already verified-durable.
                 from cron.executions import touch_execution_progress
-                progress = state['progress_at']
                 try:
                     await asyncio.to_thread(touch_execution_progress, request_id)
                 except sqlite3.OperationalError as exc:
@@ -227,6 +226,9 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                             sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
                             or 'locked' in str(exc).lower() or 'busy' in str(exc).lower()):
                         raise
+                else:
+                    # Do not suppress a retry when this exact progress stamp was locked.
+                    progress = state['progress_at']
             if state['status'] == 'terminal':
                 job.update(state.get('job_flags') or {})
                 return tuple(state['result'])
