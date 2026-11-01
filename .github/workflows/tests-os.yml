@@ -97,6 +97,18 @@ jobs:
           - name: Windows-only tests
             runner: windows-latest
             marker: windows
+            # The desktop_update files spawn the real windows.ps1 with nested
+            # PowerShell/Git/setup trees; under the lane's 3-worker cap a
+            # healthy file runs 100-290s and load-dilation pushes it past the
+            # flat 300s cap — SIGKILL'd mid-run with ZERO test failures on
+            # every run since #543 (main red too). The durations cache cannot
+            # rescue this lane: it is saved only by Linux main pushes, where
+            # windows-marked files never execute, so no entry ever exists
+            # (verified: gh api actions/caches?key=test-durations -> 0). Give
+            # the lane the same headroom the Windows E2E suite already uses
+            # (HERMES_TEST_FILE_TIMEOUT: '900' below).
+            timeout: 45
+            file_timeout: '900'
           # Fork: upstream's arm64 lane (windows-latest) is dropped —
           # larger-runner labels are billing-blocked on this public fork and no
           # hosted arm64 Windows label is pinned here; the x64 lane above runs
@@ -122,6 +134,22 @@ jobs:
           extras: '["all", "telegram", "anthropic", "mistral", "fal", "modal", "daytona", "parallel-web"]'
           test-environment: 'true'
           prune-python-cache: true
+
+      - name: Restore per-file test durations
+        # Same restore tests.yml (Linux lane) does for the per-file timeout
+        # scaler (run_tests_parallel.py::_effective_file_timeout: a file gets
+        # max(300s, 3x last known-good runtime)). Without this restore the
+        # scaler is inert on the OS lanes: the Windows desktop_update files
+        # (100s+ of nested PowerShell trees under the lane's 3-worker cap)
+        # were SIGKILL'd at the flat 300s cap on every run — red lane with
+        # zero test failures (union #544/#545/#554 CI, main's own Windows
+        # check). PRs read, only main writes (same policy as tests.yml).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: test_durations.json
+          key: test-durations-never-exact
+          restore-keys: |
+            test-durations-
 
       - name: Run ${{ matrix.marker }} tests
         # scripts/run_tests.sh — the canonical runner, same as every other
@@ -200,6 +228,10 @@ jobs:
           # tests still run (none skipped, no deadline relaxed).
           HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && '3' || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
+          # Per-file cap for the lane; the Windows default ('900') matches the
+          # E2E suite below — see the matrix comment for why the flat 300s
+          # cap was killing healthy desktop_update files.
+          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.file_timeout || '300' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
           OPENROUTER_API_KEY: ''

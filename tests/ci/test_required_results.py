@@ -97,3 +97,68 @@ def test_cli_stdin_exit_codes_and_output(tmp_path, release, results, code, repor
     assert f"{key}={value}" in child.stdout
     for name, result in results.items():
         assert f"{name}: {result}" in child.stdout
+
+
+def _lane_needs(tests_result, standard_result):
+    # `python` arms both the reroute pair and tests-os (its lane keys include
+    # python), so a green tests-os entry rides along in these fixtures.
+    return {"detect": {"result": "success", "outputs": {"python": "true"}},
+            "tests": {"result": tests_result},
+            "tests-standard": {"result": standard_result},
+            "tests-os": {"result": "success"}}
+
+
+@pytest.mark.parametrize("tests_result,standard_result,ok,failed", [
+    # Ordinary PR: the conductor-only `tests` reroute skips, its complement ran green.
+    ("skipped", "success", True, []),
+    # Conductor validation PR: the complement skips, the conductor variant ran green.
+    ("success", "skipped", True, []),
+    # A lane selected by detect must actually run one member: both absent fails closed.
+    ("skipped", "skipped", False, ["tests"]),
+    ("absent", "absent", False, ["tests"]),
+])
+def test_conductor_reroute_pair_satisfies_the_python_lane(tests_result, standard_result, ok, failed):
+    needs = _lane_needs(tests_result, standard_result)
+    if "absent" in (tests_result, standard_result):
+        for key in ("tests", "tests-standard"):
+            needs.pop(key, None)
+    verdict = evaluate_gate(needs)
+    assert verdict["ok"] is ok
+    assert verdict["failed"] == failed
+
+
+def test_any_member_failure_fails_the_group():
+    # tests-standard failing fails the lane even though the conductor reroute skipped.
+    verdict = evaluate_gate(_lane_needs("skipped", "failure"))
+    assert verdict["ok"] is False
+    assert verdict["failed"] == ["tests"]
+
+
+def test_ordinary_pr_production_shape_from_run_41273429401():
+    """The exact NEEDS payload of the false-red aggregate on PR #535 (2026-11-01):
+    every lane green, the conductor-only `tests` variant skipped by design."""
+    needs = {
+        "detect": {"result": "success", "outputs": {
+            "python_prod": "true", "frontend": "true", "site": "true", "npm_lock": "true",
+            "catalog": "true", "e2e_upgrade": "false", "e2e_desktop_update": "false",
+            "event_name": "pull_request", "python": "true", "remote_backends": "true",
+            "scan": "true", "desktop_updater": "true", "rust": "true", "e2e": "false",
+            "e2e_desktop_core": "false", "deps": "true", "uv_lock": "true", "bootstrap": "true",
+            "docker_meta": "true"}},
+        "tests": {"result": "skipped", "outputs": {}},
+        "tests-standard": {"result": "success", "outputs": {}},
+        "tests-os": {"result": "success", "outputs": {}},
+        "lint": {"result": "success", "outputs": {}},
+        "js-tests": {"result": "success", "outputs": {}},
+        "rust-tests": {"result": "success", "outputs": {}},
+        "remote-backends": {"result": "success", "outputs": {}},
+        "catalog-tests": {"result": "success", "outputs": {}},
+        "history-check": {"result": "success", "outputs": {}},
+        "lockfile-diff": {"result": "success", "outputs": {}},
+        "prompt-surface-diff": {"result": "success", "outputs": {}},
+        "supply-chain": {"result": "success", "outputs": {}},
+        "detect": {"result": "success", "outputs": {}},
+    }
+    verdict = evaluate_gate(needs)
+    assert verdict["ok"] is True
+    assert verdict["failed"] == []
