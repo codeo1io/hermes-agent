@@ -16,6 +16,11 @@ _MARKER = "[CRON_EVIDENCE]"
 # Exact gateway final-response wrapper observed on a SHA-valid canonical execution.
 # Only this bounded, literal prefix is permitted; arbitrary prose remains invalid.
 _KNOWN_GATEWAY_PREAMBLE = "All work verified and checkpointed. Final response:"
+# A verified repair may legitimately lead with a short summary line before the marker
+# (production incident 2026-11-01T17:41Z: a valid identity-bound receipt was booked
+# `error` because one prose line preceded the marker). Tolerance is strictly bounded:
+# the marker must still appear in the leading lines of the response, never deep in it.
+_MAX_MARKER_SEARCH_LINES = 4
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _ALLOWED_KINDS = frozenset({"code_change", "runtime_repair", "validated_recovery"})
@@ -81,12 +86,20 @@ def validate_completion_evidence(
         lines = (response or "").splitlines()
         if lines and lines[0] == _KNOWN_GATEWAY_PREAMBLE:
             lines = lines[1:]
-            if lines and lines[0] == "":
-                lines = lines[1:]
-        if len(lines) < 2 or lines[0].strip() != _MARKER:
+        # Bounded preamble tolerance: the marker pair must still open the response
+        # within the first few lines (gateway wrapper or a short summary line), so a
+        # marker buried mid-report is rejected exactly as before. Leading blank lines
+        # are skipped; any non-marker prose line consumes the bounded budget.
+        marker_index = None
+        for offset, line in enumerate(lines[:_MAX_MARKER_SEARCH_LINES]):
+            if line.strip() == _MARKER:
+                marker_index = offset
+                break
+        if marker_index is None:
             raise ValueError("missing explicit completion evidence marker")
+        lines = lines[marker_index:]
         prefix = "sha256:"
-        if not lines[1].startswith(prefix):
+        if len(lines) < 2 or not lines[1].startswith(prefix):
             raise ValueError("missing receipt digest")
         claimed = lines[1][len(prefix):].strip()
         if len(claimed) != 64 or any(ch not in "0123456789abcdef" for ch in claimed):

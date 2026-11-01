@@ -56,12 +56,25 @@ def test_exact_gateway_final_response_preamble_preserves_valid_receipt(tmp_path)
         assert validate_completion_evidence(job, prefix + separator + response, "exec-abc") is None
 
 
-def test_unrecognized_or_extended_preamble_remains_fail_closed(tmp_path):
+def test_bounded_leading_summary_before_marker_preserves_valid_receipt(tmp_path):
+    # Production incident 2026-11-01T17:41Z (execution 0e4484a8): a fully verified
+    # repair with a valid identity-bound receipt was booked `error` solely because a
+    # one-line summary preceded the marker. The receipt digest chain is the proof;
+    # marker position is convention. A bounded leading window is tolerated.
     job, _, _, _, response = _case(tmp_path)
-    prefix = "All work verified and checkpointed. Final response:"
-    for text in ("Done.\n" + response, prefix + " extra\n" + response,
-                 prefix + "\n\n\n" + response):
-        assert "marker" in validate_completion_evidence(job, text, "exec-abc")
+    for lead in (
+        "All gates closed: merge, post-merge CI, deploy, E2E verification, receipts.\n\n",
+        "Short status line.\n",
+        "\n",
+    ):
+        assert validate_completion_evidence(job, lead + response, "exec-abc") is None
+
+
+def test_marker_buried_deep_in_response_still_fails(tmp_path):
+    # Tolerance is bounded: a marker buried under unbounded prose is not a preamble.
+    job, _, _, _, response = _case(tmp_path)
+    noise = "".join(f"line {i} of report\n" for i in range(12))
+    assert "marker" in validate_completion_evidence(job, noise + response, "exec-abc")
 
 
 def test_bounded_preamble_does_not_waive_receipt_digest(tmp_path):
