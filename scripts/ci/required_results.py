@@ -41,6 +41,23 @@ _UPDATE_CONSUMER_LANES = {
     "catalog-tests": ("catalog",),
 }
 
+# The conductor-only ``tests`` variant and its ordinary-PR complement
+# ``tests-standard`` are mutually exclusive reroutes of ONE Python lane
+# (ci.yaml fingerprints conductor validation PRs by head_ref + title prefix;
+# every other event runs tests-standard). A required lane is therefore an
+# alias GROUP: any member that ran and failed fails the group; otherwise any
+# success satisfies it; a group with no successful member fails closed.
+_CONSUMER_ALIASES = {"tests": ("tests", "tests-standard")}
+
+
+def _group_failed(members, entries):
+    """Verdict for one required consumer group: fail on any member failure,
+    else pass on any success, else (all skipped/absent) fail closed."""
+    results = [(entries.get(m) or {}).get("result") for m in members]
+    if any(r not in ("success", "skipped", None) for r in results):
+        return True
+    return not any(r == "success" for r in results)
+
 
 def evaluate_gate(
     needs: dict[str, dict[str, Any]] | None,
@@ -59,12 +76,26 @@ def evaluate_gate(
                 if any(lanes.get(key) in ("true", True) for key in keys)}
     if not entries:
         failed.append("<no-needs>")
-    failed.extend(required - entries.keys())
+    group_of = {}
+    for required_name in sorted(required):
+        members = _CONSUMER_ALIASES.get(required_name, (required_name,))
+        for member in members:
+            group_of[member] = required_name
+        if _group_failed(members, entries):
+            failed.append(required_name)
     for name, info in entries.items():
         result = (info or {}).get("result")
         if result == "success":
             continue
-        if result == "skipped" and name not in required and (not release or name in EXCLUDED_JOBS):
+        lane = group_of.get(name)
+        if lane is not None:
+            # A member of a required consumer group is judged solely by its group
+            # verdict above (the conductor reroute pair runs exactly one member).
+            # A skip whose group passed is a tolerated reroute, not a failure.
+            if not _group_failed(_CONSUMER_ALIASES.get(lane, (lane,)), entries):
+                allowed_skips.append(name)
+            continue
+        if result == "skipped" and (not release or name in EXCLUDED_JOBS):
             allowed_skips.append(name)
             continue
         failed.append(name)
