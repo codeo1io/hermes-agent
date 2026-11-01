@@ -86,6 +86,42 @@ def test_start_creates_session_and_returns_native_id():
     assert body == {"title": "Hermes test"}
 
 
+def test_new_session_creation_uses_bootstrap_timeout_without_retry(monkeypatch):
+    """A slow first POST must not die at the generic 60s transport timeout.
+
+    The POST is non-idempotent: do not retry it after an uncertain timeout.
+    Only the initial create gets the extended bounded request deadline.
+    """
+    calls = []
+    transports = []
+
+    class SlowCreateTransport:
+        def __init__(self, base_url, timeout=60.0):
+            self.base_url = base_url
+            self.timeout = timeout
+            transports.append(self)
+
+        def request(self, method, path, body=None):
+            calls.append((method, path, self.timeout))
+            if method == "POST" and path.startswith("/session?"):
+                if self.timeout <= 60:
+                    raise TimeoutError("timed out")
+                return 200, json.dumps({"id": "ses_slow_create"})
+            raise AssertionError(f"unexpected request {method} {path}")
+
+    monkeypatch.setattr(oc, "_UrllibTransport", SlowCreateTransport)
+    monkeypatch.setattr(
+        oc, "acquire_opencode_server",
+        lambda **kwargs: oc._ServerHandle("http://127.0.0.1:9999", None),
+    )
+    client = OpenCodeClient(session_id="logical-handle", acp_cwd="/tmp")
+    assert client.start(timeout=600.0)["sessionId"] == "ses_slow_create"
+    assert [method for method, _, _ in calls] == ["POST"]
+    assert calls[0][2] == 240.0
+    assert len(transports) == 2
+    assert transports[0].timeout == 60.0
+
+
 @pytest.mark.parametrize("status", [404, 503])
 def test_resume_never_creates_replacement_on_failed_native_lookup(status):
     """A missing or temporarily unavailable bound session must not be replaced.
