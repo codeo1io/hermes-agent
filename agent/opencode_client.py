@@ -29,10 +29,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol, cast
 
 from agent.delegate_errors import DelegateTurnStalled, classify_delegate_failure
-from agent.delegate_start_budget import bootstrap_stage_budgets
+from agent.delegate_start_budget import BOOTSTRAP_TOTAL_CAP, bootstrap_stage_budgets
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +392,12 @@ class OpenCodeClient:
         # server spawn); defaults reproduce the legacy single 30s wait.
         self._ready_timeout: float = _DEFAULT_READY_TIMEOUT
         self._ready_stages: Optional[list[float]] = None
+        # Per-request socket budget (see start(): the create/resume calls
+        # can synchronously bootstrap a cold-directory OpenCode Instance
+        # server-side, 40-160s under load). Legacy default preserved for
+        # clients constructed without a start() budget: 90s > the old flat
+        # 60s transport default, matching _DEFAULT_READY_TIMEOUT.
+        self._request_timeout: float = _DEFAULT_READY_TIMEOUT
         self.native_session_id: Optional[str] = None
         # Question ids already replied/rejected (SSE watcher + poll loop race).
         self._answered_questions: set = set()
@@ -411,7 +417,20 @@ class OpenCodeClient:
         if self._transport is not None:
             return self._transport
         if self._transport_factory is not None:
-            self._transport = self._transport_factory(self.cwd)
+            # Cold-directory create can bootstrap an OpenCode Instance
+            # server-side inside one request (40-160s under load), so the
+            # factory-built transport also receives the ladder budget.
+            # The declared factory contract stays (cwd) -> _Transport;
+            # factories may additionally accept timeout= (opt-in kwarg,
+            # attempted dynamically — a TypeError falls back to the legacy
+            # single-argument call so every existing factory keeps working).
+            try:
+                built = cast(Any, self._transport_factory)(
+                    self.cwd, timeout=self._request_timeout
+                )
+            except TypeError:
+                built = self._transport_factory(self.cwd)
+            self._transport = cast("_Transport", built)
             return self._transport
         if self._server_handle is None:
             self._server_handle = acquire_opencode_server(
@@ -419,7 +438,9 @@ class OpenCodeClient:
                 ready_timeout=self._ready_timeout,
                 stages=self._ready_stages,
             )
-        self._transport = _UrllibTransport(self._server_handle.base_url)
+        self._transport = _UrllibTransport(
+            self._server_handle.base_url, timeout=self._request_timeout
+        )
         return self._transport
 
     def _request(
@@ -453,6 +474,21 @@ class OpenCodeClient:
         # through _http() with the same ladder.
         self._ready_timeout = timeout
         self._ready_stages = list(stages) if stages is not None else None
+        # Incident 2026-11-01 13:53Z (msn-m5-opencode-recovery-005): the
+        # session-create POST /session and the resume-fence GET /session/:id
+        # are NOT covered by the readiness ladder — that ladder only gates the
+        # spawn wait in acquire_opencode_server. A cold directory makes the
+        # server synchronously bootstrap a full OpenCode Instance (config +
+        # LSP + plugin scan, 40-160s under load) INSIDE the create call, so a
+        # flat 60s per-request socket timeout aborts a healthy boot seconds
+        # before it finishes ("timed out"), orphaning a session the server
+        # actually created. The per-request transport budget must inherit the
+        # same ceiling the ladder grants the spawn: min(ladder total, cap).
+        self._request_timeout = max(
+            float(timeout), _DEFAULT_READY_TIMEOUT
+        ) if stages is None else float(
+            min(sum(stages), BOOTSTRAP_TOTAL_CAP)
+        )
         if self.native_session_id:
             # A persisted native identity is a recovery fence. A missing
             # session (404) or transient server failure (5xx) must NOT mint
