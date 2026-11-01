@@ -36,9 +36,9 @@ def test_status_policy(job, result, ordinary, excluded, release):
 
 
 @pytest.mark.parametrize("lane,jobs", [
-    ("python", ("tests", "tests-os")),
-    ("e2e", ("tests", "tests-os")),
-    ("e2e_upgrade", ("tests", "tests-os")),
+    ("python", ("tests-os",)),
+    ("e2e", ("tests-os",)),
+    ("e2e_upgrade", ("tests-os",)),
     ("desktop_updater", ("tests-os",)),
     ("e2e_desktop_update", ("e2e-desktop-update",)),
     ("remote_backends", ("remote-backends",)),
@@ -47,15 +47,46 @@ def test_status_policy(job, result, ordinary, excluded, release):
 @pytest.mark.parametrize("result", ["skipped", "absent", "success"])
 def test_selected_update_consumers_must_succeed(lane, jobs, result):
     needs = {"detect": {"result": "success", "outputs": {lane: "true"}}}
+    if lane in ("python", "e2e", "e2e_upgrade"):
+        needs.update({"tests": {"result": "skipped"},
+                      "tests-standard": {"result": "success"}})
     if result != "absent":
         needs.update({job: {"result": result} for job in jobs})
     verdict = evaluate_gate(needs)
     assert verdict["ok"] is (result == "success")
     assert verdict["failed"] == ([] if result == "success" else sorted(jobs))
-    assert verdict["allowed_skips"] == []
+    assert verdict["allowed_skips"] == (["tests"] if lane in ("python", "e2e", "e2e_upgrade") else [])
     # False string outputs must not arm a job merely because they are truthy.
     needs["detect"]["outputs"][lane] = "false"
     assert evaluate_gate(needs)["ok"]
+
+
+@pytest.mark.parametrize("release", [False, True])
+@pytest.mark.parametrize("lane", ["python", "e2e", "e2e_upgrade"])
+@pytest.mark.parametrize("conductor,standard,ok", [
+    ("skipped", "success", True),
+    ("success", "skipped", True),
+    ("skipped", "skipped", False),
+    ("success", "success", False),
+    ("failure", "success", False),
+    ("success", "failure", False),
+    ("cancelled", "success", False),
+    ("success", None, False),
+    (None, "success", False),
+])
+def test_selected_python_consumer_exactly_one_success(lane, conductor, standard, ok, release):
+    needs = {"detect": {"result": "success", "outputs": {lane: "true"}},
+             "tests-os": {"result": "success"}}
+    for name, result in (("tests", conductor), ("tests-standard", standard)):
+        if result is not None:
+            needs[name] = {"result": result}
+    verdict = evaluate_gate(needs, release=release)
+    assert verdict["ok"] is ok
+    if ok:
+        assert verdict["failed"] == []
+        assert verdict["allowed_skips"] == ["tests" if conductor == "skipped" else "tests-standard"]
+    else:
+        assert verdict["failed"]
 
 
 def test_release_exclusion_policy():

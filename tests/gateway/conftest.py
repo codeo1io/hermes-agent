@@ -40,6 +40,24 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_feishu_default_dedup_home(request, tmp_path, monkeypatch):
+    """Keep env-clearing Feishu tests away from the real operator's dedup file."""
+    if request.module.__name__ != "tests.gateway.test_feishu":
+        return
+    from plugins.platforms.feishu import adapter as feishu_module
+
+    real_get_home = feishu_module.get_hermes_home
+
+    def isolated_home():
+        # Preserve explicit HERMES_HOME tests; only redirect the cleared-env fallback.
+        if "HERMES_HOME" not in os.environ:
+            return tmp_path / "feishu-hermes"
+        return real_get_home()
+
+    monkeypatch.setattr(feishu_module, "get_hermes_home", isolated_home)
+
+
 @pytest.fixture
 def private_db_probe_cleanup(tmp_path):
     """Release only this test's probe fds after its explicit SQLite-handle finalizers.

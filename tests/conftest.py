@@ -864,7 +864,12 @@ def _reset_tui_gateway_server_state():
     # This finalizer can run before the test's own monkeypatch undo, so a
     # global may still be replaced with a non-dict test double — skip those
     # (monkeypatch restores the real, pre-test object afterwards anyway).
-    sessions = mod._sessions
+    # A partially initialized module (a circular import still in flight in a
+    # thread the test spawned) has not defined ``_sessions`` yet; it holds no
+    # live sessions, so skipping is the only correct behavior — reading the
+    # attribute directly poisons an otherwise passing file with a teardown
+    # ERROR (observed on test_kanban_resume_guard.py in CI and on main).
+    sessions = getattr(mod, "_sessions", None)
     if isinstance(sessions, dict):
         _teardown_tui_server_sessions(mod)
     for name in (
@@ -1157,13 +1162,45 @@ def _processes_with_hermes_home_under(roots) -> list[int]:
     return found
 
 
+def _ancestor_pids() -> set[int]:
+    """PIDs of this process's ancestors, read from /proc (Linux only).
+
+    A nested pytest (a test that runs other test files as subprocesses, e.g. the
+    wave-9 regression) inherits this conftest AND its parent's HERMES_HOME:
+    /proc/<pid>/environ cannot distinguish "a daemon this run created" from
+    "the process that spawned me". Without this filter the child's unconfigure
+    reaper SIGTERMs its own parent mid-file — the parent dies as a CRASHED
+    "killed by SIGTERM" and is never retried. An ancestor's environ is
+    inherited, not created, so it is never this session's to reap.
+    """
+    ancestors: set[int] = set()
+    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
+        return ancestors
+    pid = os.getpid()
+    seen = {pid}
+    while True:
+        try:
+            with open(f"/proc/{pid}/stat") as handle:
+                # Fields after the comm field (which may contain spaces inside parens)
+                after_comm = handle.read().rsplit(")", 1)[1].split()
+                ppid = int(after_comm[1])
+        except (OSError, ValueError, IndexError):
+            return ancestors
+        if ppid <= 1 or ppid in seen:
+            return ancestors
+        ancestors.add(ppid)
+        seen.add(ppid)
+        pid = ppid
+
+
 def _reap_session_hermes_processes(config) -> list[int]:
     """SIGTERM every process still running against a Hermes home this session created.
 
     Tests that run a real ``hermes chat -q`` child get a grandchild ``gateway run`` (detached, own
     session) that no per-test subprocess patch can see, and pytest's tmp cleanup removes only
     directories: each one used to outlive the run at ~250 MB. The session basetemp and the session
-    sandbox home bound exactly what this run created, so nothing else is ever signalled.
+    sandbox home bound exactly what this run created, so nothing else is ever signalled —
+    except ancestors (a nested pytest's parent), whose environ is inherited rather than created.
     """
     import signal
 
@@ -1171,13 +1208,15 @@ def _reap_session_hermes_processes(config) -> list[int]:
     # The basetemp pytest already created (never create one at teardown just to scan it).
     roots = [getattr(config, "_hermes_relocated_basetemp", None), os.environ.get("HERMES_TEST_SANDBOX_HOME"),
              getattr(factory, "_basetemp", None)]
-    pids = _processes_with_hermes_home_under(roots)
+    ancestors = _ancestor_pids()
+    pids = [pid for pid in _processes_with_hermes_home_under(roots) if pid not in ancestors]
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
     return pids
+
 
 
 def _pinned_mcp_sdk_version() -> str:

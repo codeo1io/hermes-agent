@@ -5,6 +5,7 @@ delegate before it runs a single instruction.
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import subprocess
 import sys
 import time
@@ -97,20 +98,50 @@ def test_a7_concurrent_claimants_over_a_dead_marker_yield_one_owner(tmp_path: Pa
 
 # -- the update child is the delegate before it runs anything ------------------
 
-FIND_UPDATE_CHILD = r"""
-param([int]$Parent, [int]$Seconds)
-$deadline = (Get-Date).AddSeconds($Seconds)
-while ((Get-Date) -lt $deadline) {
-    # Avoid an unbounded CIM query under a saturated Windows CI runner:
-    # the outer Python watchdog is 90s, but a single WMI round-trip used
-    # to hang longer than that and mask the actual process-liveness test.
-    $row = Get-CimInstance Win32_Process -Filter "ParentProcessId=$Parent" -OperationTimeoutSec 5 -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match '--yes' } | Select-Object -First 1
-    if ($row) { [Console]::Out.Write($row.ProcessId); exit 0 }
-    Start-Sleep -Milliseconds 400
-}
-exit 1
-"""
+def _find_update_child_pid(parent_pid: int, seconds: float = 60) -> int:
+    """Find the actual update child without a potentially hung Windows CIM query.
+
+    psutil enumerates the direct children and their argv through native process
+    APIs. Keep the bounded deadline, and only accept the '--yes' update command.
+    """
+    import psutil
+
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            children = psutil.Process(parent_pid).children(recursive=False)
+        except psutil.NoSuchProcess:
+            break
+        for child in children:
+            try:
+                if any('--yes' in arg for arg in child.cmdline()):
+                    return child.pid
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        time.sleep(0.2)
+    raise AssertionError('the update child never appeared')
+
+
+def test_update_child_discovery_uses_bounded_native_process_probe() -> None:
+    """Cross-platform regression: discover the real child by parent and argv."""
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)', '--yes'])
+    try:
+        assert _find_update_child_pid(os.getpid(), seconds=3) == child.pid
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
+
+def test_update_child_discovery_rejects_unrelated_children() -> None:
+    """An unrelated direct child must not satisfy the update-process fence."""
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])
+    try:
+        with pytest.raises(AssertionError, match='update child never appeared'):
+            _find_update_child_pid(os.getpid(), seconds=0.4)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 @pytest.mark.platforms('windows')
@@ -125,8 +156,6 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
     hold = tmp_path / 'release-update'
     ran = Path(str(hold) + '.pid')
     marker = home / MARKER
-    finder = tmp_path / 'find_child.ps1'
-    finder.write_text(FIND_UPDATE_CHILD, encoding='utf-8')
     script = _script(home, install=install, HANDOFF_HOLD=str(hold))
     lock = None
     try:
@@ -136,11 +165,8 @@ def test_script_killed_before_publishing_the_delegate_runs_no_update(tmp_path: P
             assert time.monotonic() < deadline and script.poll() is None, 'script never claimed'
             time.sleep(0.02)
         lock = _HeldLock(home)   # after the claim, before the delegate publication
-        child = subprocess.run([POWERSHELL, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(finder),
-                                '-Parent', str(script.pid), '-Seconds', '60'],
-                               capture_output=True, text=True, timeout=90, check=False)
-        assert child.returncode == 0, 'the update child never appeared'
-        watch = _ProcessWatch(int(child.stdout))
+        child_pid = _find_update_child_pid(script.pid, seconds=60)
+        watch = _ProcessWatch(child_pid)
         try:
             subprocess.run(['taskkill', '/F', '/PID', str(script.pid)], capture_output=True, check=True)
             script.wait(timeout=30)

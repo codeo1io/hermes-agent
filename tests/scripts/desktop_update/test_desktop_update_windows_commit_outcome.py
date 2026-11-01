@@ -157,6 +157,15 @@ import msvcrt, os, sys, time
 fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT | os.O_BINARY, 0o644)
 os.lseek(fd, 1 << 20, os.SEEK_SET)
 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)   # hermes_cli/update_lock.py::_try_lock's byte
+# R6 fixture contract: the hand-off may start only once the byte is genuinely
+# held. Without this barrier a loaded runner can reach Invoke-MarkerRelease
+# (Test-CheckoutLockHeld) before this interpreter has even booted, so the
+# premise of the test -- a survivor holding the checkout lock -- never existed
+# and the script rightly removes the marker (run 41273429401 job 124750947252).
+ready = sys.argv[3] if len(sys.argv) > 3 else None
+if ready:
+    with open(ready, 'w') as fh:
+        fh.write(str(time.time()))
 time.sleep(float(sys.argv[2]))
 """
 
@@ -166,10 +175,23 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     # The relaunched Desktop drops a non-manual result whose finished_at is 30 minutes old; the
     # R6 wait lasts up to 2 h. The result must carry the time the hand-off actually finished.
     holders = []
+    ready_path = tmp_path / 'checkout-holder.ready'
 
     def hold_checkout(_home: Path, install: Path) -> None:
-        holders.append((subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
-                                          str(install / '.hermes-update.lock'), '25']), time.time() + 25))
+        proc = subprocess.Popen([sys.executable, '-c', _TIMED_CHECKOUT_HOLDER,
+                                 str(install / '.hermes-update.lock'), '25', str(ready_path)])
+        holders.append((proc, ready_path))
+        # Block until the holder reports the byte genuinely held: Popen() returning
+        # does not mean msvcrt.locking has run (interpreter boot), and the hand-off
+        # starting first is exactly the CI race this barrier removes.
+        deadline = time.monotonic() + 60
+        while not ready_path.exists():
+            if proc.poll() is not None:
+                pytest.fail(f'checkout holder exited before locking: rc={proc.returncode}')
+            if time.monotonic() > deadline:
+                proc.kill(); proc.wait()
+                pytest.fail('checkout holder never acquired the lock byte within 60s')
+            time.sleep(0.02)
     try:
         code, out, _, result, home = _handoff(tmp_path, '-NoGateway', prepare=hold_checkout)
     finally:
@@ -178,7 +200,12 @@ def test_result_finished_at_is_stamped_after_the_r6_release_wait(tmp_path: Path)
     assert code == 0, out
     log = (home / 'logs/desktop-update-handoff.log').read_text(encoding='utf-8-sig')
     assert 'keeping the update marker' in log, log
-    assert result['ok'] is True and result['finished_at'] >= int(holders[0][1]) - 1, result
+    # Anchor the stamp to the holder's reported acquire instant, not the moment the
+    # parent Popen() returned: on a loaded runner the holder's interpreter may boot
+    # seconds after Popen, and finished_at must still postdate the genuine hold.
+    acquired_at = float(ready_path.read_text(encoding='utf-8-sig'))
+    assert result is not None and result['ok'] is True, result
+    assert result['finished_at'] >= int(acquired_at), result
 
 
 @pytest.mark.platforms('windows')

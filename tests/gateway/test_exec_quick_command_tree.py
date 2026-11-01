@@ -16,6 +16,15 @@ from tests.waiting import async_wait_until
 _TREE = 'echo $$ > shell.pid; sleep 120 & echo $! > child.pid; wait'
 
 
+@pytest.fixture(autouse=True)
+def _isolated_quick_command_environment(monkeypatch):
+    """Process-tree tests exercise cleanup, not the operator's profile/env manifest."""
+    import os
+    from tools.environments import local
+    monkeypatch.setattr(local, 'build_subprocess_env',
+                        lambda: {'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
+
+
 def _alive(pid):
     try:
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE

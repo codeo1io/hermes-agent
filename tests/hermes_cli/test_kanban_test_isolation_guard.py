@@ -151,10 +151,20 @@ def test_guard_inert_outside_test_context(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.allow_real_home_io
 def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
     """connect() refuses the live board, but a fixture that opens the live DB
     with raw sqlite3.connect and drives kb.create_task goes through
-    write_txn — that boundary must refuse as well."""
+    write_txn — that boundary must refuse as well.
+
+    allow_real_home_io: this test deliberately touches a file under the REAL
+    home (an empty placeholder at the live-board path) to prove the CHOKE
+    fires before sqlite opens anything. The autouse home-io guard wraps
+    sqlite3.connect and refuses the real-home path with its own AssertionError
+    BEFORE the choke under test can raise, turning the test into a permanent
+    red (2026-10-30 main-red wave). The guard-behavior escape hatch is the
+    established mechanism for exactly this shape.
+    """
     import sqlite3
 
     from hermes_state_guard import _real_platform_state_root

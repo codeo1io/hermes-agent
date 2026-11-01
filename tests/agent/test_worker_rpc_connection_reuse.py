@@ -206,6 +206,53 @@ def test_a_redial_whose_send_also_fails_is_not_retried_again(owner, tmp_path, mo
     assert rpc.link is None
 
 
+def _handshake_times_out_once(owner, monkeypatch):
+    """Boundary hook on the dial itself: while ``owner.handshake_misses`` is set, the library
+    ``connect`` raises its open-phase TimeoutError before any byte is sent to the owner."""
+    from websockets.sync import client
+    real, dialed = client.connect, []
+
+    def connect(*args, **kwargs):
+        if owner.handshake_misses:
+            owner.handshake_misses -= 1
+            raise TimeoutError('timed out while waiting for handshake response')
+        ws = real(*args, **kwargs)
+        dialed.append(ws)
+        return ws
+    monkeypatch.setattr(client, 'connect', connect)
+    return dialed
+
+
+def test_a_handshake_timeout_before_the_first_byte_redials_once(owner, tmp_path, monkeypatch):
+    """A dial that times out waiting for the handshake never sent anything: like the pre-write
+    close, the call redials once instead of failing as outcome-unknown and poisoning the store."""
+    from agent.runtime_session_store import WorkerRPC
+    _handshake_times_out_once(owner, monkeypatch)
+    owner.handshake_misses = 1  # the very first dial misses
+    rpc = WorkerRPC(tmp_path)
+    assert rpc('worker.persist') == {'n': 1}
+    # The missed dial delivered nothing; the redial delivered the request exactly once with a
+    # fresh ticket, and the recovered link then serves the next call without another dial.
+    assert owner.requests == ['worker.persist']
+    assert (owner.connections, owner.tickets) == (1, 2)
+    assert rpc('worker.persist') == {'n': 2}
+    assert (owner.connections, owner.tickets) == (1, 2)
+
+
+def test_a_redial_whose_handshake_also_times_out_fails_without_a_second_retry(owner, tmp_path, monkeypatch):
+    """Only one redial: a second miss raises (the owner may be gone for good). The worker's next
+    call then starts from a clean dial with a fresh ticket, not a half-initialized link."""
+    from agent.runtime_session_store import WorkerRPC
+    _handshake_times_out_once(owner, monkeypatch)
+    owner.handshake_misses = 2
+    rpc = WorkerRPC(tmp_path)
+    with pytest.raises(TimeoutError):
+        rpc('worker.persist')
+    assert owner.requests == []
+    assert rpc('worker.persist') == {'n': 1}
+    assert owner.tickets == 3
+
+
 def test_idle_broadcasts_past_the_receive_high_water_mark_keep_the_connection(owner, tmp_path):
     """Events pushed between calls (far over websockets' 16-frame receive mark) are consumed while the
     worker is idle, so the owner's keepalive is answered and the next call reuses the connection."""
