@@ -19,8 +19,10 @@ _KNOWN_GATEWAY_PREAMBLE = "All work verified and checkpointed. Final response:"
 # A verified repair may legitimately lead with a short summary line before the marker
 # (production incident 2026-11-01T17:41Z: a valid identity-bound receipt was booked
 # `error` because one prose line preceded the marker). Tolerance is strictly bounded:
-# the marker must still appear in the leading lines of the response, never deep in it.
-_MAX_MARKER_SEARCH_LINES = 4
+# the optional gateway preamble is an exact literal, and at most ONE additional prose
+# line (plus blank lines) may precede the marker — a second prose line means the
+# marker is buried in a report and the response is rejected exactly as before.
+_MAX_PREAMBLE_SCAN_LINES = 6
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _ALLOWED_KINDS = frozenset({"code_change", "runtime_repair", "validated_recovery"})
@@ -86,15 +88,20 @@ def validate_completion_evidence(
         lines = (response or "").splitlines()
         if lines and lines[0] == _KNOWN_GATEWAY_PREAMBLE:
             lines = lines[1:]
-        # Bounded preamble tolerance: the marker pair must still open the response
-        # within the first few lines (gateway wrapper or a short summary line), so a
-        # marker buried mid-report is rejected exactly as before. Leading blank lines
-        # are skipped; any non-marker prose line consumes the bounded budget.
+        # Bounded preamble tolerance: blank lines are skipped, and at most ONE prose
+        # line may precede the marker (a short summary, as in production incident
+        # 2026-11-01T17:41Z). A second prose line means the marker is buried in a
+        # report and the response is rejected exactly as before.
+        prose_lines = 0
         marker_index = None
-        for offset, line in enumerate(lines[:_MAX_MARKER_SEARCH_LINES]):
+        for offset, line in enumerate(lines[:_MAX_PREAMBLE_SCAN_LINES]):
             if line.strip() == _MARKER:
                 marker_index = offset
                 break
+            if line.strip():
+                prose_lines += 1
+                if prose_lines > 1:
+                    break
         if marker_index is None:
             raise ValueError("missing explicit completion evidence marker")
         lines = lines[marker_index:]

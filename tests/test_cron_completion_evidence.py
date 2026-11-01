@@ -60,7 +60,7 @@ def test_bounded_leading_summary_before_marker_preserves_valid_receipt(tmp_path)
     # Production incident 2026-11-01T17:41Z (execution 0e4484a8): a fully verified
     # repair with a valid identity-bound receipt was booked `error` solely because a
     # one-line summary preceded the marker. The receipt digest chain is the proof;
-    # marker position is convention. A bounded leading window is tolerated.
+    # marker position is convention. At most ONE prose line is tolerated.
     job, _, _, _, response = _case(tmp_path)
     for lead in (
         "All gates closed: merge, post-merge CI, deploy, E2E verification, receipts.\n\n",
@@ -68,6 +68,29 @@ def test_bounded_leading_summary_before_marker_preserves_valid_receipt(tmp_path)
         "\n",
     ):
         assert validate_completion_evidence(job, lead + response, "exec-abc") is None
+
+
+def test_second_prose_line_before_marker_remains_fail_closed(tmp_path):
+    # Review feedback (issuecomment-6563745902): tolerance must not accept arbitrary
+    # multi-line prose. Two prose lines before the marker = buried marker = rejected.
+    job, _, _, _, response = _case(tmp_path)
+    for lead in (
+        "First summary line.\nSecond summary line.\n\n",
+        "Line one.\nLine two.\nLine three.\n" + response,
+    ):
+        assert "marker" in validate_completion_evidence(job, lead + response, "exec-abc")
+
+
+def test_prose_after_gateway_preamble_line_remains_fail_closed(tmp_path):
+    # The exact gateway literal is stripped once; any prose line after it consumes
+    # the single-prose budget, so summary + gateway wrapper + marker is accepted but
+    # two prose lines after the wrapper are not.
+    job, _, _, _, response = _case(tmp_path)
+    prefix = "All work verified and checkpointed. Final response:"
+    assert validate_completion_evidence(
+        job, prefix + "\nSummary line.\n" + response, "exec-abc") is None
+    assert "marker" in validate_completion_evidence(
+        job, prefix + "\nLine one.\nLine two.\n" + response, "exec-abc")
 
 
 def test_marker_buried_deep_in_response_still_fails(tmp_path):
