@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 import uuid
 
 
@@ -193,9 +194,18 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 # The owner's agent is still working: refresh OUR ledger row (the owner's stamp is
                 # fenced to the row's owner), once per owner stamp, so the stale-claim sweep measures
                 # the run's silence. A wedged owner stops stamping and the sweep still fires.
+                # The stamp is telemetry for the sweep, never a result: a transient ledger lock
+                # must skip this refresh (the same owner stamp retries on the next poll) rather
+                # than fail a fire whose admission and receipt are already verified-durable.
                 from cron.executions import touch_execution_progress
                 progress = state['progress_at']
-                await asyncio.to_thread(touch_execution_progress, request_id)
+                try:
+                    await asyncio.to_thread(touch_execution_progress, request_id)
+                except sqlite3.OperationalError as exc:
+                    if not (getattr(exc, 'sqlite_errorcode', None) in {
+                            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                            or 'locked' in str(exc).lower() or 'busy' in str(exc).lower()):
+                        raise
             if state['status'] == 'terminal':
                 job.update(state.get('job_flags') or {})
                 return tuple(state['result'])
