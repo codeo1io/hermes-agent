@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sqlite3
 import uuid
 
 
@@ -194,8 +195,19 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 # fenced to the row's owner), once per owner stamp, so the stale-claim sweep measures
                 # the run's silence. A wedged owner stops stamping and the sweep still fires.
                 from cron.executions import touch_execution_progress
-                progress = state['progress_at']
-                await asyncio.to_thread(touch_execution_progress, request_id)
+                try:
+                    await asyncio.to_thread(touch_execution_progress, request_id)
+                except sqlite3.OperationalError as exc:
+                    # A concurrent SQLite writer can temporarily block a progress stamp.
+                    # The owner admission is still running; losing its observation and
+                    # pausing the schedule would strand a live run. Do not fake a stamp:
+                    # retry on the next status poll, leaving the stale-claim sweep intact.
+                    if str(exc).lower() not in {'database is locked', 'database table is locked'}:
+                        raise
+                    logging.getLogger(__name__).warning(
+                        'Cron progress stamp deferred by SQLite lock for %s', request_id)
+                else:
+                    progress = state['progress_at']
             if state['status'] == 'terminal':
                 job.update(state.get('job_flags') or {})
                 return tuple(state['result'])
