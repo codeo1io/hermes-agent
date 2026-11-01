@@ -864,7 +864,12 @@ def _reset_tui_gateway_server_state():
     # This finalizer can run before the test's own monkeypatch undo, so a
     # global may still be replaced with a non-dict test double — skip those
     # (monkeypatch restores the real, pre-test object afterwards anyway).
-    sessions = mod._sessions
+    # A partially initialized module (a circular import still in flight in a
+    # thread the test spawned) has not defined ``_sessions`` yet; it holds no
+    # live sessions, so skipping is the only correct behavior — reading the
+    # attribute directly poisons an otherwise passing file with a teardown
+    # ERROR (observed on test_kanban_resume_guard.py in CI and on main).
+    sessions = getattr(mod, "_sessions", None)
     if isinstance(sessions, dict):
         _teardown_tui_server_sessions(mod)
     for name in (
