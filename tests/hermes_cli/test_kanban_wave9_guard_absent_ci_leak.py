@@ -180,6 +180,12 @@ def test_wave9_files_write_zero_live_board_rows_end_to_end(wave9_ci_topology):
         "tests/hermes_cli/test_kanban_wave9_guard_absent_ci_leak.py::child"
     )
     env["TMPDIR"] = os.environ["TMPDIR"]
+    # The child conftest relocates any TMPDIR nested inside a home-derived
+    # hermes root out to the system temp (real-home guard). That relocation
+    # would destroy the incident topology this replay exists to exercise —
+    # the child's fixture sandboxes MUST land under this root. Opt the child
+    # out; it writes only disposable fixture state.
+    env["HERMES_TEST_PRESERVE_TMPDIR"] = "1"
     result = subprocess.run(
         [sys.executable, "-m", "pytest", *_WAVE9_FILES, "-q", "--no-header", "-p", "no:cacheprovider"],
         cwd=_REPO,
