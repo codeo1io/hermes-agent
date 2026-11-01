@@ -1229,12 +1229,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @staticmethod
     def _gateway_is_draining() -> bool:
-        """Whether the owning gateway currently refuses new agent turns."""
+        """Whether the owning gateway currently refuses new agent turns.
+
+        Runs on the owner loop inside the first request of every HTTP door, so
+        it never imports ``gateway.run`` — see
+        ``gateway/platforms/api_server_runner_ref.py``."""
         try:
-            from gateway.platforms.api_server_fire_startup import runner_is_draining
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
-            return bool(runner) and runner_is_draining(runner)
+            from gateway.platforms.api_server_runner_ref import gateway_is_draining
+
+            return gateway_is_draining()
         except Exception:
             return False
 
@@ -2101,26 +2104,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return "hermes_browser" if text == "browser" else text
 
     def _session_model_override_for(self, session_key: Optional[str]) -> Optional[dict[str, Any]]:
-        """The gateway's per-session ``/model`` override for *session_key*, if any — a
-        user-issued ``/model`` always wins over static route config."""
-        if not session_key:
-            return None
-        try:
-            from gateway.run import _gateway_runner_ref
-            runner = _gateway_runner_ref()
-            if runner is None:
-                return None
-            try:
-                rehydrate = getattr(runner, "_rehydrate_session_model_override", None)
-                if callable(rehydrate):
-                    rehydrate(session_key)
-            except Exception:
-                logger.debug(
-                    "api_server failed to rehydrate session /model override for %s", session_key, exc_info=True)
-            override = runner._session_model_overrides.get(session_key)
-            return dict(override) if isinstance(override, dict) else None
-        except Exception:
-            return None
+        """The gateway's per-session ``/model`` override for *session_key* (owner-loop-safe;
+        see ``gateway/platforms/api_server_runner_ref.py``)."""
+        from gateway.platforms.api_server_runner_ref import session_model_override_for
+
+        return session_model_override_for(session_key, logger)
 
     def _request_route_conflict_error(
         self, *, session_id: Optional[str], gateway_session_key: Optional[str], requested_model: Optional[str],

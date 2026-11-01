@@ -86,6 +86,22 @@ def test_start_creates_session_and_returns_native_id():
     assert body == {"title": "Hermes test"}
 
 
+@pytest.mark.parametrize("status", [404, 503])
+def test_resume_never_creates_replacement_on_failed_native_lookup(status):
+    """A missing or temporarily unavailable bound session must not be replaced.
+
+    Recovery must retain the exact native ID and allow a later same-ID retry,
+    rather than silently creating a second session with unknown side effects.
+    """
+    transport = FakeTransport([(status, {"error": "unavailable"})])
+    client = make_client(transport, preset_session=True)
+    with pytest.raises(RuntimeError, match=f"HTTP {status}"):
+        client.start(timeout=5.0)
+    assert client.native_session_id == "ses_x"
+    assert len(transport.requests) == 1
+    assert transport.requests[0][0:2] == ("GET", "/session/ses_x")
+
+
 def test_run_prompt_waits_for_new_assistant_text():
     final = [_msg("m1", "user", "hi", 1), _msg("m2", "assistant", "hello!", 2)]
     transport = FakeTransport(

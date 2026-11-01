@@ -549,7 +549,9 @@ async def test_relay_resend_of_a_rewritten_media_delivery_reuses_its_admission_a
     monkeypatch.setattr(SessionAuthority, "_schedule", lambda self, ref: None)  # the row stays queued, bytes held
     media = ThreadingHTTPServer(("127.0.0.1", 0), _Media)
     threading.Thread(target=media.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{media.server_port}/photo.png"
+    url = f"http://127.0.0.1:{media.server_port}/relay/media/photo.png"
+    # Preserve the exact ephemeral-fixture SSRF exception; never allow arbitrary loopback URLs.
+    monkeypatch.setattr("gateway.relay.media.is_safe_url", lambda candidate: candidate == url)
 
     async def connector(ws):
         await ws.recv()  # hello
@@ -583,7 +585,7 @@ async def test_relay_resend_of_a_rewritten_media_delivery_reuses_its_admission_a
         runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / "sessions"))
         authority = await initialize_session_authority(runner, profile_id="default", instance_id="relay-media")
         adapter = RelayAdapter(PlatformConfig(enabled=True), descriptor, transport)
-        adapter._media_client = RelayMediaClient(f"http://127.0.0.1:{media.server_port}", None, None)
+        adapter._media_client = RelayMediaClient(f"http://127.0.0.1:{media.server_port}", "fixture-gateway", "fixture-secret")
         adapter.gateway_runner = runner
         runner.adapters[Platform.RELAY] = adapter
         runner._wire_adapter_handlers(adapter)
@@ -703,7 +705,9 @@ async def test_a_relay_media_delivery_no_admission_owns_retains_no_bytes(
     descriptor = CapabilityDescriptor(1, "telegram", "Fixture", 4096, False, True, False, "plain", "chars")
     media = ThreadingHTTPServer(("127.0.0.1", 0), _Media)
     threading.Thread(target=media.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{media.server_port}/photo.png"
+    url = f"http://127.0.0.1:{media.server_port}/relay/media/photo.png"
+    # Preserve the exact ephemeral-fixture SSRF exception; never allow arbitrary loopback URLs.
+    monkeypatch.setattr("gateway.relay.media.is_safe_url", lambda candidate: candidate == url)
 
     def hook(**kwargs):
         fired.append(hook_name)
@@ -740,7 +744,7 @@ async def test_a_relay_media_delivery_no_admission_owns_retains_no_bytes(
         runner = GatewayRunner(GatewayConfig(sessions_dir=tmp_path / "sessions"))
         authority = await initialize_session_authority(runner, profile_id="default", instance_id="relay-skip")
         adapter = RelayAdapter(PlatformConfig(enabled=True), descriptor, transport)
-        adapter._media_client = RelayMediaClient(f"http://127.0.0.1:{media.server_port}", None, None)
+        adapter._media_client = RelayMediaClient(f"http://127.0.0.1:{media.server_port}", "fixture-gateway", "fixture-secret")
         adapter.gateway_runner = runner
         runner.adapters[Platform.RELAY] = adapter
         runner._wire_adapter_handlers(adapter)

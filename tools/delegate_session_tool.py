@@ -179,6 +179,10 @@ def _metadata_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         "recovery_of_native_id": record.get("recovery_of_native_id") or None,
         "recovery_reason": _bounded(record.get("recovery_reason"), 400) or None,
         "recovered_at": record.get("recovered_at") or None,
+        # v4 stop semantics: this error-status record was stopped by an
+        # explicit release (spool reap) rather than never being touched —
+        # the interruption evidence is preserved, only the client ended.
+        "stopped_while_interrupted": bool(record.get("stopped_while_interrupted")) or None,
         # Durable forward-progression evidence (additive, version-compatible):
         # how far the session got and what it last said, so a replacement
         # supervisor restart-continues instead of guessing. Stamped only by
@@ -936,6 +940,28 @@ def _delegate_dead(client: Any) -> bool:
     return callable(is_dead) and bool(is_dead())
 
 
+def _stop_settles_record(record: dict[str, Any]) -> None:
+    """Apply stop's durable semantics to a session record under _SESSION_LOCK.
+
+    The client is closed by the caller; this only settles status. An
+    interrupted session (status=error) stays resumable: its native
+    conversation may still exist in the backend's own store, and this
+    durable record is the only mapping from the Hermes delegate handle to
+    that native session id. Rewriting error->closed here would (a) make the
+    record eligible for LRU eviction (_prune_durable_metadata spares
+    "error" but reaps "closed") and (b) misreport the session as cleanly
+    finished to a later recovery reader. Clean sessions still close.
+    """
+    with _SESSION_LOCK:
+        prior_status = record.get("status")
+        if prior_status == "error":
+            record["stopped_while_interrupted"] = True
+            # status stays "error": resumable interruption evidence
+        else:
+            record["status"] = "closed"
+        record["updated_at"] = time.time()
+
+
 def _mark_dead_delegate(record: dict[str, Any]) -> bool:
     client = record.get("client")
     if client is None or record.get("status") in {"closed", "error"}:
@@ -1449,7 +1475,12 @@ def delegate_session(
                 **client_kwargs,
             )
             if native_session_id and hasattr(created, "native_session_id"):
-                created.native_session_id = native_session_id
+                # A new OpenCode handle is not yet a native OpenCode ID.
+                # Only restore a verified persisted binding; otherwise
+                # OpenCodeClient.start() must create the first session.
+                # Pi uses the handle as its native ID on initial creation.
+                if backend_name != "opencode" or native_hint:
+                    created.native_session_id = native_session_id
             return created
 
         requested_native = native_hint or handle
@@ -1818,9 +1849,7 @@ def delegate_session(
         except Exception:
             logger.debug("Delegate abort failed before close", exc_info=True)
         client.close()
-        with _SESSION_LOCK:
-            record["status"] = "closed"
-            record["updated_at"] = time.time()
+        _stop_settles_record(record)
         _persist_metadata(record)
         return json.dumps(
             {"success": True, "closed": True, **_summary(record)}, ensure_ascii=False

@@ -3621,6 +3621,7 @@
                 "custom",
                 "debugging",
                 "delegation",
+                "delegation_session",
                 "desktop_ui",
                 "discord",
                 "discord_admin",

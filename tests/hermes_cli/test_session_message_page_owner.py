@@ -39,14 +39,35 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
         older = client.get(f"/api/sessions/same-id/messages?{query}&offset=120").json()
         default = client.get(f"/api/sessions/same-id/messages?{query}&profile=default").json()
 
-    assert tail["profile"] == older["profile"] == (serving_profile or "default")
-    assert default["profile"] == "default"
-    assert len(tail["messages"]) == 120
-    assert len(older["messages"]) == 79
-    assert len(default["messages"]) == 1
-    assert [row["content"] for row in older["messages"] + tail["messages"]] == [
-        f"message-{index}" for index in range(199)
-    ]
+    if serving_profile:
+        # A named profile serves its own rows; an explicit ?profile=default crosses
+        # back to the native root inside the serving tree.
+        assert tail["profile"] == older["profile"] == "work"
+        assert default["profile"] == "default"
+        assert len(tail["messages"]) == 120
+        assert len(older["messages"]) == 79
+        assert len(default["messages"]) == 1
+        assert [row["content"] for row in older["messages"] + tail["messages"]] == [
+            f"message-{index}" for index in range(199)
+        ]
+    else:
+        # Wave-9 root semantics (2026-10-18): a custom HERMES_HOME nested under the
+        # native root is an INDEPENDENT root — get_default_hermes_root() no longer
+        # collapses it onto the native root, so the sibling native home is not a
+        # reachable "default profile" from this process. Profile targeting stays
+        # inside the serving root (the custom home keeps the legacy "default"
+        # name), and the native home's store is never read through it.
+        assert tail["profile"] == older["profile"] == default["profile"] == "default"
+        assert len(tail["messages"]) == 120
+        assert len(older["messages"]) == 79
+        assert len(default["messages"]) == 120
+        assert [row["content"] for row in older["messages"] + tail["messages"]] == [
+            f"message-{index}" for index in range(199)
+        ]
+        with SessionDB(db_path=default_home / "state.db") as native_db:
+            rows = native_db.get_messages("same-id", limit=200)
+            assert len(rows) == 1, "the native home's store was read through the custom root"
+
 
 
 def test_message_pages_type_untyped_failed_turn_rows(tmp_path, monkeypatch):

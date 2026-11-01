@@ -222,6 +222,11 @@ def test_legacy_selection_carries_extras_the_main_era_venv_lazily_installed(monk
     """Migrating a main-era venv must keep opt-in extras it already had (FAL
     image generation, a messaging SDK), or the first PM launch prompts to
     reinstall them. Umbrella and gated-off extras are never carried."""
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = \"checkout\"\nversion = \"0\"\ndependencies = []\n"
+        "[project.optional-dependencies]\nall = []\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(extras, "_PLATFORM_GATES", {"piper": "python_version < '0'"})
     site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
     (site / "fal_client").mkdir(parents=True)
@@ -239,7 +244,10 @@ def test_legacy_selection_carries_extras_the_main_era_venv_lazily_installed(monk
     assert "messaging" not in selection
     assert "piper" not in selection
     assert "hindsight" not in selection  # Catalog plugin owns this dependency, not a core extra.
-    assert extras.legacy_selection(tmp_path / "no-venv") == ["all"]
+    # A root with no manifest at all declares nothing (not even `all`): the
+    # carry is the answer, never a fabricated `all` (a venv seeded from the
+    # lock alone would otherwise be force-rebuilt against a missing manifest).
+    assert extras.legacy_selection(tmp_path / "no-venv") == []
 
 
 def test_legacy_selection_never_fabricates_an_undeclared_all_extra(tmp_path):

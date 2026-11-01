@@ -198,7 +198,17 @@ jobs:
           # nested process trees: child startups and per-file 300s watchdogs
           # timed out in required CI. Cap to 3 independent file workers so
           # tests still run (none skipped, no deadline relaxed).
+          #
+          # The desktop_update hand-off family runs real windows.ps1 /
+          # marker-claim.ps1 trees (setup-pm stage + update + verify) and
+          # legitimately takes 200-295s alone on this runner; three of them
+          # overlapping on 3 workers dilates past the flat 300s cap, the file
+          # is SIGKILL'd at the watchdog and rc=124 files are never retried
+          # (run_tests_parallel.py: a killed tree is a runaway, not a flake).
+          # 900s matches the e2e-windows lane, which carries the same
+          # spawn-real-PowerShell-trees constraint.
           HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && '3' || '' }}
+          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '900' || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.
