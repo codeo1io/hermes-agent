@@ -20,6 +20,7 @@ vi.mock('@/hermes', async importOriginal => ({
 
 import { $pluginDecisions, $pluginRecords, dropPlugin, patchPlugin, publishPlugin } from '@/contrib/plugins-store'
 import { queryClient } from '@/lib/query-client'
+import { clearNotifications } from '@/store/notifications'
 import {
   $pluginInstallRequest,
   closePluginInstallRequest,
@@ -101,6 +102,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   closePluginInstallRequest()
+  // Cancel toast timers before Vitest disposes the jsdom window.
+  clearNotifications()
   vi.unstubAllGlobals()
 })
 
