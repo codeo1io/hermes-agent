@@ -19,6 +19,27 @@ class CronExecutionUnknown(RuntimeError):
 RECOVERY_SCAN_LIMIT = 64
 RECOVERY_AGE_LIMIT_SECONDS = 24 * 3600.0
 
+# A read-only poll of an already admitted cron session may briefly hit the
+# gateway's SQLite writer. Retry the SAME identity; never retry submission.
+# Exhaustion still raises CronExecutionUnknown through the caller, preserving
+# the no-replay fence. The finite delays add at most 7.75s of backoff.
+_LOCK_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0)
+
+
+async def _read_owner_with_lock_retry(call, op, params):
+    if op not in {"status", "recover"}:
+        return await call(op, params)
+    for delay in (*_LOCK_RETRY_DELAYS, None):
+        try:
+            return await call(op, params)
+        except Exception as exc:
+            message = str(exc).strip().lower()
+            if delay is None or not (
+                message == "database is locked" or message.endswith(": database is locked")
+            ):
+                raise
+            await asyncio.sleep(delay)
+
 
 def _expiry_state(journal, record):
     """``(scans, first_seen)`` tracked on the journal record; increments persist immediately.
@@ -168,7 +189,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
             # A returned owner exception is definite; a transport disconnect is not. Even an
             # owner error after commit must retain the admitted identity, so verify its absence.
             if owner is not None or isinstance(exc, GatewayRPCError):
-                state = await call('recover', params)
+                state = await _read_owner_with_lock_retry(call, 'recover', params)
                 if state['status'] == 'missing':
                     error = f'{type(exc).__name__}: {exc}'
                     result = [False, f'# Cron Job: {job["id"]} (FAILED)\n\n{error}\n', '', error]
@@ -188,7 +209,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 await call('cancel', receipt)
-            state = await call('status', receipt)
+            state = await _read_owner_with_lock_retry(call, 'status', receipt)
             if state.get('progress_at') not in (None, progress):
                 # The owner's agent is still working: refresh OUR ledger row (the owner's stamp is
                 # fenced to the row's owner), once per owner stamp, so the stale-claim sweep measures
