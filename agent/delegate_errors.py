@@ -14,7 +14,10 @@ failure text onto that vocabulary. Class names mirror
 provider condition (``rate_limit`` / ``overloaded`` / ``timeout`` /
 ``unknown``); delegate-specific conditions get their own names
 (``provider_stall`` / ``agent_stall`` / ``resource_exhausted`` /
-``transport``). Fail-open by design: the classifier never raises and never
+``transport``); locally-initiated kills carry their own classes
+(``local_kill`` / ``local_budget_expired``) threaded in structurally by the
+kill site via ``classify_delegate_failure(origin=...)`` — see
+``LOCAL_KILL_CLASSES``. Fail-open by design: the classifier never raises and never
 fabricates evidence, so a new failure shape degrades to ``unknown`` rather
 than taking the delegation path down.
 """
@@ -24,6 +27,7 @@ from __future__ import annotations
 import re
 
 __all__ = [
+    "LOCAL_KILL_CLASSES",
     "PROVIDER_FAILURE_CLASSES",
     "DelegateTurnStalled",
     "classify_delegate_failure",
@@ -69,11 +73,22 @@ class DelegateTurnStalled(TimeoutError):
 
 # Only these classes may open the delegate provider-health breaker
 # (agent/delegate_health.py): they describe the upstream model provider being
-# unavailable, not the delegate agent's own behavior (``agent_stall``), the
+# unavailable, not the delegate agent's own behavior (``agent_stall``, and
+# the origin-threaded ``local_kill``/``local_budget_expired`` below), the
 # local host (``resource_exhausted``), or the RPC transport (``transport``).
 PROVIDER_FAILURE_CLASSES = frozenset(
     {"rate_limit", "overloaded", "timeout", "provider_stall"}
 )
+
+# Locally-initiated kill classes: the kill SITE knows it ended the turn
+# (stall-abort we initiate, zombie-rider terminate, budget/ceiling
+# enforcement, client close during a turn) and threads that knowledge in as
+# ``classify_delegate_failure(origin=...)`` — the same philosophy as
+# ``_HANDSHAKE_MARKERS`` outranking the generic timeout table, but
+# structural instead of lexical. Kill prose ("operation was aborted",
+# "timed out") must never classify into the provider vocabulary and cool a
+# healthy provider (finding 7892c6c904fb, the A4 storm-count poisoning).
+LOCAL_KILL_CLASSES = frozenset({"local_kill", "local_budget_expired"})
 
 _RETRY_AFTER_RE = re.compile(r"for (\d+) seconds?")
 
@@ -130,7 +145,7 @@ def _evidence_line(text: str, start: int, default: str) -> str:
 
 
 def classify_delegate_failure(
-    text: str, *, zero_activity: bool
+    text: str, *, zero_activity: bool, origin: str | None = None
 ) -> tuple[str, str, float | None]:
     """Classify delegate failure text -> ``(error_class, provider_signal, retry_after)``.
 
@@ -142,16 +157,41 @@ def classify_delegate_failure(
     phrases win over the structural signal so a rate-limit line streamed just
     before silence still classifies as ``rate_limit``. Fail-open: unmatched
     text degrades to ``agent_stall``/``unknown`` instead of raising.
+
+    ``origin`` carries what the kill site already knows: one of
+    ``LOCAL_KILL_CLASSES`` when THIS process ended the turn (stall-abort we
+    initiate, zombie-rider terminate, budget/ceiling wall, client close
+    during a turn), anything else (``None``, unrecognised) for unknown
+    origin. Provider-refusal evidence in the text (rate-limit/overloaded
+    lines) and the zero-activity structural signal both OUTRANK the origin —
+    we may have killed a turn whose provider was genuinely refusing, and
+    that must still count provider-side — but every other marker table
+    describes how the failure text reads, not who ended the turn, so a
+    known-local kill classifies structurally (as its ``origin`` class)
+    instead of lexically. Fail-open: an unknown origin value keeps today's
+    exact behavior rather than raising.
     """
+    local_class = origin if origin in LOCAL_KILL_CLASSES else None
     lowered = (text or "").lower()
-    for markers, error_class in (
-        (_RATE_LIMIT_MARKERS, "rate_limit"),
-        (_OVERLOADED_MARKERS, "overloaded"),
-        (_HANDSHAKE_MARKERS, "bootstrap_timeout"),
-        (_TIMEOUT_MARKERS, "timeout"),
-        (_RESOURCE_MARKERS, "resource_exhausted"),
-        (_TRANSPORT_MARKERS, "transport"),
-    ):
+    if local_class is None:
+        tables = (
+            (_RATE_LIMIT_MARKERS, "rate_limit"),
+            (_OVERLOADED_MARKERS, "overloaded"),
+            (_HANDSHAKE_MARKERS, "bootstrap_timeout"),
+            (_TIMEOUT_MARKERS, "timeout"),
+            (_RESOURCE_MARKERS, "resource_exhausted"),
+            (_TRANSPORT_MARKERS, "transport"),
+        )
+    else:
+        # Origin-threaded kill: only the two provider-refusal tables are
+        # upstream evidence here. Generic abort/timeout prose, handshake
+        # wording, transport lines and host-exhaustion text are effects of
+        # OUR kill, not provider conditions — the G2 poisoning shapes.
+        tables = (
+            (_RATE_LIMIT_MARKERS, "rate_limit"),
+            (_OVERLOADED_MARKERS, "overloaded"),
+        )
+    for markers, error_class in tables:
         for marker in markers:
             start, phrase = _find_marker(lowered, marker)
             if start >= 0:
@@ -163,6 +203,8 @@ def classify_delegate_failure(
                 return error_class, _evidence_line(text, start, phrase), retry_after
     if zero_activity:
         return "provider_stall", "", None
+    if local_class is not None:
+        return local_class, "", None
     if lowered.strip():
         return "agent_stall", "", None
     return "unknown", "", None

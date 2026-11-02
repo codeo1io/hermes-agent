@@ -979,13 +979,18 @@ def _mark_dead_delegate(record: dict[str, Any]) -> bool:
     return changed
 
 
-def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
+def _classify_turn_exception(
+    exc: BaseException, *, origin: str | None = None
+) -> tuple[str, float | None]:
     """(error_class, retry_after) for a failed delegate turn.
 
     Typed attributes win: ``DelegateTurnStalled`` already derived its class
     from streamed evidence at the client. Anything else falls back to
     classifying the exception text, so plain failures still land in the
-    shared vocabulary.
+    shared vocabulary. ``origin`` threads what the kill site knows (plan
+    U3, finding 7892c6c904fb): a locally-ended turn (supervisor close,
+    rider) classifies structurally local so its ledger forward can never
+    read as provider evidence; unknown origins keep today's mapping.
     """
     typed = str(getattr(exc, "error_class", "") or "").strip()
     if typed:
@@ -993,6 +998,7 @@ def _classify_turn_exception(exc: BaseException) -> tuple[str, float | None]:
     error_class, _signal, retry_after = classify_delegate_failure(
         f"{type(exc).__name__}: {exc}",
         zero_activity=bool(getattr(exc, "zero_activity", False)),
+        origin=origin,
     )
     return error_class, retry_after
 
@@ -1133,7 +1139,13 @@ def _run_turn(record: dict[str, Any], message: str, timeout: float) -> None:
         _ledger_record_success(ledger_key, ledger=record.get("_scope_ledger"))
     except Exception as exc:
         logger.exception("Delegate session %s turn failed", record.get("session_id"))
-        error_class, retry_after = _classify_turn_exception(exc)
+        # Origin-threaded classification (plan U3): a turn this process
+        # ended itself (supervisor close mid-flight, client teardown)
+        # carries its local origin from the client into the classifier so
+        # kill prose never classifies provider-side. Fail-open for clients
+        # without the seam (upstream aborts, other backends).
+        origin = getattr(client, "local_kill_disposition", None)
+        error_class, retry_after = _classify_turn_exception(exc, origin=origin)
         # Bank WHAT the dying turn produced (bounded transcript tail)
         # before banking WHY it died. The fetch runs OUTSIDE the session
         # lock — the RPC may block on a wedged child, and

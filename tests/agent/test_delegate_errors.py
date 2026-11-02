@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from agent.delegate_errors import (
+    LOCAL_KILL_CLASSES,
     PROVIDER_FAILURE_CLASSES,
     DelegateTurnStalled,
     classify_delegate_failure,
@@ -211,3 +212,114 @@ def test_bootstrap_timeout_is_not_a_provider_failure_class():
     the breaker vocabulary must never admit the handshake class — host-load
     bring-up episodes must not cool a healthy provider."""
     assert "bootstrap_timeout" not in PROVIDER_FAILURE_CLASSES
+
+
+# ---------------- locally-initiated kills (origin-threaded, plan U1) -----
+# Finding 7892c6c904fb (A4 storm-count poisoning): kill sites that KNOW they
+# ended the turn (stall-abort we initiate, zombie-rider terminate,
+# budget/ceiling enforcement, client close during a turn) had no structural
+# way to say so — their own kill prose ("operation was aborted",
+# "timed out") classified ``timeout`` ∈ PROVIDER_FAILURE_CLASSES and cooled
+# a healthy provider. ``origin`` threads that knowledge into the classifier;
+# these rows pin the resulting vocabulary in both directions.
+
+
+def test_local_kill_text_with_origin_classifies_local_not_timeout():
+    """The G2 poisoning line, red-first: 'timed out' under a known-local
+    origin must express structurally as ``local_kill`` — never ``timeout``,
+    never a provider class."""
+    error_class, provider_signal, retry_after = classify_delegate_failure(
+        "turn timed out and was killed locally",
+        zero_activity=False,
+        origin="local_kill",
+    )
+    assert error_class == "local_kill"
+    assert error_class not in PROVIDER_FAILURE_CLASSES
+    assert provider_signal == ""
+    assert retry_after is None
+
+
+def test_abort_prose_with_local_origin_classifies_local():
+    """"operation was aborted" is OUR abort-handshake prose when the origin
+    is local; the generic timeout table must not re-type it provider-side."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "operation was aborted during local kill",
+        zero_activity=False,
+        origin="local_kill",
+    )
+    assert error_class == "local_kill"
+
+
+def test_budget_wall_origin_maps_to_its_own_class():
+    """A budget/ceiling wall is its own local disposition, not a generic
+    kill: supervisors fold it differently from a rider kill."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "timed out", zero_activity=False, origin="local_budget_expired"
+    )
+    assert error_class == "local_budget_expired"
+    assert error_class not in PROVIDER_FAILURE_CLASSES
+
+
+def test_provider_evidence_outranks_local_origin():
+    """Origin never masks REAL provider evidence: a refusal line streamed
+    just before a local kill keeps its provider class, bounded signal and
+    retry hint — attribution stays honest in both directions."""
+    error_class, provider_signal, retry_after = classify_delegate_failure(
+        "Rate limit: disabling model glm-4.6 for 1800 seconds (cooling down)",
+        zero_activity=False,
+        origin="local_kill",
+    )
+    assert error_class == "rate_limit"
+    assert "Rate limit" in provider_signal
+    assert retry_after == 1800.0
+    error_class, _signal, _retry = classify_delegate_failure(
+        "HTTP 503 Service Unavailable",
+        zero_activity=False,
+        origin="local_kill",
+    )
+    assert error_class == "overloaded"
+
+
+def test_zero_activity_outranks_local_origin():
+    """Silence since the prompt ack is upstream evidence — the provider
+    never produced anything — not a consequence of the kill: a locally
+    killed zero-activity turn stays ``provider_stall`` so a genuinely dead
+    provider still opens the breaker."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "", zero_activity=True, origin="local_kill"
+    )
+    assert error_class == "provider_stall"
+
+
+def test_local_origin_skips_non_provider_text_tables():
+    """Transport/handshake/resource prose describes HOW the failure text
+    reads, not WHO ended the turn: with a known-local origin those tables
+    must not re-type the kill."""
+    for text in (
+        "pi rpc process exited with code -15",
+        "pi did not answer command 'get_state'",
+        "can't start new thread",
+    ):
+        error_class, _signal, _retry = classify_delegate_failure(
+            text, zero_activity=False, origin="local_kill"
+        )
+        assert error_class == "local_kill"
+
+
+def test_unknown_origin_value_fails_open_to_today_behavior():
+    """Fail-open contract: an unrecognised origin degrades to today's
+    unknown-origin classification instead of raising — and never invents a
+    local class."""
+    assert classify_delegate_failure(
+        "operation was aborted", zero_activity=False, origin="locale_kil"
+    ) == ("timeout", "operation was aborted", None)
+    assert classify_delegate_failure(
+        "operation was aborted", zero_activity=False, origin=None
+    ) == ("timeout", "operation was aborted", None)
+
+
+def test_local_kill_classes_are_pinned_outside_provider_vocabulary():
+    """Vocabulary invariant the breaker depends on (plan U1/U3): exactly
+    two local classes, both structurally outside the provider set."""
+    assert LOCAL_KILL_CLASSES == frozenset({"local_kill", "local_budget_expired"})
+    assert not LOCAL_KILL_CLASSES & PROVIDER_FAILURE_CLASSES

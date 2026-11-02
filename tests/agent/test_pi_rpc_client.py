@@ -13,13 +13,17 @@ the real binary or network. Pins the behaviors the parent relies on:
 
 import re
 import stat
+import subprocess
 import sys
 import threading
 import time
 
 import pytest
 
-from agent.delegate_errors import DelegateTurnStalled
+from agent.delegate_errors import (
+    PROVIDER_FAILURE_CLASSES,
+    DelegateTurnStalled,
+)
 from agent.pi_rpc_client import (
     PiRPCClient,
     PendingQuestion,
@@ -274,15 +278,20 @@ def test_zero_activity_stall_classifies_provider_stall(tmp_path):
     assert isinstance(err, TimeoutError)
 
 
-def test_partial_activity_stall_classifies_agent_stall(tmp_path):
+def test_partial_activity_stall_classifies_local_kill(tmp_path):
     err = _stall_after_ack(
         tmp_path,
         "fake-pi-one-think",
         "        send({'type':'message_update','assistantMessageEvent':"
         "{'type':'thinking_delta','delta':'considering'}})\n",
     )
-    # The agent streamed something and then wedged: the provider answered.
-    assert err.error_class == "agent_stall"
+    # The agent streamed something and then wedged: the provider answered
+    # (zero_activity=False), so this can never be provider_stall. The
+    # stall-abort is OUR kill decision, so the terminal class is
+    # origin-threaded ``local_kill`` (plan U3, finding 7892c6c904fb) — the
+    # wedge-vs-dead evidence lives on in zero_activity + liveness_triage.
+    assert err.error_class == "local_kill"
+    assert err.error_class not in PROVIDER_FAILURE_CLASSES
     assert err.zero_activity is False
 
 
@@ -314,7 +323,11 @@ def test_message_list_shrink_counts_as_turn_activity(tmp_path):
         "        send({'type':'message_update','messageCount':2,'assistantMessageEvent':"
         "{'type':'text_delta','delta':'[compact] context summarized'}})\n",
     )
-    assert err.error_class == "agent_stall"  # streamed-then-wedged, not dead
+    # Activity was observed (zero_activity=False), so the kill cannot be
+    # provider_stall; the origin-threaded terminal class is local_kill
+    # (plan U3) — still never a provider class on the breaker's vocabulary.
+    assert err.error_class == "local_kill"
+    assert err.error_class not in PROVIDER_FAILURE_CLASSES
     assert err.zero_activity is False
 
 
@@ -354,6 +367,165 @@ def test_stall_terminates_pi_child_that_ignores_abort(tmp_path):
         assert elapsed < 10.0
     finally:
         client.close()
+
+
+# ------------------------------ zombie coverage (plan U5) ---------------
+# Finding 7892c6c904fb (A4 leaked workers: 12.2h/6.6h/2.6h pi children
+# outliving their turns). Exit-path inventory for the spawned child — every
+# path that ends a child must, within a bounded grace, either JOIN/reap it
+# or run the terminate→SIGKILL rider:
+#
+#   spawn missing pipes .... gap B: kill must also reap .......... (test below)
+#   close, polite child ..... terminate+wait(2) reaps ............ (test below)
+#   close, SIGTERM trap .... gap A: kill must also reap .......... (test below)
+#   stall rider, abort ..... terminate→kill ladder + reaps ....... (existing
+#                            test_stall_terminates_pi_child_that_ignores_abort)
+#   stall rider, SIGTERM .. kill escalation pinned with a real
+#                            SIGTERM-trapping child ................ (test below)
+#   rider vs respawn ....... gap C: the rider must join ONLY its own
+#                            child's readers, never a racing
+#                            respawn's ............................. (test below)
+#   respawn after rider .... same session-id ..................... (existing
+#                            test_terminated_stall_child_respawns_same_session_id)
+
+
+class _KillRecorder:
+    """Popen stand-in that records the kill ladder it was put through.
+
+    ``ignore_sigterm`` models a child trapping SIGTERM: the first
+    ``wait`` after ``terminate`` times out, and only ``kill`` settles it.
+    """
+
+    def __init__(self, *, ignore_sigterm: bool = False) -> None:
+        self.ignore_sigterm = ignore_sigterm
+        self.killed = False
+        self.waits: list = []
+        self.polls = 0
+
+    def poll(self) -> int | None:
+        self.polls += 1
+        return -9 if self.killed else None
+
+    def terminate(self) -> None:
+        pass  # "delivered" — a trapping child simply ignores it
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.killed:
+            return -9
+        if self.ignore_sigterm:
+            raise subprocess.TimeoutExpired(cmd="pi", timeout=timeout)
+        return 0
+
+
+def test_close_terminates_and_reaps_a_polite_child(fake_pi):
+    """Happy close: terminate + bounded wait leaves the child dead AND
+    reaped — close() must never return past an unobserved kill."""
+    client = make_client(fake_pi, persistent_session=True)
+    client._spawn()  # launch the child; no handshake needed for close()
+    proc = client._proc
+    assert proc is not None and proc.poll() is None  # live child
+    client.close()
+    assert proc.poll() is not None  # dead and reaped within the bounded wait
+
+
+def test_close_reaps_a_child_that_ignores_sigterm(fake_pi):
+    """Gap A: a SIGTERM-trapping child must be SIGKILLed AND reaped inside
+    close() — without the post-kill wait the corpse stays a zombie until
+    GC runs Popen.__del__, unobserved."""
+    client = make_client(fake_pi)
+    stub = _KillRecorder(ignore_sigterm=True)
+    client._proc = stub
+    client.close()
+    assert stub.killed  # the ladder escalated
+    assert stub.waits == [2, 2]  # bounded wait after terminate AND after kill
+
+
+def test_spawn_missing_pipes_kills_and_reaps_child(fake_pi, monkeypatch):
+    """Gap B: a child that comes up without pipes is unusable and must be
+    killed AND reaped before the spawn failure raises past the reference."""
+    stub = _KillRecorder()
+
+    def fake_popen(*_args, **_kwargs):
+        stub.stdin = None  # the defect under test
+        stub.stdout = None
+        return stub
+
+    monkeypatch.setattr("agent.pi_rpc_client.subprocess.Popen", fake_popen)
+    client = make_client(fake_pi)
+    with pytest.raises(RuntimeError, match="did not expose stdin/stdout"):
+        client._spawn()
+    assert stub.killed
+    assert stub.waits == [2.0]  # reaped after the kill, not left to GC
+
+
+def test_stall_rider_sigkills_a_real_sigterm_trapping_child(tmp_path):
+    """Pin the existing rider ladder (:863-867) with a REAL child that
+    traps SIGTERM: terminate is ignored, the rider must escalate to
+    SIGKILL (uncatchable) and reap, within its bounded grace."""
+    script = tmp_path / "fake-pi-sigterm-trap"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        + "import json, signal, sys, time\n"
+        + "signal.signal(signal.SIGTERM, lambda *_: None)\n"
+        + "def send(o): print(json.dumps(o), flush=True)\n"
+        + "send({'type':'ready'})\n"
+        + "for line in sys.stdin:\n"
+        + "    msg = json.loads(line)\n"
+        + "    if msg.get('type') == 'prompt':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True})\n"
+        + "        time.sleep(60)\n"
+        + "    elif msg.get('type') == 'get_state':\n"
+        + "        send({'type':'response','id':msg['id'],'success':True,'data':{}})\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    client = PiRPCClient(
+        acp_command=str(script),
+        base_url="pi://sigterm-trap",
+        persistent_session=True,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(DelegateTurnStalled):
+            client.run_session_prompt("go", timeout_seconds=0.08)
+        elapsed = time.monotonic() - started
+        proc = client._proc
+        assert proc is not None
+        # SIGKILL cannot be trapped: dead, reaped, within the rider's grace.
+        assert proc.poll() is not None
+        assert elapsed < 10.0
+    finally:
+        client.close()
+
+
+def test_stall_rider_joins_only_its_own_childs_readers(fake_pi):
+    """Gap C (rider racing a same-session respawn): steer()-triggered
+    ``_spawn`` installs a NEW reader list without holding the prompt lock,
+    so it can land while the rider is between its proc kill and its join.
+    The rider must join exactly the readers of the child IT killed and
+    leave a racing respawn's readers tracked — never join-and-drop them."""
+    client = make_client(fake_pi)
+    old_reader = threading.Thread(target=lambda: None, daemon=True)
+    new_reader = threading.Thread(target=lambda: None, daemon=True)
+    old_reader.start()
+    new_reader.start()
+    stub = _KillRecorder()
+
+    def terminate_then_respawn():
+        # Simulates the respawn racing the rider's kill window.
+        client._reader_threads = [new_reader]
+
+    stub.terminate = terminate_then_respawn
+    client._proc = stub
+    client._reader_threads = [old_reader]
+    client._terminate_after_stall()
+    # The respawn's readers survive tracked; the rider took only its own.
+    assert client._reader_threads == [new_reader]
+    assert stub.killed is False and stub.waits == [2.0]  # polite ladder
+    client.close()
 
 
 # ------------------------------ stall-time liveness triage (A4)
