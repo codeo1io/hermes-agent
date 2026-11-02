@@ -190,3 +190,58 @@ def test_scheduler_accepts_identity_bound_receipt(tmp_path, monkeypatch):
     assert _apply_agent_failure_marker(
         job, True, None, response, execution_id="exec-abc"
     ) == (True, None, False)
+
+
+def test_canonical_response_file_carries_pair_structurally(tmp_path):
+    """The completion-stamp tool's machine-authored <execution_id>.response.md
+    satisfies marker carriage when the model's response prose precedes the pair
+    (position-flexible carrier; bound to this exact execution by filename)."""
+    job, _, _, _, _ = _case(tmp_path)
+    receipt_digest = hashlib.sha256(
+        (tmp_path / "receipts" / "exec-abc.json").read_bytes()
+    ).hexdigest()
+    (tmp_path / "receipts" / "exec-abc.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + receipt_digest + "\n"
+    )
+    prose = "Repair landed end-to-end: PR merged, CI green, deployed.\n\nmore detail\n"
+    assert validate_completion_evidence(job, prose, "exec-abc") is None
+
+
+def test_canonical_file_wrong_digest_fails_closed(tmp_path):
+    job, _, _, _, _ = _case(tmp_path)
+    (tmp_path / "receipts" / "exec-abc.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + "0" * 64 + "\n"
+    )
+    result = validate_completion_evidence(job, "no pair here", "exec-abc")
+    assert result is not None and "digest mismatch" in result
+
+
+def test_canonical_file_of_other_execution_cannot_vouch(tmp_path):
+    """A canonical file named for a different execution must not satisfy this
+    execution's marker carriage."""
+    job, _, _, _, _ = _case(tmp_path)
+    receipt_digest = hashlib.sha256(
+        (tmp_path / "receipts" / "exec-abc.json").read_bytes()
+    ).hexdigest()
+    (tmp_path / "receipts" / "other-exec.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + receipt_digest + "\n"
+    )
+    assert "marker" in validate_completion_evidence(job, "prose only", "exec-abc")
+
+
+def test_scheduler_accepts_canonical_carrier(tmp_path, monkeypatch):
+    from cron.scheduler import _apply_agent_failure_marker
+    monkeypatch.setattr(
+        "cron.scheduler.get_execution",
+        lambda _id: {"claimed_at": (datetime.now(UTC) - timedelta(seconds=10)).isoformat()},
+    )
+    job, _, _, _, _ = _case(tmp_path)
+    receipt_digest = hashlib.sha256(
+        (tmp_path / "receipts" / "exec-abc.json").read_bytes()
+    ).hexdigest()
+    (tmp_path / "receipts" / "exec-abc.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + receipt_digest + "\n"
+    )
+    assert _apply_agent_failure_marker(
+        job, True, None, "Summary prose without the pair.", execution_id="exec-abc"
+    ) == (True, None, False)
