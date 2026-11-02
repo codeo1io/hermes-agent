@@ -1913,7 +1913,9 @@ def test_hard_stop_waits_for_commit_already_admitted(tmp_path: Path) -> None:
         daemon=True,
     )
     compression.start()
-    assert commit_started.wait(timeout=2)
+    # The worker may wait for a CPU slot in heavily parallelized CI.  This
+    # timeout bounds a genuine deadlock without treating startup delay as one.
+    assert commit_started.wait(timeout=15)
 
     stop = threading.Thread(
         target=lambda: (
