@@ -216,6 +216,7 @@ def test_canonical_carrier_rejects_indented_marker_or_digest(tmp_path):
         " [CRON_EVIDENCE]\nsha256:" + digest + "\n",
         "[CRON_EVIDENCE]\n sha256:" + digest + "\n",
         "[CRON_EVIDENCE]\nsha256:" + digest + " \n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + "\nInjected third line\n",
     ):
         carrier.write_text(body)
         assert "marker" in validate_completion_evidence(

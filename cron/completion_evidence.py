@@ -82,7 +82,7 @@ def _canonical_pair(path: Path) -> str | None:
         return None
     # The stamp tool writes these two lines exactly. Whitespace-tolerant
     # parsing would accept a carrier that the stamp tool could not emit.
-    if len(lines) < 2 or lines[0] != _MARKER:
+    if len(lines) != 2 or lines[0] != _MARKER:
         return None
     prefix = "sha256:"
     if not lines[1].startswith(prefix):
