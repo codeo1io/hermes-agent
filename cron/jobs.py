@@ -2435,6 +2435,7 @@ def mark_job_run(
     ladder_rung: bool = False,
     quota_hold_seconds: Optional[float] = None,
     recover_consumed_fire: bool = False,
+    recovery_fence: Optional[dict[str, Any]] = None,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached.
@@ -2460,6 +2461,14 @@ def mark_job_run(
     def apply(jobs, _i, job):
         if execution_id is not None and execution_id in job.get("canonical_completions", []):
             return True
+        if recovery_fence is not None:
+            # Receipt recovery has no live fire-owner token. Never let an older
+            # result retire a fresh claim or overwrite a completion that landed
+            # after the recovery snapshot. Check under the jobs-store write lock.
+            if job.get("last_run_at") != recovery_fence.get("last_run_at"):
+                return False
+            if _claim_is_live(job.get("fire_claim"), _hermes_now(), FIRE_CLAIM_TTL_SECONDS):
+                return False
         if expected_fire_owner is not None:
             claim = job.get("fire_claim")
             if not isinstance(claim, dict) or claim.get("by") != expected_fire_owner:

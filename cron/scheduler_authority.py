@@ -351,6 +351,29 @@ def reconcile_pending(*, allow_connect=True):
             # blank answer are failures, whichever process books them.
             success, error, declared = _apply_agent_failure_marker(job, success, error, answer)
             delivery = _RunDelivery(job, success, error, agent_declared=declared)
+            fail_empty_response(delivery, answer)
+            # A dead firer's receipt is still authoritative for THAT execution, but never
+            # for a newer fire of the same job. Replaying its aggregate job outcome would
+            # clear the newer fire_claim and interrupt its live worker (or overwrite its
+            # terminal status). Settle only the old ledger row; do not redeliver it.
+            from cron.executions import latest_execution, recover_receipted_execution
+            latest = latest_execution(params['job_id'])
+            if row is not None and latest is not None and latest['id'] != row['id']:
+                settled = recover_receipted_execution(
+                    row['id'], params['job_id'], success=delivery.success,
+                    error=delivery.error, delivery_outcome='suppressed')
+                if settled is not None:
+                    journal.unlink(missing_ok=True)
+                    _lift_pause(params['job_id'], record.get('pause_recorded'))
+                continue
+            # A new fire can own the JSON claim before its execution row exists.
+            # Do not send a recovered notice while any fresh fire claim is live;
+            # the atomic recovery_fence in mark_job_run closes the remaining race.
+            from cron.jobs import _claim_is_live, _hermes_now, FIRE_CLAIM_TTL_SECONDS
+            current = get_job(params['job_id'])
+            if current is not None and _claim_is_live(
+                    current.get('fire_claim'), _hermes_now(), FIRE_CLAIM_TTL_SECONDS):
+                continue
             # The canonical receipt supplies the result; a dead scheduler's fire claim does not
             # authorize replay and must not prevent finishing its durable bookkeeping.
             fence = _FireOwnership(dict(job, fire_claim=None))

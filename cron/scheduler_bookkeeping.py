@@ -84,14 +84,25 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    if recovered:
+        from cron.jobs import get_job
+        current = get_job(job["id"])
+        if current is None:
+            return False
+        mark_kwargs["recovery_fence"] = {"last_run_at": current.get("last_run_at")}
     # A run that removed its own record has nothing left to mark; the delivery above is its result.
     marked = scheduler.self_removal_delivery_allowed(job["id"]) or scheduler.mark_job_run(
         job["id"], d.success, d.error, **mark_kwargs)
-    if fire_owner is not None and not marked:
-        scheduler.finish_execution(
-            execution_id, success=False,
-            error="Fire claim ownership lost before terminal completion.")
-        return True
+    if not marked:
+        if recovered:
+            # A newer owner may have claimed the job after receipt observation.
+            # Keep the journal and row recoverable; never settle stale success.
+            return False
+        if fire_owner is not None:
+            scheduler.finish_execution(
+                execution_id, success=False,
+                error="Fire claim ownership lost before terminal completion.")
+            return True
     delivery_outcome = _classify_delivery_outcome(
         delivery_error=d.delivery_error,
         delivery_queued=job.get("last_delivery_queued"),
