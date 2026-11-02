@@ -42,6 +42,20 @@ _INTERPRETER_PREFIXES = tuple({
     # checkout's own .venv is not Hermes state; without this every run from a default install
     # trips on its first traceback.
     Path(__file__).resolve().parent.parent,
+    # pm's install discovery resolves the executing checkout's store from the tree
+    # AROUND it: manifest.json beside the checkout (a sealed payload names its
+    # pieces there) and install-stamp.json at every ancestor (payload chains
+    # nest; pm/environments.store_root walks ``(root, *root.parents)``). Conductor
+    # worktrees nest checkouts under ~/.hermes/conductor-worktrees, so on that
+    # layout the probes resolve inside the guarded root on ordinary pm imports
+    # (env_for, store_root). They are install discovery around this very checkout,
+    # never Hermes state — and file-granular, so every other sibling under the
+    # guarded root stays guarded.
+    *(
+        ancestor / probe
+        for ancestor in Path(__file__).resolve().parent.parent.parents
+        for probe in ("manifest.json", "install-stamp.json")
+    ),
 })
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes

@@ -216,6 +216,27 @@ def test_checkout_inside_a_guarded_root_is_not_hermes_state():
         guard.check(PROJECT_ROOT.parent / "config.yaml")
 
 
+def test_pm_layout_probes_on_the_checkouts_ancestor_chain_are_install_discovery():
+    """pm.environments.store_root discovers the executing checkout's store by
+    probing manifest.json BESIDE it and install-stamp.json at EVERY ancestor
+    (sealed-payload chains nest). Conductor worktrees nest checkouts under
+    ``~/.hermes/conductor-worktrees``, so those probes resolve inside the guarded
+    root on ordinary pm imports (env_for, store_root); they are install
+    discovery around this very checkout, never Hermes state. File-granular:
+    every other sibling under the guarded roots stays refused."""
+    from tests.home_io_guard import HomeIOGuard
+
+    farm, home = PROJECT_ROOT.parent, PROJECT_ROOT.parents[2]
+    guard = HomeIOGuard(lambda: [farm, home])
+    guard.check(farm / "manifest.json")
+    guard.check(farm / "install-stamp.json")
+    guard.check(home / "install-stamp.json")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(farm / "config.yaml")
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(home / "workspace.db")
+
+
 @pytest.mark.parametrize("kind", ["environments", "test-environment"])
 def test_pm_generation_dir_around_the_running_venv_is_the_interpreter(tmp_path, kind):
     """scripts/run_tests.sh runs ``<home>/installs/<key>/<kind>/<gen>/venv`` with HOME pointed at the
