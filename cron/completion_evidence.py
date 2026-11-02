@@ -80,12 +80,14 @@ def _canonical_pair(path: Path) -> str | None:
         lines = raw.decode("utf-8", errors="strict").splitlines()
     except (OSError, ValueError, UnicodeDecodeError):
         return None
-    if len(lines) < 2 or lines[0].strip() != _MARKER:
+    # The stamp tool writes these two lines exactly. Whitespace-tolerant
+    # parsing would accept a carrier that the stamp tool could not emit.
+    if len(lines) < 2 or lines[0] != _MARKER:
         return None
     prefix = "sha256:"
     if not lines[1].startswith(prefix):
         return None
-    digest = lines[1][len(prefix):].strip()
+    digest = lines[1][len(prefix):]
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         return None
     return digest

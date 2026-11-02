@@ -207,6 +207,22 @@ def test_canonical_response_file_carries_pair_structurally(tmp_path):
     assert validate_completion_evidence(job, prose, "exec-abc") is None
 
 
+def test_canonical_carrier_rejects_indented_marker_or_digest(tmp_path):
+    """The stamp tool emits exact first/second lines, never whitespace-padded ones."""
+    job, _, path, _, _ = _case(tmp_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    carrier = path.with_suffix(".response.md")
+    for body in (
+        " [CRON_EVIDENCE]\nsha256:" + digest + "\n",
+        "[CRON_EVIDENCE]\n sha256:" + digest + "\n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + " \n",
+    ):
+        carrier.write_text(body)
+        assert "marker" in validate_completion_evidence(
+            job, "Planning only; no explicit marker", "exec-abc"
+        )
+
+
 def test_canonical_file_wrong_digest_fails_closed(tmp_path):
     job, _, _, _, _ = _case(tmp_path)
     (tmp_path / "receipts" / "exec-abc.response.md").write_text(
