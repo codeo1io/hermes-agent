@@ -5,14 +5,13 @@ refresh in the background: a slow or hung usage endpoint can't be allowed to sta
 """
 
 import threading
-import time
-from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone, UTC
 
 from agent import account_usage
 from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 from agent.account_usage_cache import cached_account_usage
 from hermes_cli.inventory import build_model_options_payload, load_picker_context
+from tests.waiting import wait_until
 
 
 def _snapshot(used: float) -> AccountUsageSnapshot:
@@ -24,42 +23,29 @@ def _snapshot(used: float) -> AccountUsageSnapshot:
 
 def test_picker_reads_cached_usage_and_refreshes_without_waiting(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-123")
-    release, called = threading.Event(), threading.Event()
+    release, called, answered = threading.Event(), threading.Event(), threading.Event()
     answers = iter([_snapshot(92.0)])
 
     def slow_usage_api(_base_url, _api_key):
         called.set()
         release.wait(30)
+        answered.set()
         return next(answers)
 
     monkeypatch.setitem(account_usage._USAGE_FETCHERS, "openrouter", slow_usage_api)
     ctx = load_picker_context()
 
-    picker_result = Future()
+    # The usage API answers only after ``release``, so a picker that waited on it could not return
+    # before ``answered``. No wall-clock bound: the picker's own cold work (catalogs, credential
+    # probes such as ``gh auth token``) takes seconds on a loaded runner and is not this contract.
+    first = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
+    assert not answered.is_set(), "the picker waited on the usage API"
+    assert "usage" not in first, "nothing cached yet, so nothing to show"
+    assert called.wait(30), "opening the picker must start a background usage refresh"
 
-    def read_picker():
-        try:
-            row = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
-            picker_result.set_result(row)
-        except BaseException as exc:
-            picker_result.set_exception(exc)
-
-    picker_thread = threading.Thread(target=read_picker, daemon=True)
-    picker_thread.start()
-    try:
-        assert called.wait(15), "opening the picker must start a background usage refresh"
-        # The usage API is deliberately blocked until after this assertion.
-        # This tests nonblocking behavior without a wall-clock performance
-        # threshold that can fail under parallel CI runner contention.
-        first = picker_result.result(timeout=15)
-        assert "usage" not in first, "nothing cached yet, so nothing to show"
-    finally:
-        release.set()
-        picker_thread.join(timeout=15)
-    assert not picker_thread.is_alive(), "picker did not exit after usage API release"
-    deadline = time.monotonic() + 5
-    while cached_account_usage("openrouter") is None and time.monotonic() < deadline:
-        time.sleep(0.05)
+    release.set()
+    wait_until(lambda: cached_account_usage("openrouter") is not None, timeout=30,
+               what="the background refresh cached the usage snapshot")
 
     row = next(r for r in build_model_options_payload(ctx)["providers"] if r["slug"] == "openrouter")
     (window,) = row["usage"]["windows"]
