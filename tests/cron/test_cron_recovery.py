@@ -102,6 +102,16 @@ def test_recovered_receipt_settles_the_departed_firers_execution_row(tmp_path, m
         fire = firer.stdout.strip().splitlines()[-1]
         assert executions.get_execution(fire)['status'] == 'running'
 
+        # Recovery must validate the durable claim of this exact fire, not an empty ID.
+        validated_execution_ids = []
+        original_gate = scheduler._apply_agent_failure_marker
+
+        def recording_gate(*args, **kwargs):
+            validated_execution_ids.append(kwargs.get('execution_id'))
+            return original_gate(*args, **kwargs)
+
+        monkeypatch.setattr(scheduler, '_apply_agent_failure_marker', recording_gate)
+
         async def probe():
             params = {'job_id': job['id'], 'request_id': fire, 'extra_prompt': None}
             receipt = await session_cron.operation(authority, 'submit', params)
@@ -121,6 +131,7 @@ def test_recovered_receipt_settles_the_departed_firers_execution_row(tmp_path, m
             asyncio.run(probe())
         finally:
             db.close()
+        assert validated_execution_ids == [fire]
         settled = executions.get_execution(fire)
         assert (settled['status'], settled['delivery_outcome']) == ('completed', 'suppressed')
         assert executions.recover_interrupted_executions() == 0

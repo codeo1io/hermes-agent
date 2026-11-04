@@ -349,7 +349,9 @@ def reconcile_pending(*, allow_connect=True):
             job['execution_id'] = params['request_id']
             # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE] and a
             # blank answer are failures, whichever process books them.
-            success, error, declared = _apply_agent_failure_marker(job, success, error, answer)
+            success, error, declared = _apply_agent_failure_marker(
+                job, success, error, answer, execution_id=params['request_id'],
+            )
             delivery = _RunDelivery(job, success, error, agent_declared=declared)
             fail_empty_response(delivery, answer)
             # A dead firer's receipt is still authoritative for THAT execution, but never
