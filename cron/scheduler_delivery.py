@@ -1742,6 +1742,56 @@ def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
     return msg
 
 
+def _dispatch_special_platform_target(
+    job: dict, content: str, cleaned_delivery_content: str, target: dict, *, for_failure: bool,
+    delivery_errors: list, unverified_targets: list, user_cfg,
+) -> int:
+    """Handle one delivery target owned by a special platform (bot-chat, room, local,
+    api_server). Returns the target's suppression delta when it was consumed here
+    (0 or 1 — the caller adds it to its suppressed count and ``continue``s); -1 means
+    an ordinary push platform — the caller proceeds to the live/standalone lanes.
+    Extracted from ``_deliver_result`` (code-health CC ratchet: the v0.22.7 adoption
+    grew the dispatch to 22 > 20)."""
+    if target["platform"] == BOT_CHAT_PLATFORM:
+        # Bot Chat owns admission; never concurrently resume a live owner's transcript.
+        bot_chat_error = _deliver_to_bot_chat(job, content, target["chat_id"], for_failure=for_failure)
+        suppressed = job.pop("_notification_all_targets_suppressed", False)
+        if bot_chat_error:
+            receipt_target = f"bot-chat:{target['chat_id'] or '(own)'}"
+            receipt = job.get("_bot_chat_delivery_receipts", {}).get(receipt_target)
+            if not receipt or receipt["status"] not in ("queued", "claimed"):
+                delivery_errors.append(bot_chat_error)
+            if receipt and receipt["status"] == "ambiguous":
+                unverified_targets.append(bot_chat_error)
+        return 1 if suppressed else 0
+    if target["platform"] == ROOM_PLATFORM:
+        room_error = deliver_to_room(job, content, target["chat_id"], for_failure=for_failure)
+        if room_error:
+            delivery_errors.append(room_error)
+        return 0
+    if target["platform"] == "local":
+        from gateway.session_cron import deliver_to_local_chat
+        from hermes_constants import get_hermes_home
+        local_error = deliver_to_local_chat(get_hermes_home(), target["chat_id"],
+                                            cleaned_delivery_content, diagnostic=for_failure)
+        if local_error:
+            delivery_errors.append(local_error)
+        return 0
+    # api_server targets are transcript conversations, not push channels:
+    # send() is a permanent stub on this platform, so deliver by appending
+    # to the target session's transcript — the same visibility model the
+    # kanban wake lane uses. The output becomes visible when the client
+    # next polls history. The target chat_id for an api_server origin IS
+    # the raw session id.
+    if target["platform"] == "api_server":
+        api_err = _deliver_to_api_server_transcript(
+            job, target.get("chat_id") or "", content)
+        if api_err:
+            delivery_errors.append(api_err)
+        return 0
+    return -1
+
+
 def _deliver_result(
     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
 ) -> Optional[str]:
@@ -1856,43 +1906,14 @@ def _deliver_result(
                 and not warning_notifications_enabled(target["platform"], user_cfg)):
             suppressed_targets += 1
             continue
-        # Bot Chat owns admission; never concurrently resume a live owner's transcript.
-        if target["platform"] == BOT_CHAT_PLATFORM:
-            bot_chat_error = _deliver_to_bot_chat(job, content, target["chat_id"], for_failure=for_failure)
-            suppressed_targets += job.pop("_notification_all_targets_suppressed", False)
-            if bot_chat_error:
-                receipt_target = f"bot-chat:{target['chat_id'] or '(own)'}"
-                receipt = job.get("_bot_chat_delivery_receipts", {}).get(receipt_target)
-                if not receipt or receipt["status"] not in ("queued", "claimed"):
-                    delivery_errors.append(bot_chat_error)
-                if receipt and receipt["status"] == "ambiguous":
-                    unverified_targets.append(bot_chat_error)
-            continue
-        if target["platform"] == ROOM_PLATFORM:
-            room_error = deliver_to_room(job, content, target["chat_id"], for_failure=for_failure)
-            if room_error:
-                delivery_errors.append(room_error)
-            continue
-        if target["platform"] == "local":
-            from gateway.session_cron import deliver_to_local_chat
-            from hermes_constants import get_hermes_home
-            local_error = deliver_to_local_chat(get_hermes_home(), target["chat_id"],
-                                                cleaned_delivery_content, diagnostic=for_failure)
-            if local_error:
-                delivery_errors.append(local_error)
-            continue
-
-        # api_server targets are transcript conversations, not push channels:
-        # send() is a permanent stub on this platform, so deliver by appending
-        # to the target session's transcript — the same visibility model the
-        # kanban wake lane uses. The output becomes visible when the client
-        # next polls history. The target chat_id for an api_server origin IS
-        # the raw session id.
-        if target["platform"] == "api_server":
-            api_err = _deliver_to_api_server_transcript(
-                job, target.get("chat_id") or "", content)
-            if api_err:
-                delivery_errors.append(api_err)
+        # Special platforms (bot-chat admission, room delivery, local transcripts, api_server
+        # transcripts) own their own lanes; the helper consumed the target or it is a push one.
+        special = _dispatch_special_platform_target(
+            job, content, cleaned_delivery_content, target, for_failure=for_failure,
+            delivery_errors=delivery_errors, unverified_targets=unverified_targets,
+            user_cfg=user_cfg)
+        if special >= 0:
+            suppressed_targets += special
             continue
 
         t = _prepare_target_delivery(
