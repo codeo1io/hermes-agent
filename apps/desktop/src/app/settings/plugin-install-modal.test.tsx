@@ -20,7 +20,7 @@ vi.mock('@/hermes', async importOriginal => ({
 
 import { $pluginDecisions, $pluginRecords, dropPlugin, patchPlugin, publishPlugin } from '@/contrib/plugins-store'
 import { queryClient } from '@/lib/query-client'
-import { $notifications } from '@/store/notifications'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import {
   $pluginInstallRequest,
   closePluginInstallRequest,
