@@ -4641,6 +4641,7 @@
                 "close_terminal",
                 "computer_use",
                 "cronjob_manage",
+                "delegate_session",
                 "delegate_task",
                 "desktop_preview",
                 "desktop_project",
