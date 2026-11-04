@@ -1341,4 +1341,4 @@ class TestBrowseDefaultLimit:
             result = json.loads(raw)
             assert result["mode"] == "browse"
             assert len(result["results"]) == 10
-        assert len(json.loads(session_search(db=db, limit=4)["results"])) == 4
+        assert len(json.loads(session_search(db=db, limit=4))["results"]) == 4
