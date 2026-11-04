@@ -20,7 +20,12 @@ from unittest.mock import patch
 
 import pytest
 
-from agent.acp_client import _ACP_PROBE_CACHE, ACPClient, _acp_supported, _model_selection_request
+from agent.acp_client import (
+    _ACP_PROBE_CACHE,
+    ACPClient,
+    _acp_supported,
+    _model_selection_request,
+)
 from tests.waiting import wait_until
 
 
@@ -44,7 +49,9 @@ class _FakeProcess:
 def _dispatch(client: ACPClient, message: dict, *, cwd: str) -> dict:
     """Feed one agent->client request through the client and return the JSON-RPC reply it wrote."""
     process = _FakeProcess()
-    handled = client._handle_server_message(message, process=process, cwd=cwd, text_parts=[], reasoning_parts=[])
+    handled = client._handle_server_message(
+        message, process=process, cwd=cwd, text_parts=[], reasoning_parts=[]
+    )
     assert handled
     payload = process.stdin.getvalue().strip()
     assert payload, "the client must answer every agent request"
@@ -71,24 +78,51 @@ def _clear_probe_cache():
 
 
 def test_agent_permission_request_is_answered_cancelled_never_granted(client, tmp_path):
-    response = _dispatch(client, _request("session/request_permission", {
-        "sessionId": "s1", "toolCall": {"toolCallId": "tc1", "title": "rm -rf /", "kind": "execute"},
-        "options": [{"optionId": "allow-always", "name": "Always", "kind": "allow_always"},
-                    {"optionId": "allow-once", "name": "Allow", "kind": "allow_once"}]}), cwd=str(tmp_path))
+    response = _dispatch(
+        client,
+        _request(
+            "session/request_permission",
+            {
+                "sessionId": "s1",
+                "toolCall": {
+                    "toolCallId": "tc1",
+                    "title": "rm -rf /",
+                    "kind": "execute",
+                },
+                "options": [
+                    {
+                        "optionId": "allow-always",
+                        "name": "Always",
+                        "kind": "allow_always",
+                    },
+                    {"optionId": "allow-once", "name": "Allow", "kind": "allow_once"},
+                ],
+            },
+        ),
+        cwd=str(tmp_path),
+    )
     assert response["id"] == 7
     assert response["result"]["outcome"] == {"outcome": "cancelled"}, response
 
 
-@pytest.mark.parametrize("redact_toggle", [True, False], ids=["redaction-on", "redaction-off"])
+@pytest.mark.parametrize(
+    "redact_toggle", [True, False], ids=["redaction-on", "redaction-off"]
+)
 def test_read_text_file_redacts_sensitive_content(client, tmp_path, redact_toggle):
     secret_file = tmp_path / "config.env"
-    secret_file.write_text("OPENAI_API_KEY=sk-proj-abc123def456ghi789jkl012", encoding="utf-8")
+    secret_file.write_text(
+        "OPENAI_API_KEY=sk-proj-abc123def456ghi789jkl012", encoding="utf-8"
+    )
 
     # agent.redact snapshots HERMES_REDACT_SECRETS at import time into _REDACT_ENABLED, so patching
     # os.environ is a no-op; flip the constant. The fs bridge hands file text to a third-party agent
     # process, so it redacts whatever the user's display toggle says.
     with patch("agent.redact._REDACT_ENABLED", redact_toggle):
-        response = _dispatch(client, _request("fs/read_text_file", {"path": str(secret_file)}), cwd=str(tmp_path))
+        response = _dispatch(
+            client,
+            _request("fs/read_text_file", {"path": str(secret_file)}),
+            cwd=str(tmp_path),
+        )
 
     content = (response.get("result") or {}).get("content") or ""
     assert "abc123def456" not in content
@@ -103,8 +137,14 @@ def test_read_text_file_outside_the_session_cwd_is_refused(client, tmp_path):
     escape = workspace / ".." / "outside.txt"
 
     for path in (outside, escape):
-        response = _dispatch(client, _request("fs/read_text_file", {"path": str(path)}), cwd=str(workspace))
-        assert "error" in response and "OUTSIDE-SECRET" not in json.dumps(response), response
+        response = _dispatch(
+            client,
+            _request("fs/read_text_file", {"path": str(path)}),
+            cwd=str(workspace),
+        )
+        assert "error" in response and "OUTSIDE-SECRET" not in json.dumps(response), (
+            response
+        )
 
 
 def test_read_text_file_through_a_symlink_out_of_the_cwd_is_refused(client, tmp_path):
@@ -117,13 +157,19 @@ def test_read_text_file_through_a_symlink_out_of_the_cwd_is_refused(client, tmp_
     except OSError:
         pytest.skip("symlinks unavailable on this host")
 
-    response = _dispatch(client, _request("fs/read_text_file", {"path": str(link)}), cwd=str(workspace))
-    assert "error" in response and "OUTSIDE-SECRET" not in json.dumps(response), response
+    response = _dispatch(
+        client, _request("fs/read_text_file", {"path": str(link)}), cwd=str(workspace)
+    )
+    assert "error" in response and "OUTSIDE-SECRET" not in json.dumps(response), (
+        response
+    )
 
 
 def test_relative_fs_paths_are_refused(client, tmp_path):
     (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
-    response = _dispatch(client, _request("fs/read_text_file", {"path": "note.txt"}), cwd=str(tmp_path))
+    response = _dispatch(
+        client, _request("fs/read_text_file", {"path": "note.txt"}), cwd=str(tmp_path)
+    )
     assert "error" in response, response
 
 
@@ -140,7 +186,11 @@ def test_fs_read_text_file_decodes_as_utf8_under_non_utf8_locale(client, tmp_pat
         return original_read_text(self, encoding=encoding, errors=errors, **kwargs)
 
     with patch.object(Path, "read_text", strict_read_text):
-        response = _dispatch(client, _request("fs/read_text_file", {"path": str(target)}), cwd=str(tmp_path))
+        response = _dispatch(
+            client,
+            _request("fs/read_text_file", {"path": str(target)}),
+            cwd=str(tmp_path),
+        )
 
     assert "error" not in response, response
     content = (response.get("result") or {}).get("content") or ""
@@ -151,8 +201,11 @@ def test_write_text_file_outside_the_session_cwd_is_refused(client, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside.txt"
-    response = _dispatch(client, _request("fs/write_text_file", {"path": str(outside), "content": "pwned"}),
-                         cwd=str(workspace))
+    response = _dispatch(
+        client,
+        _request("fs/write_text_file", {"path": str(outside), "content": "pwned"}),
+        cwd=str(workspace),
+    )
     assert "error" in response, response
     assert not outside.exists()
 
@@ -162,9 +215,17 @@ def test_write_text_file_respects_safe_root(client, tmp_path):
     safe_root.mkdir()
     outside = tmp_path / "outside.txt"
 
-    with patch.dict(os.environ, {"HERMES_WRITE_SAFE_ROOT": str(safe_root)}, clear=False):
-        response = _dispatch(client, _request("fs/write_text_file", {"path": str(outside), "content": "should-not-write"}),
-                             cwd=str(tmp_path))
+    with patch.dict(
+        os.environ, {"HERMES_WRITE_SAFE_ROOT": str(safe_root)}, clear=False
+    ):
+        response = _dispatch(
+            client,
+            _request(
+                "fs/write_text_file",
+                {"path": str(outside), "content": "should-not-write"},
+            ),
+            cwd=str(tmp_path),
+        )
 
     assert "error" in response
     assert "HERMES_WRITE_SAFE_ROOT" in str(response["error"])
@@ -173,14 +234,19 @@ def test_write_text_file_respects_safe_root(client, tmp_path):
 
 def test_write_text_file_inside_the_cwd_lands(client, tmp_path):
     target = tmp_path / "sub" / "out.txt"
-    response = _dispatch(client, _request("fs/write_text_file", {"path": str(target), "content": "written"}),
-                         cwd=str(tmp_path))
+    response = _dispatch(
+        client,
+        _request("fs/write_text_file", {"path": str(target), "content": "written"}),
+        cwd=str(tmp_path),
+    )
     assert "error" not in response, response
     assert target.read_text(encoding="utf-8") == "written"
 
 
 def test_unknown_agent_request_gets_method_not_found(client, tmp_path):
-    response = _dispatch(client, _request("terminal/create", {"command": "id"}), cwd=str(tmp_path))
+    response = _dispatch(
+        client, _request("terminal/create", {"command": "id"}), cwd=str(tmp_path)
+    )
     assert response["error"]["code"] == -32601, response
 
 
@@ -217,7 +283,9 @@ for line in sys.stdin:
 def _recording_client(tmp_path, spawned):
     server = tmp_path / "fake_acp_server.py"
     server.write_text(_FAKE_ACP_SERVER, encoding="utf-8")
-    client = _AcmeClient(command=sys.executable, args=[str(server)], acp_cwd=str(tmp_path))
+    client = _AcmeClient(
+        command=sys.executable, args=[str(server)], acp_cwd=str(tmp_path)
+    )
     real_spawn = client._spawn
 
     def record_spawn():
@@ -244,12 +312,18 @@ def test_overlapping_sessions_reap_their_own_process(tmp_path):
 
         leaked = proc_a.poll() is None
         killed = proc_b.poll() is not None
-        assert not leaked and not killed, f"session A teardown: own child leaked={leaked}, sibling process killed={killed}"
-        assert client.is_closed is False, "a shared client is not closed while a sibling session is live"
+        assert not leaked and not killed, (
+            f"session A teardown: own child leaked={leaked}, sibling process killed={killed}"
+        )
+        assert client.is_closed is False, (
+            "a shared client is not closed while a sibling session is live"
+        )
 
         session_b.__exit__(None, None, None)
         assert proc_b.poll() is not None
-        assert client.is_closed is True, "the last session to drain still flips is_closed for single-session callers"
+        assert client.is_closed is True, (
+            "the last session to drain still flips is_closed for single-session callers"
+        )
     finally:
         for proc in spawned:
             if proc.poll() is None:
@@ -266,7 +340,9 @@ def test_close_terminates_every_live_session_process(tmp_path):
     session_b.__enter__()
     try:
         client.close()
-        assert all(proc.poll() is not None for proc in spawned), [proc.poll() for proc in spawned]
+        assert all(proc.poll() is not None for proc in spawned), [
+            proc.poll() for proc in spawned
+        ]
         assert client.is_closed is True
     finally:
         for proc in spawned:
@@ -278,7 +354,9 @@ def test_completed_prompt_leaves_no_agent_process(tmp_path):
     spawned = []
     client = _recording_client(tmp_path, spawned)
 
-    completion = client.chat.completions.create(model="acme-acp", messages=[{"role": "user", "content": "hi"}])
+    completion = client.chat.completions.create(
+        model="acme-acp", messages=[{"role": "user", "content": "hi"}]
+    )
 
     assert completion.choices[0].message.content == "done"
     assert len(spawned) == 1 and spawned[0].poll() is not None
@@ -300,7 +378,9 @@ def test_cli_death_is_reported_as_a_crash_not_a_timeout(tmp_path):
     raised TimeoutError there, which the agent loop retries on a different (larger) budget."""
     server = tmp_path / "crashing_acp.py"
     server.write_text(_CRASHING_ACP_CLI, encoding="utf-8")
-    client = _AcmeClient(command=sys.executable, args=[str(server)], acp_cwd=str(tmp_path))
+    client = _AcmeClient(
+        command=sys.executable, args=[str(server)], acp_cwd=str(tmp_path)
+    )
     with pytest.raises(RuntimeError, match="exited early: fatal: agent segfaulted"):
         with client._session(30):
             pass
@@ -321,7 +401,9 @@ def test_cli_that_stops_reading_is_reported_with_its_exit_text(tmp_path):
     server = tmp_path / "stdin_closing_acp.py"
     server.write_text(_STDIN_CLOSING_ACP_CLI, encoding="utf-8")
     closed = tmp_path / "stdin-closed"
-    client = _AcmeClient(command=sys.executable, args=[str(server), str(closed)], acp_cwd=str(tmp_path))
+    client = _AcmeClient(
+        command=sys.executable, args=[str(server), str(closed)], acp_cwd=str(tmp_path)
+    )
     real_spawn = client._spawn
 
     def spawn_then_wait_for_the_close():
@@ -333,6 +415,7 @@ def test_cli_that_stops_reading_is_reported_with_its_exit_text(tmp_path):
     with pytest.raises(RuntimeError, match="exited early: fatal: agent cannot start"):
         with client._session(30):
             pass
+
 
 _DEAF_ACP_CLI = """import os, sys, time
 os.close(0)  # stops reading but keeps running
@@ -347,7 +430,9 @@ def test_cli_that_stops_reading_but_keeps_running_fails_fast(tmp_path):
     server = tmp_path / "deaf_acp.py"
     server.write_text(_DEAF_ACP_CLI, encoding="utf-8")
     closed = tmp_path / "stdin-closed"
-    client = _AcmeClient(command=sys.executable, args=[str(server), str(closed)], acp_cwd=str(tmp_path))
+    client = _AcmeClient(
+        command=sys.executable, args=[str(server), str(closed)], acp_cwd=str(tmp_path)
+    )
     real_spawn = client._spawn
 
     def spawn_then_wait_for_the_close():
@@ -382,7 +467,9 @@ print(json.dumps({{"jsonrpc": "2.0", "id": session["id"], "result": {{"sessionId
 """,
         encoding="utf-8",
     )
-    client = _AcmeClient(command=sys.executable, args=[str(server)], acp_cwd=str(tmp_path))
+    client = _AcmeClient(
+        command=sys.executable, args=[str(server)], acp_cwd=str(tmp_path)
+    )
 
     assert client.list_models(timeout_seconds=30) == ["model-sol"]
 
@@ -400,7 +487,10 @@ def test_stream_true_preserves_tool_call_deltas(client):
 
     with patch.object(client, "_run_prompt", return_value=(tool_response, "")):
         stream = client._create_chat_completion(
-            model="acme-acp", messages=[{"role": "user", "content": "read README.md"}], stream=True)
+            model="acme-acp",
+            messages=[{"role": "user", "content": "read README.md"}],
+            stream=True,
+        )
 
     chunks = list(stream)
     delta = chunks[0].choices[0].delta
@@ -408,7 +498,11 @@ def test_stream_true_preserves_tool_call_deltas(client):
     assert chunks[0].choices[0].finish_reason == "tool_calls"
     assert len(delta.tool_calls) == 1
     tool_delta = delta.tool_calls[0]
-    assert (tool_delta.index, tool_delta.id, tool_delta.function.name) == (0, "call_read", "read_file")
+    assert (tool_delta.index, tool_delta.id, tool_delta.function.name) == (
+        0,
+        "call_read",
+        "read_file",
+    )
     assert json.loads(tool_delta.function.arguments) == {"path": "README.md"}
     assert chunks[1].choices == []
 
@@ -424,7 +518,9 @@ def test_run_prompt_receives_picker_model(tmp_path):
         return "ok", ""
 
     with patch.object(_AcmeClient, "_run_prompt", side_effect=fake_run_prompt):
-        client._create_chat_completion(model="model-terra", messages=[{"role": "user", "content": "hi"}])
+        client._create_chat_completion(
+            model="model-terra", messages=[{"role": "user", "content": "hi"}]
+        )
     assert seen["model"] == "model-terra"
 
 
@@ -432,18 +528,26 @@ def test_run_prompt_receives_picker_model(tmp_path):
 
 
 def _launch_client(tmp_path):
-    return _AcmeClient(api_key="acme-acp", base_url="acp://acme", acp_command="acme-agent",
-                       acp_args=["--acp", "--stdio"], acp_cwd=str(tmp_path))
+    return _AcmeClient(
+        api_key="acme-acp",
+        base_url="acp://acme",
+        acp_command="acme-agent",
+        acp_args=["--acp", "--stdio"],
+        acp_cwd=str(tmp_path),
+    )
 
 
 def _capture_popen(captured):
     def _fake(cmd, **kwargs):
         captured["cmd"], captured["kwargs"] = cmd, kwargs
         raise FileNotFoundError("acme-agent not found")
+
     return _fake
 
 
-def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch, tmp_path):
+def test_run_prompt_preserves_real_home_when_profile_home_available(
+    monkeypatch, tmp_path
+):
     hermes_home = tmp_path / "hermes"
     (hermes_home / "home").mkdir(parents=True)
     real_home = tmp_path / "real-home"
@@ -459,9 +563,13 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
     captured = {}
 
     # The --acp support probe runs subprocess.run before Popen; inconclusive so no host CLI interferes.
-    with patch("agent.acp_client.subprocess.run", side_effect=FileNotFoundError), \
-            patch("agent.acp_client.subprocess.Popen", side_effect=_capture_popen(captured)), \
-            pytest.raises(RuntimeError, match="Could not start Acme ACP command"):
+    with (
+        patch("agent.acp_client.subprocess.run", side_effect=FileNotFoundError),
+        patch(
+            "agent.acp_client.subprocess.Popen", side_effect=_capture_popen(captured)
+        ),
+        pytest.raises(RuntimeError, match="Could not start Acme ACP command"),
+    ):
         _launch_client(tmp_path)._run_prompt("hello", timeout_seconds=1)
 
     assert captured["kwargs"]["env"]["HOME"] == str(real_home)
@@ -471,11 +579,42 @@ def test_run_prompt_preserves_real_home_when_profile_home_available(monkeypatch,
 def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
     monkeypatch.delenv("HOME", raising=False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    # Hermeticity (fork): with every env rung deleted, the product's fallback
+    # ladder correctly drops to the passwd database — on a runner host that is
+    # the REAL account home, and the fork's passwd-anchored tripwire
+    # (tests/conftest.py hardening: runner hosts double as production gateway
+    # machines) rightly refuses the resulting ~/.hermes probes. Pin the pwd
+    # rung to this test's sandbox so the "parent env is clean" contract is
+    # exercised hermetically instead of against the machine's real state.
+    import pwd
+
+    class _SandboxPwd:
+        def getpwuid(self, _uid):
+            return pwd.struct_passwd(
+                (
+                    os.getlogin() if hasattr(os, "getlogin") else "agent",
+                    "x",
+                    os.getuid(),
+                    os.getgid(),
+                    "",
+                    str(tmp_path),
+                    "/bin/sh",
+                )
+            )
+
+    monkeypatch.setattr(pwd, "getpwuid", _SandboxPwd().getpwuid)
+    monkeypatch.setenv(
+        "HOME", str(tmp_path)
+    )  # expanduser('~') rung follows the sandbox too
     captured = {}
 
-    with patch("agent.acp_client.subprocess.run", side_effect=FileNotFoundError), \
-            patch("agent.acp_client.subprocess.Popen", side_effect=_capture_popen(captured)), \
-            pytest.raises(RuntimeError, match="Could not start Acme ACP command"):
+    with (
+        patch("agent.acp_client.subprocess.run", side_effect=FileNotFoundError),
+        patch(
+            "agent.acp_client.subprocess.Popen", side_effect=_capture_popen(captured)
+        ),
+        pytest.raises(RuntimeError, match="Could not start Acme ACP command"),
+    ):
         _launch_client(tmp_path)._run_prompt("hello", timeout_seconds=1)
 
     assert captured["kwargs"]["env"]["HOME"]
@@ -485,25 +624,43 @@ def test_run_prompt_passes_home_when_parent_env_is_clean(monkeypatch, tmp_path):
 
 
 def _completed(returncode=0, stdout=""):
-    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=""
+    )
 
 
 def test_probe_true_when_help_advertises_acp():
-    with patch("agent.acp_client.subprocess.run", return_value=_completed(stdout="Usage: acme-agent [--acp] [--stdio]")):
+    with patch(
+        "agent.acp_client.subprocess.run",
+        return_value=_completed(stdout="Usage: acme-agent [--acp] [--stdio]"),
+    ):
         assert _acp_supported("acme-agent", ["--acp", "--stdio"]) is True
 
 
 def test_probe_false_when_help_lacks_acp_and_run_prompt_fast_fails(tmp_path):
-    with patch("agent.acp_client.subprocess.run", return_value=_completed(stdout="Usage: other [--print] [--model]")), \
-            pytest.raises(RuntimeError, match="ACP transport not supported"):
+    with (
+        patch(
+            "agent.acp_client.subprocess.run",
+            return_value=_completed(stdout="Usage: other [--print] [--model]"),
+        ),
+        pytest.raises(RuntimeError, match="ACP transport not supported"),
+    ):
         _launch_client(tmp_path)._run_prompt("hello", timeout_seconds=1)
 
 
 def test_probe_inconclusive_falls_through_to_spawn_error(tmp_path):
     """Missing binary: the probe must NOT mask the established spawn error."""
-    with patch("agent.acp_client.subprocess.run", side_effect=FileNotFoundError("acme-agent not found")), \
-            patch("agent.acp_client.subprocess.Popen", side_effect=FileNotFoundError("acme-agent not found")), \
-            pytest.raises(RuntimeError, match="Could not start Acme ACP command"):
+    with (
+        patch(
+            "agent.acp_client.subprocess.run",
+            side_effect=FileNotFoundError("acme-agent not found"),
+        ),
+        patch(
+            "agent.acp_client.subprocess.Popen",
+            side_effect=FileNotFoundError("acme-agent not found"),
+        ),
+        pytest.raises(RuntimeError, match="Could not start Acme ACP command"),
+    ):
         _launch_client(tmp_path)._run_prompt("hello", timeout_seconds=1)
 
 
@@ -520,10 +677,26 @@ def test_probe_skipped_for_custom_args_without_acp():
 
 
 def _session_with_config_options():
-    return {"sessionId": "s1", "configOptions": [{
-        "id": "model", "category": "model", "type": "select", "currentValue": "auto",
-        "options": [{"value": "auto", "name": "Auto"}, {"value": "model-terra", "name": "Terra"},
-                    {"value": "model-fable", "name": "Fable", "_meta": {"acmePolicy": "off"}}]}]}
+    return {
+        "sessionId": "s1",
+        "configOptions": [
+            {
+                "id": "model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "auto",
+                "options": [
+                    {"value": "auto", "name": "Auto"},
+                    {"value": "model-terra", "name": "Terra"},
+                    {
+                        "value": "model-fable",
+                        "name": "Fable",
+                        "_meta": {"acmePolicy": "off"},
+                    },
+                ],
+            }
+        ],
+    }
 
 
 def _acme_disabled(entry):
@@ -532,22 +705,44 @@ def _acme_disabled(entry):
 
 def test_model_selection_prefers_stable_config_option():
     assert _model_selection_request(_session_with_config_options(), "model-terra") == (
-        "session/set_config_option", {"sessionId": "s1", "configId": "model", "value": "model-terra"})
+        "session/set_config_option",
+        {"sessionId": "s1", "configId": "model", "value": "model-terra"},
+    )
 
 
 def test_model_selection_rejects_disabled_config_option():
-    assert _model_selection_request(_session_with_config_options(), "model-fable", disabled=_acme_disabled) is None
+    assert (
+        _model_selection_request(
+            _session_with_config_options(), "model-fable", disabled=_acme_disabled
+        )
+        is None
+    )
 
 
 def test_model_selection_rejects_unknown_config_option():
-    assert _model_selection_request(_session_with_config_options(), "not-served-here") is None
+    assert (
+        _model_selection_request(_session_with_config_options(), "not-served-here")
+        is None
+    )
 
 
 def test_model_selection_falls_back_to_legacy_extension():
-    legacy_session = {"sessionId": "s1", "models": {"availableModels": [{"modelId": "auto"}, {"modelId": "model-terra"}]}}
+    legacy_session = {
+        "sessionId": "s1",
+        "models": {
+            "availableModels": [{"modelId": "auto"}, {"modelId": "model-terra"}]
+        },
+    }
     assert _model_selection_request(legacy_session, "model-terra") == (
-        "session/set_model", {"sessionId": "s1", "modelId": "model-terra"})
+        "session/set_model",
+        {"sessionId": "s1", "modelId": "model-terra"},
+    )
 
 
 def test_model_selection_skips_provider_placeholder_slug():
-    assert _model_selection_request(_session_with_config_options(), "acme-acp", placeholder="acme-acp") is None
+    assert (
+        _model_selection_request(
+            _session_with_config_options(), "acme-acp", placeholder="acme-acp"
+        )
+        is None
+    )
