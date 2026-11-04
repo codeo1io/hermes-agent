@@ -40,6 +40,12 @@ def test_without_drops_a_recorded_extra_from_every_later_selection(synced, tmp_p
     # The update's sync carries recorded extras forward; the dropped one stays out, others stay.
     assert _next_selection(["all", "fal", "matrix"]) == ["all", "fal"]
     # A data root without facts re-scans the main-era venv, which is never deleted.
+    # The root declares `all` (real-checkout vocabulary, fork #513): a manifest-less
+    # root must not have the extra fabricated for it.
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'root'\nversion = '0'\n"
+        "[project.optional-dependencies]\nall = []\nfal = []\nmatrix = []\n"
+    )
     site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
     for anchor in (*extras._anchors("matrix"), "fal_client"):
         (site / anchor).mkdir(parents=True)
