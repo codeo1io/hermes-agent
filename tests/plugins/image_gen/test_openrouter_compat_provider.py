@@ -808,9 +808,18 @@ class TestImageApiSurface:
     def test_catalog_models_are_offered_only_by_openrouter(self):
         from plugins.image_gen.openrouter import _IMAGE_API_MODELS, _build_providers
 
+        def fake_get(url, **_kwargs):
+            entries = (
+                [{"id": model_id, "architecture": {"output_modalities": ["image"]}}
+                 for model_id in _IMAGE_API_MODELS]
+                if url.endswith("/images/models") else []
+            )
+            return _mock_models_response(entries)
+
         by_name = {p.name: p for p in _build_providers()}
-        openrouter_ids = {m["id"] for m in by_name["openrouter"].list_models()}
-        nous_ids = {m["id"] for m in by_name["nous"].list_models()}
+        with patch(_RUNTIME, return_value=_runtime_ok()), patch("requests.get", side_effect=fake_get):
+            openrouter_ids = {m["id"] for m in by_name["openrouter"].list_models()}
+            nous_ids = {m["id"] for m in by_name["nous"].list_models()}
         assert set(_IMAGE_API_MODELS) <= openrouter_ids
         assert not (set(_IMAGE_API_MODELS) & nous_ids)
 
