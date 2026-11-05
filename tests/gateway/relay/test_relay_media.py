@@ -20,6 +20,8 @@ from typing import Optional
 
 import pytest
 
+from unittest.mock import patch
+
 from gateway.config import PlatformConfig
 from gateway.relay.adapter import RelayAdapter
 from gateway.relay.descriptor import CONTRACT_VERSION, CapabilityDescriptor
@@ -64,6 +66,10 @@ class FakeMediaClient:
     async def upload(self, file_path, *, mime=None, filename=None):
         self.uploads.append((str(file_path), filename))
         return self.upload_result
+
+    async def upload_with_error(self, file_path, *, mime=None, filename=None):
+        ref = await self.upload(file_path, mime=mime, filename=filename)
+        return ref, "" if ref else "fake upload failure"
 
     async def download(self, url, *, suggested_name=None):
         self.downloads.append(url)
@@ -132,6 +138,46 @@ async def test_op_gating_falls_back_when_not_advertised(tmp_path: Path):
     assert "https://x.io/a.png" in stub.sent[-1]["content"]
 
 
+@pytest.mark.asyncio
+async def test_legacy_connector_local_file_keeps_its_fallback_receipt(tmp_path: Path):
+    """No send_media lane at all: nothing was attempted, so today's fallback receipt stands."""
+    adapter, stub, fake = _adapter(supported_ops=("send", "edit", "typing", "get_chat_info"))
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF")
+    result = await adapter.send_document("chat1", str(f))
+    assert result.success is True and fake.uploads == []
+    assert [a["op"] for a in stub.sent] == ["send"]
+
+
+@pytest.mark.asyncio
+async def test_connector_decline_after_upload_is_a_failed_send_with_one_notice(tmp_path: Path):
+    """The file uploaded but the connector declined the op (size cap, platform error): the
+    attachment was still dropped, so the send fails while the notice keeps today's UX."""
+    adapter, stub, fake = _adapter()
+    stub.next_media_result = {"success": False, "error": "file too large for the platform"}
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF")
+    result = await adapter.send_document("chat1", str(f), caption="Q3")
+    assert result.success is False and fake.uploads == [(str(f), None)]
+    assert "connector did not deliver" in result.error
+    assert result.raw_response["failure_notice_sent"] is True
+    assert [a["op"] for a in stub.sent] == ["send_media", "send"]
+    assert "Q3" in stub.sent[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_lost_ack_on_send_media_is_not_reported_as_an_undelivered_attachment(tmp_path: Path):
+    """Frame sent, ack lost: the file may be on screen. No "couldn't send" fallback, and no
+    failure the send_message tool or cron would read as "not delivered" and re-send."""
+    adapter, stub, _fake = _adapter()
+    stub.next_media_result = {"success": False, "error": "relay outbound timed out", "ambiguous": True}
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF")
+    result = await adapter.send_document("chat1", str(f), caption="Q3")
+    assert result.success is True and result.raw_response["ambiguous"] is True
+    assert [a["op"] for a in stub.sent] == ["send_media"]
+
+
 # ── inbound localization ─────────────────────────────────────────────────
 
 
@@ -178,7 +224,8 @@ async def test_client_upload_rejects_oversize_and_missing(tmp_path: Path):
     assert await c.upload(str(empty)) is None
 
 @pytest.mark.asyncio
-async def test_download_sends_a_user_agent_on_every_request():
+@patch("gateway.relay.media.is_safe_url", return_value=True)
+async def test_download_sends_a_user_agent_on_every_request(_safe):
     """Discord's CDN 403s the default ``Python-urllib/x.y`` User-Agent.
 
     Live-verified on staging 2026-08-26: every Discord CDN pass-through
@@ -244,7 +291,8 @@ def test_is_relay_media_url_distinguishes_rehost_from_public():
 
 
 @pytest.mark.asyncio
-async def test_download_routes_auth_decision_through_is_relay_media_url(monkeypatch):
+@patch("gateway.relay.media.is_safe_url", return_value=True)
+async def test_download_routes_auth_decision_through_is_relay_media_url(_safe, monkeypatch):
     """download() must consult is_relay_media_url (so subclasses/plugins that
     override the classifier change auth behaviour): a disabled client refuses
     re-host refs but still fetches public URLs without a bearer."""

@@ -305,6 +305,7 @@ def acquire_opencode_server(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # detached-spawn: ok -- shared opencode serve daemon, explicitly terminated at close
                 start_new_session=True,
             )
             handle = _ServerHandle(

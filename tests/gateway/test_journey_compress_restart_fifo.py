@@ -87,7 +87,12 @@ def test_followers_survive_compression_and_restart_in_order_exactly_once(tmp_pat
         'model': {'provider': 'custom', 'default': 'original', 'base_url': url, 'context_length': 64000},
         'auxiliary': {'title_generation': {'enabled': False},
                       'compression': {'provider': 'custom', 'model': 'summary', 'base_url': url}},
-        'compression': {'protect_first_n': 1, 'protect_last_n': 2, 'threshold_tokens': 12000,
+        # threshold_tokens sits between the turn-5 (PRESSURE_4) and turn-4 (PRESSURE_3) wire estimates so
+# the loopback overflow and the threshold trigger land on the same turn on every prompt surface
+# (44e977 proved the trigger is prompt-size sensitive; 12000 raced a knife edge at 12009 estimated).
+# After the v0.22.6 lean-tail budget (6000) a turn-4 trigger would keep PRESSURE_1 verbatim in the tail;
+# at turn 5 the tail starts at PRESSURE_2 and PRESSURE_1 rides the summary, which the journey asserts.
+'compression': {'protect_first_n': 1, 'protect_last_n': 2, 'threshold_tokens': 13000,
                         'threshold': 0.5, 'in_place': False},
         'platform_toolsets': {'cli': []}}))
     (home / 'models_dev_cache.json').write_text(json.dumps({'custom': {'id': 'custom', 'models': {
