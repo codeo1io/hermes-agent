@@ -20,26 +20,52 @@ class CronExecutionUnknown(RuntimeError):
 RECOVERY_SCAN_LIMIT = 64
 RECOVERY_AGE_LIMIT_SECONDS = 24 * 3600.0
 
-# A read-only poll of an already admitted cron session may briefly hit the
-# gateway's SQLite writer. Retry the SAME identity; never retry submission.
+# A same-identity poll or cancel of an already admitted cron session may briefly
+# hit the gateway's SQLite writer. Retry the SAME identity; never retry submission.
 # Exhaustion still raises CronExecutionUnknown through the caller, preserving
 # the no-replay fence. The finite delays add at most 7.75s of backoff.
 _LOCK_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0)
 
 
 async def _read_owner_with_lock_retry(call, op, params):
-    if op not in {"status", "recover"}:
+    if op not in {"status", "recover", "cancel"}:
         return await call(op, params)
     for delay in (*_LOCK_RETRY_DELAYS, None):
         try:
             return await call(op, params)
         except Exception as exc:
-            message = str(exc).strip().lower()
-            if delay is None or not (
-                message == "database is locked" or message.endswith(": database is locked")
-            ):
+            if delay is None or not _is_transient_sqlite_lock(exc):
                 raise
             await asyncio.sleep(delay)
+
+
+def _is_transient_sqlite_lock(exc: BaseException) -> bool:
+    """Every shape a transient SQLite write contention takes on its way here.
+
+    One predicate for all firer lanes, so they cannot disagree again (the
+    2026-11 split: a string-only matcher in the owner poll vs an errorcode
+    matcher at the progress stamp). Shapes, in arrival order:
+
+    * a raw in-process ``sqlite3.OperationalError`` (``database is locked``,
+      ``database table is locked``) or any error carrying
+      ``sqlite_errorcode`` ``SQLITE_BUSY``/``SQLITE_LOCKED``;
+    * the transport form: the gateway wraps a busy writer as JSON-RPC 5001
+      ``storage_unavailable`` (``gateway/session_controls.py``), which
+      ``gateway_client`` re-wraps as ``GatewayRPCError`` — matched by message
+      or numeric code, whichever survives wrapping.
+
+    Deliberately NOT transient: permission/EPERM-attach shapes
+    (``permission_denied``, ``unable to open database file``, readonly
+    database) — retrying those can never heal, and the bounded delays above
+    keep any mis-mapped shape to <=7.75s before it raises.
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return True
+    message = str(exc).strip().lower()
+    if "locked" in message or "busy" in message or "storage_unavailable" in message:
+        return True
+    return getattr(exc, "code", None) == 5001
 
 
 def _expiry_state(journal, record):
@@ -209,7 +235,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
         delay, progress = .1, None
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                await call('cancel', receipt)
+                await _read_owner_with_lock_retry(call, 'cancel', receipt)
             state = await _read_owner_with_lock_retry(call, 'status', receipt)
             if state.get('progress_at') not in (None, progress):
                 # The owner's agent is still working: refresh OUR ledger row (the owner's stamp is
@@ -222,9 +248,7 @@ def run_canonical_job(job, *, extra_prompt=None, cancel_event=None, execution_id
                 try:
                     await asyncio.to_thread(touch_execution_progress, request_id)
                 except sqlite3.OperationalError as exc:
-                    if not (getattr(exc, 'sqlite_errorcode', None) in {
-                            sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
-                            or 'locked' in str(exc).lower() or 'busy' in str(exc).lower()):
+                    if not _is_transient_sqlite_lock(exc):
                         raise
                 else:
                     # Do not suppress a retry when this exact progress stamp was locked.
@@ -301,9 +325,13 @@ def reconcile_pending(*, allow_connect=True):
                     continue
                 async def observe():
                     if owner is not None:
-                        return await operation(owner[0], 'recover', params)
+                        async def call(op, data):
+                            return await operation(owner[0], op, data)
+                        return await _read_owner_with_lock_retry(call, 'recover', params)
                     async with connect_gateway() as client:
-                        return await client.rpc('cron.recover', **params)
+                        async def call(op, data):
+                            return await client.rpc('cron.' + op, **data)
+                        return await _read_owner_with_lock_retry(call, 'recover', params)
                 if owner is not None:
                     state = asyncio.run_coroutine_threadsafe(observe(), owner[1]).result(timeout=20)
                 else:
