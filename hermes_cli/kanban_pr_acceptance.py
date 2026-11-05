@@ -18,6 +18,10 @@ from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
+# GitHub's plan-gate refusal body for features a repository plan cannot configure
+# (rulesets/branch protection on a private repo without Pro): an upsell, not a
+# denial of this login's identity (#149143).
+_PLAN_GATE_BODY = re.compile(r"upgrade to github", re.IGNORECASE)
 
 
 def validate_contract(value: str | None) -> str:
@@ -45,6 +49,10 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         # code + endpoint, never gh's stderr (credentials/host details).
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
+            if denied[1] == "403" and _PLAN_GATE_BODY.search(exc.stderr or ""):
+                # A plan-gated feature the repository cannot configure; credentials
+                # cannot fix it (#149143). Distinct class so callers never map it to auth.
+                raise _GatePlanLimitError(f"HTTP 403 (plan-gated) on {endpoint.split('?')[0]}") from None
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
         if exc.returncode == 4:  # gh's authentication-required exit: this profile has no login
             raise _GateAuthError(f"gh has no login for {endpoint.split('?')[0]}") from None
@@ -59,6 +67,12 @@ class _GateAuthError(RuntimeError):
     """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
     this profile's login cannot see the repo — an identity problem to fix, not
     an infrastructure blip to retry."""
+
+
+class _GatePlanLimitError(RuntimeError):
+    """gh was refused at HTTP 403 with a plan-upgrade body: the repository's plan
+    (a private repo without Pro) cannot configure the feature (#149143) — a
+    repository limit, not an identity problem; fixing credentials cannot help."""
 
 
 def _gh_env(profile_home: str | None) -> dict[str, str] | None:
@@ -133,13 +147,32 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
+        try:
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                         paginate=True, profile_home=profile_home)
+        except _GatePlanLimitError:
+            # The repository plan cannot configure rulesets (a private repo without
+            # Pro 403s the rules read; GraphQL already answered null for the
+            # protection rule) — required checks are unavailable, not
+            # mis-permissioned (#149143).
+            rules = []
         for page in rules:
             for rule in page:
                 if rule["type"] == "required_status_checks":
                     required.update((r["context"], r.get("integration_id"))
                                     for r in rule["parameters"]["required_status_checks"])
+        if not required:
+            # No configurable required checks (plan-gated, or simply unconfigured):
+            # enforce every check the exact head carries — skipped lanes excluded so
+            # advisory workflows cannot block forever (#149143). Stricter than a
+            # hand-picked subset for repos that cannot pin a required set.
+            head_pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
+                              paginate=True, profile_home=profile_home)
+            required = {(r["name"], (r.get("app") or {}).get("id"))
+                        for page in head_pages for r in page["check_runs"]
+                        if r.get("name") and r.get("conclusion") != "skipped"}
+            if required:
+                receipt["derived_from"] = "head_check_runs"
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
@@ -183,6 +216,12 @@ def collect_acceptance(contract: str, published_pr: str | None,
         receipt.update(classification="auth",
                        detail=f"GitHub refused the acceptance read ({exc}) as {login}; "
                               "fix that profile's GitHub credentials/access to the repository, then retry completion.")
+        return receipt
+    except _GatePlanLimitError as exc:
+        receipt.update(classification="plan_limit",
+                       detail=f"GitHub plan-limited the acceptance read ({exc}); this repository's "
+                              "plan cannot configure the feature. Upgrade the plan or make the "
+                              "repository public, or move the card to a local-only contract.")
         return receipt
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.

@@ -19,11 +19,27 @@ def github(tmp_path, monkeypatch):
         def do_GET(self):
             state["requests"].append(self.path)
             sha = state["head"]
+            # GitHub's plan-gate refusal: rulesets/branch protection 403 with an
+            # upsell body on a private repo without Pro (#149143), and the same
+            # body can surface on any evidence read when the plan gates it.
+            plan_gate = (
+                ("/rules/branches/" in self.path and state.get("plan_gated"))
+                or ("/check-runs" in self.path and state.get("gate_check_runs"))
+            )
+            if plan_gate:
+                body = json.dumps({"message": "Upgrade to GitHub Pro or make this "
+                                    "repository public to enable this feature."}).encode()
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path == "/graphql":
+                rule = (None if state.get("plan_gated")
+                        else {"requiredStatusChecks": [
+                            {"context": "required", "app": {"databaseId": 1}}]})
                 value = {"data": {"repository": {"pullRequest": {
                     "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
-                    "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
-                        {"context": "required", "app": {"databaseId": 1}}]}}}}}}
+                    "baseRef": {"branchProtectionRule": rule}}}}}
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
@@ -60,9 +76,13 @@ def github(tmp_path, monkeypatch):
     shim = tmp_path / "bin"
     shim.mkdir()
     gh = shim / "gh"
-    gh.write_text(f"#!{sys.executable}\nimport sys,urllib.request\n"
+    gh.write_text(f"#!{sys.executable}\nimport sys,urllib.request,urllib.error\n"
                   f"u='http://127.0.0.1:{server.server_port}/'+sys.argv[2]\n"
-                  "print(urllib.request.urlopen(u).read().decode())\n")
+                  "try:\n"
+                  "    print(urllib.request.urlopen(u).read().decode())\n"
+                  "except urllib.error.HTTPError as e:\n"
+                  "    sys.stderr.write(e.read().decode().strip() + f' (HTTP {e.code})')\n"
+                  "    sys.exit(1)\n")
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(shim) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
@@ -230,3 +250,39 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+@pytest.mark.platforms("linux")
+def test_plan_gated_repo_derives_acceptance_from_head_check_runs(github):
+    """A private repo on the free plan cannot configure required status checks: GraphQL
+    returns a null branchProtectionRule and the rules endpoint 403s with GitHub's
+    plan-upgrade body (#149143). That is a plan limit, not an identity failure — the
+    receipt must stop telling the operator to fix credentials, and acceptance must
+    enforce every check the exact head carries so a PR-contract card can complete."""
+    from hermes_cli.kanban_pr_acceptance import collect_acceptance
+
+    github.update(plan_gated=True, conclusion="success")
+    receipt = collect_acceptance("https://github.com/acme/repo/pull/7",
+                                 "https://github.com/acme/repo/pull/7")
+    assert receipt["classification"] != "auth"
+    assert receipt["ok"] is True
+    assert receipt["classification"] == "success"
+    assert receipt["derived_from"] == "head_check_runs"
+    assert [c["context"] for c in receipt["required"]] == ["required"]
+    assert receipt["checks"] and receipt["checks"][0]["classification"] == "success"
+    assert not any(c["context"] == "optional" for c in receipt["required"])  # skipped lanes never block
+
+
+@pytest.mark.platforms("linux")
+def test_plan_gate_on_evidence_reads_classifies_plan_limit_not_auth(github):
+    """A plan-gate body surfacing on an evidence read (here: check runs) classifies
+    ``plan_limit`` with accurate recovery text — never ``auth`` and never a
+    credential-fix instruction."""
+    from hermes_cli.kanban_pr_acceptance import collect_acceptance
+
+    github.update(gate_check_runs=True)
+    receipt = collect_acceptance("https://github.com/acme/repo/pull/7",
+                                 "https://github.com/acme/repo/pull/7")
+    assert receipt["classification"] == "plan_limit"
+    assert receipt["ok"] is False
+    assert "credential" not in receipt["detail"].lower()

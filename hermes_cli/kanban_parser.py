@@ -331,6 +331,9 @@ _SPECS = [
     _cmd("unblock", [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
         _TASK_IDS,
+        _arg("--reset-rework", action="store_true",
+             help="Also grant another kanban.max_review_rounds rework window (recorded as a "
+                  "rework_reset event; run/event history is never erased)."),
     ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
     _cmd("request-review", [
         _TASK_ID,

@@ -3430,15 +3430,49 @@ def _nonblank_str(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _rework_round_cap() -> int:
+    """``kanban.max_review_rounds``: positive int = rework rounds granted per card
+    before the cap blocks; 0 = disabled. ``load_user_config_effective`` serves no
+    defaults, so an unset key falls back to the registered ``DEFAULT_CONFIG`` value —
+    the registry entry and the kernel reader stay one source of truth."""
+    from hermes_cli.config_effective import load_user_config_effective
+    value = ((load_user_config_effective(fail_closed=True) or {}).get("kanban", {})
+             .get("max_review_rounds"))
+    if value is None:
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        value = DEFAULT_CONFIG["kanban"]["max_review_rounds"]
+    return max(0, int(value))
+
+
+def _rework_rounds_since_reset(conn: sqlite3.Connection, task_id: str) -> int:
+    """Completed ``changes_requested`` rounds since the last explicit reset.
+    ``unblock --reset-rework`` records its baseline as a ``rework_reset`` event;
+    run rows are never erased, so the reset is an offset, not a delete."""
+    total = conn.execute(
+        "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND outcome = 'changes_requested'",
+        (task_id,),
+    ).fetchone()[0]
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'rework_reset' "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+    baseline = int(_json_dict(_row_get(row, "payload")).get("baseline_runs") or 0)
+    return max(0, total - baseline)
+
+
 def request_changes(
     conn: sqlite3.Connection, task_id: str, *, reason: str, expected_run_id: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
     """Close an active reviewer run (claimed from ``review``) and hand the task
     back to the implementer from the latest ``review_requested`` event, parent
-    gating reapplied. Returns ``(ok, implementer | reason)``."""
+    gating reapplied. Returns ``(ok, implementer | reason)``. At the
+    ``kanban.max_review_rounds`` cap the verdict is still recorded but grants no
+    rework: the card blocks ``needs_input`` with a ``rework_cap_reached`` event
+    and the result is ``(True, None)``."""
     reason = str(redact_review_value(reason or "")).strip()
     if not reason:
         return False, "reason is required"
+    cap = _rework_round_cap()
 
     with write_txn(conn):
         task_row = conn.execute(
@@ -3466,6 +3500,13 @@ def request_changes(
         reviewer = _canonical_assignee(_nonblank_str(task_row["assignee"]))
 
         new_status = _landing_status_after_parents(conn, task_id)
+        # The rework cap (``kanban.max_review_rounds``): every round is a clean
+        # lifecycle exit no other counter trips, so past this many granted rounds
+        # the next verdict blocks the card instead of handing back another rework
+        # (upstream #149149's unbounded executor+reviewer spend).
+        rounds_done = _rework_rounds_since_reset(conn, task_id)
+        at_cap = cap > 0 and rounds_done >= cap
+        landing_status = "blocked" if at_cap else new_status
         # consecutive_failures deliberately PRESERVED: a review transition is
         # not evidence the pathology cleared; only complete_task resets it.
         cur = conn.execute(
@@ -3478,12 +3519,12 @@ def request_changes(
                    worker_pid = NULL, worker_started_at = NULL
              WHERE id = ? AND status = 'running' AND current_run_id = ?
             """,
-            (new_status, implementer, task_id, int(current_run_id)),
+            (landing_status, None if at_cap else implementer, task_id, int(current_run_id)),
         )
         if cur.rowcount != 1:
             return False, "task changed during review handoff"
         run_id = _end_run(
-            conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
+            conn, task_id, outcome="changes_requested", status=landing_status, summary=reason,
         )
         _append_event(
             conn,
@@ -3493,11 +3534,41 @@ def request_changes(
                 "reason": reason,
                 "implementer": implementer,
                 "reviewer": reviewer,
-                "status": new_status,
+                "status": landing_status,
             },
             run_id=run_id,
         )
-    return True, implementer
+        if not at_cap:
+            return True, implementer
+        # Cap reached: the verdict is recorded above (history preserved) but grants
+        # no rework. Block for a human with the same typed-block semantics
+        # ``kanban_block`` uses, plus one dedicated event subscriptions and the
+        # dashboard can see without polling.
+        cap_reason = f"rework_round={rounds_done}/{cap} (reviewer: {reviewer})"
+        prev = conn.execute(
+            "SELECT block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()
+        route_status, event_kind, set_sql, params, block_payload = _route_block(
+            "needs_input", cap_reason, new_status,
+            prev_kind=_row_get(prev, "block_kind"),
+            prev_recurrences=int(_row_get(prev, "block_recurrences") or 0),
+        )
+        conn.execute(
+            f"UPDATE tasks SET status = ?, {set_sql} WHERE id = ?",
+            (route_status, *params, task_id),
+        )
+        _append_event(conn, task_id, event_kind, block_payload, run_id=run_id)
+        cap_run_ids = [r[0] for r in conn.execute(
+            "SELECT id FROM task_runs WHERE task_id = ? AND outcome = 'changes_requested' "
+            "ORDER BY id DESC LIMIT ?", (task_id, rounds_done + 1),
+        )]
+        _append_event(conn, task_id, "rework_cap_reached", {
+            "rounds": rounds_done, "cap": cap, "reviewer": reviewer,
+            "reason": reason, "run_ids": cap_run_ids,
+        }, run_id=run_id)
+        capped_task = get_task(conn, task_id)
+    _fire_task_hook("kanban_task_blocked", capped_task, task_id, run_id, reason=cap_reason)
+    return True, None
 
 
 def promote_task(
@@ -3579,9 +3650,13 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, reset_rework: bool = False) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first.
+    ``reset_rework=True`` additionally grants another ``kanban.max_review_rounds``
+    window: the baseline is recorded as a ``rework_reset`` event (an offset — run
+    rows and events are never erased), so an ordinary unblock alone never
+    defeats the cap."""
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
@@ -3620,6 +3695,12 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
                 else None
             ),
         )
+        if reset_rework:
+            baseline = conn.execute(
+                "SELECT COUNT(*) FROM task_runs WHERE task_id = ? "
+                "AND outcome = 'changes_requested'", (task_id,),
+            ).fetchone()[0]
+            _append_event(conn, task_id, "rework_reset", {"baseline_runs": baseline})
         return True
 
 

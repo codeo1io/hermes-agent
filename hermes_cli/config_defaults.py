@@ -1916,6 +1916,12 @@ DEFAULT_CONFIG = {
         # Auto-block after this many consecutive non-success attempts (spawn_failed, timed_out,
         # crashed) for the same task/profile. Reassignment resets the streak.
         "failure_limit": 2,
+        # Review-rework round cap: at this many granted `changes_requested` rounds the
+        # next verdict blocks the card (needs_input, `rework_cap_reached` event) instead
+        # of handing another rework to the implementer — review rounds are clean exits
+        # no other counter trips. 0 = disabled. `hermes kanban unblock <id> --reset-rework`
+        # grants another full window without erasing run/event history.
+        "max_review_rounds": 3,
         # Worker stdout/stderr log rotation at spawn time (2 MiB + one backup). Raise to keep more
         # early failure evidence from long-running workers.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,

@@ -477,9 +477,11 @@ google = [
   # The Google SDKs permit older vulnerable transitives, so unlocked installs
   # must carry the same fixed floors as uv.lock and the runtime installers:
   # httplib2 0.32.0 (GHSA-j5g9-f88f-gfj3 decompression bomb DoS),
-  # pyasn1 0.6.4, google-auth 2.55.1.
+  # pyasn1 0.6.5 (GHSA-fm9c-5rcf-2q5p, GHSA-9m75-vc3g-4x39,
+  # GHSA-2qm8-x737-gmw5, GHSA-mm57-4v3p-rchx — all HIGH, fixed in 0.6.5),
+  # google-auth 2.55.1.
   "httplib2==0.32.0",
-  "pyasn1==0.6.4",
+  "pyasn1>=0.6.5,<0.7",
 ]
 youtube = [
   # Required by skills/media/youtube-content and
