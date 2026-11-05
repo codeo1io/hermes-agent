@@ -20,6 +20,8 @@ from typing import Optional
 
 import pytest
 
+from unittest.mock import patch
+
 from gateway.config import PlatformConfig
 from gateway.relay.adapter import RelayAdapter
 from gateway.relay.descriptor import CONTRACT_VERSION, CapabilityDescriptor
@@ -222,7 +224,8 @@ async def test_client_upload_rejects_oversize_and_missing(tmp_path: Path):
     assert await c.upload(str(empty)) is None
 
 @pytest.mark.asyncio
-async def test_download_sends_a_user_agent_on_every_request():
+@patch("tools.url_safety.is_safe_url", return_value=True)
+async def test_download_sends_a_user_agent_on_every_request(_safe):
     """Discord's CDN 403s the default ``Python-urllib/x.y`` User-Agent.
 
     Live-verified on staging 2026-08-26: every Discord CDN pass-through
@@ -288,7 +291,8 @@ def test_is_relay_media_url_distinguishes_rehost_from_public():
 
 
 @pytest.mark.asyncio
-async def test_download_routes_auth_decision_through_is_relay_media_url(monkeypatch):
+@patch("tools.url_safety.is_safe_url", return_value=True)
+async def test_download_routes_auth_decision_through_is_relay_media_url(_safe, monkeypatch):
     """download() must consult is_relay_media_url (so subclasses/plugins that
     override the classifier change auth behaviour): a disabled client refuses
     re-host refs but still fetches public URLs without a bearer."""
