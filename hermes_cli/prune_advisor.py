@@ -26,9 +26,16 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 GIB = 1024 ** 3
-# Low = under 2 GiB free, or under 10% free while also under 20 GiB (a 10%-free 4 TB disk is fine).
+# Low = under 2 GiB free, or under 15% free while also under 20 GiB (a 15%-free 4 TB disk is fine).
+# 2026-11-06 calibration (TEST-04 rootcause 20261105T1840Z fix-D): the fleet
+# SLO floor on this host's shared /work+~/.hermes device is 15% free (INV-07
+# admission ladder, tmp-ttl CRIT tiers). An advisor firing at 10% let the
+# pressure-era recurrence reach ten points below the fleet floor before
+# anyone was asked (delegate run 549881846b34). The percent arm now LEADS
+# the band at 15% with the same 20 GiB headroom qualifier; the absolute
+# 2 GiB floor stays as the small-disk backstop.
 LOW_FREE_FLOOR = 2 * GIB
-LOW_FREE_PERCENT = 10.0
+LOW_FREE_PERCENT = 15.0
 LOW_FREE_HEADROOM = 20 * GIB
 SNOOZE_SECONDS = 7 * 86400
 _SNOOZE_FILE = ".auto_prune_prompt.json"
