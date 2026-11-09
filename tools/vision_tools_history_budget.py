@@ -38,8 +38,10 @@ _repeat_lock = threading.Lock()
 def _cfg_vision(key: str, default=None):
     """``vision.<key>`` from config.yaml; ``default`` when config is unavailable."""
     try:
-        from hermes_cli.config import cfg_get, load_config
-        return cfg_get(load_config(), "vision", key, default=default)
+        from hermes_cli.config import cfg_get, load_config_readonly
+        # Read on the embed hot path; cfg_get only walks the dict (never writes),
+        # so the shared readonly variant is safe and halves cache-hit cost.
+        return cfg_get(load_config_readonly(), "vision", key, default=default)
     except Exception:
         return default
 
