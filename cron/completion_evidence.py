@@ -77,6 +77,7 @@ def _canonical_pair(path: Path) -> str | None:
     """
     try:
         raw = _safe_file(path, path.parent, _MAX_RECEIPT_BYTES)
+<<<<<<< HEAD
         lines = raw.decode("utf-8", errors="strict").splitlines()
     except (OSError, ValueError, UnicodeDecodeError):
         return None
@@ -89,6 +90,27 @@ def _canonical_pair(path: Path) -> str | None:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         return None
     return digest
+=======
+    except (OSError, ValueError):
+        return None
+    # Byte-exact verification against the stamp tool's carrier format. The
+    # stamp tool writes exactly b"[CRON_EVIDENCE]\nsha256:<64 hex>\n" with LF
+    # line endings only. A text-level parse (decode + splitlines + strip)
+    # normalizes CRLF/CR and recognizes Unicode line separators, admitting
+    # carriers the stamp tool could never emit; those must fail closed.
+    prefix = b"[CRON_EVIDENCE]\nsha256:"
+    if not raw.startswith(prefix) or not raw.endswith(b"\n"):
+        return None
+    digest_line = raw[len(prefix):-1]
+    if len(digest_line) != 64 or any(
+        chr(b) not in "0123456789abcdef" for b in digest_line
+    ):
+        return None
+    try:
+        return digest_line.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+>>>>>>> conductor-run-c33f40ea6566-implement-1
 
 
 def validate_completion_evidence(

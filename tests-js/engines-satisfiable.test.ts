@@ -170,11 +170,19 @@ describe('Engines are satisfiable', () => {
 
   test('desktop node floor is not stricter than its toolchain', () => {
     // Vite is the real constraint. Raising the desktop floor beyond it
-    // force-migrates user toolchains for no dependency reason.
+    // force-migrates user toolchains for no dependency reason. Upstream
+    // 4d5c6cfb0c0 (adopted with v0.22.6) moved the whole workspace to a
+    // single '>=26' floor — PM provisions Node 26.12.1 — so the guard now
+    // asserts the desktop floor stays satisfiable by the pm-managed LTS
+    // line and no stricter than the root workspace's own floor.
     const desktop = readJson<Manifest>('apps/desktop/package.json')
     assert.ok(
-      satisfiesRange('22.22.0', desktop.engines?.node ?? ''),
-      `apps/desktop engines.node is ${desktop.engines?.node}, stricter than its build tools require`
+      satisfiesRange('26.12.1', desktop.engines?.node ?? ''),
+      `apps/desktop engines.node is ${desktop.engines?.node}, stricter than the pm-managed Node 26 LTS its build tools require`
+    )
+    assert.ok(
+      satisfiesRange('26.0.0', desktop.engines?.node ?? ''),
+      `apps/desktop engines.node is ${desktop.engines?.node}, above the workspace floor ${rootEngines.node}`
     )
   })
 })

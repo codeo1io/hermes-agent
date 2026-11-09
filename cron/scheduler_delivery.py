@@ -1,4 +1,4 @@
-"""Cron delivery: target resolution (origin/home/explicit/bot-chat), transcript mirroring and
+"""Cron delivery: target resolution (origin/home/explicit/bot-chat/room), transcript mirroring and
 session seeding, live-adapter / relay / standalone send lanes, and ``_deliver_result``.
 
 Split out of ``cron.scheduler``. Import names from this module directly (``cron.scheduler`` only
@@ -31,24 +31,12 @@ logger = logging.getLogger("cron.scheduler")
 # push channel — it delivers by appending to the target session's transcript
 # (``_deliver_to_api_server_transcript``), like the kanban wake lane. It needs no gateway
 # credentials (same-process SQLite), so the credential gate must not block it.
-_KNOWN_DELIVERY_PLATFORMS = frozenset({"webhook", "wecom_callback", "api_server"})
 
 # Gateway platforms whose adapter declares ``supports_async_delivery = False`` (request/response
 # only, ``send()`` is a stub) — a cron report can never reach them, so they are never a
 # deliver=origin destination.
 _NON_PUSH_ORIGIN_PLATFORMS = frozenset({"api_server"})
 
-# Home-target platforms tried first, in this order, by ``deliver=origin`` with no origin (first
-# platform with a home chat wins) and ``deliver=all``; their env var is the plugin's
-# ``cron_deliver_env_var``. Other plugin platforms follow by name (a fresh process loads deferred
-# entries in name order, so this is the order they had when they trailed a static table).
-_HOME_TARGET_PRIORITY = (
-    "matrix", "telegram", "discord", "slack", "signal", "mattermost", "sms", "email", "dingtalk",
-    "feishu", "wecom", "weixin", "bluebubbles", "qqbot", "whatsapp", "whatsapp_cloud",
-)
-
-# Back-compat: primary env var -> previous name, consulted when the primary is unset.
-_LEGACY_HOME_TARGET_ENV_VARS = {"QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL"}
 
 
 def _resolve_cron_surface_mode(pconfig, logical_platform_name: str) -> str:
@@ -395,125 +383,6 @@ def _cron_job_origin_log_suffix(job: dict) -> str:
     return " " + " ".join(fields) if fields else ""
 
 
-def _plugin_cron_env_var(platform_name: str) -> str:
-    """Cron home-channel env var registered by a plugin ``PlatformEntry.cron_deliver_env_var``."""
-    with contextlib.suppress(Exception):
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
-        entry = platform_registry.get(platform_name.lower())
-        if entry and entry.cron_deliver_env_var:
-            return entry.cron_deliver_env_var
-    return ""
-
-
-def _is_known_delivery_platform(platform_name: str) -> bool:
-    """Valid cron delivery platform: built-in, or plugin with a ``cron_deliver_env_var``."""
-    name = platform_name.lower()
-    return name in _KNOWN_DELIVERY_PLATFORMS or bool(_plugin_cron_env_var(name))
-
-
-def _resolve_home_env_var(platform_name: str) -> str:
-    """Env var name for a platform's cron home channel (``PlatformEntry.cron_deliver_env_var``)."""
-    return _plugin_cron_env_var(platform_name.lower())
-
-
-def _get_config_home_channel(platform_name: str):
-    """Persisted ``HomeChannel`` from gateway config — the canonical store ``/sethome`` writes.
-    The ``<PLATFORM>_HOME_CHANNEL`` env var is only a best-effort mirror; relay-fronted platforms
-    may exist solely in config.yaml, so reading only the env mirror would drop their delivery."""
-    try:
-        from gateway.config import load_gateway_config, Platform
-        return load_gateway_config().get_home_channel(Platform(platform_name.lower()))
-    except Exception:
-        logger.debug(
-            "config home_channel lookup failed for platform %r", platform_name, exc_info=True)
-        return None
-
-
-def _home_env_lookup(env_var: str, suffix: str = "", *, strip: bool = False) -> str:
-    """Value of ``<env_var><suffix>``, falling back to the legacy name (same suffix) when unset.
-    Reads via ``get_secret``, not ``os.getenv``: in a multiplex gateway the tick runs with the
-    job-owning profile's secret scope (run_one_job sets it), so this resolves the OWNING profile's
-    value, not the host environ. ``os.getenv`` only if the scope module is missing."""
-    try:
-        from agent.secret_scope import get_secret
-    except Exception:
-        get_secret = None  # type: ignore
-
-    def read(name: str) -> str:
-        value = (get_secret(name, "") or "") if get_secret is not None else os.getenv(name, "")
-        return value.strip() if strip else value
-
-    value = read(env_var + suffix)
-    legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
-    if not value and legacy:
-        value = read(legacy + suffix)
-    return value
-
-
-def _env_home_target_chat_id(platform_name: str) -> str:
-    """Home chat id from the env mirror only (no config).
-
-    Reads through ``get_secret`` (not raw ``os.getenv``) so a profile-scoped secret scope wins in a
-    multiplex gateway. ``DISCORD_HOME_CHANNEL`` lives in each profile's ``.env``; in a multiplex process the
-    winning cron tick runs with the job-owning profile's scope installed (run_one_job sets it), so reading
-    via ``get_secret`` resolves the OWNING profile's chat id rather than the host process's ``os.environ``
-    (#83182, chat-id leg — the token leg was fixed earlier; chat id / thread id resolve through the same
-    leak).
-    """
-    env_var = _resolve_home_env_var(platform_name)
-    return _home_env_lookup(env_var) if env_var else ""
-
-
-def _get_home_target_chat_id(platform_name: str) -> str:
-    """Home target chat id: env var (first, so operator overrides win) → legacy env var →
-    config.yaml ``home_channel``."""
-    value = _env_home_target_chat_id(platform_name)
-    if value:
-        return value
-    home = _get_config_home_channel(platform_name)
-    return str(home.chat_id) if home is not None and home.chat_id else ""
-
-
-def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
-    """Optional thread/topic id for a platform home target. Telegram: ``TELEGRAM_CRON_THREAD_ID``
-    overrides ``TELEGRAM_HOME_CHANNEL_THREAD_ID`` — in topic mode a root-DM delivery lands in the
-    system-only lobby where the user cannot reply.
-
-    When topic mode is enabled, deliveries that land in the root DM (thread_id unset) end up in the
-    system-only lobby where the user cannot reply — the gateway returns the lobby reminder and drops
-    ``reply_to_message_id`` (#24409). Pointing cron at a dedicated topic via this env var lets replies work
-    as expected without changing the lobby invariant.
-    """
-    if platform_name.lower() == "telegram":
-        cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)
-        if cron_thread:
-            return cron_thread
-    env_var = _resolve_home_env_var(platform_name)
-    value = _home_env_lookup(env_var, "_THREAD_ID", strip=True) if env_var else ""
-    if value:
-        return value
-    # config.yaml fallback only when the chat id also came from config (an env-provided chat id
-    # keeps its env-provided thread semantics).
-    if not _env_home_target_chat_id(platform_name):
-        home = _get_config_home_channel(platform_name)
-        if home is not None and home.thread_id:
-            return str(home.thread_id)
-    return None
-
-
-def _iter_home_target_platforms():
-    """Iterate plugin platform names that expose a home channel, ``_HOME_TARGET_PRIORITY`` first."""
-    with contextlib.suppress(Exception):
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
-        named = [e.name for e in platform_registry.plugin_entries() if e.cron_deliver_env_var]
-        yield from (n for n in _HOME_TARGET_PRIORITY if n in named)
-        yield from (n for n in named if n not in _HOME_TARGET_PRIORITY)  # registry order, as before
-
-
 def _relay_fronted_delivery_platforms(connected: set) -> set:
     """Logical platforms deliverable through a connected relay. ``get_connected_platforms()`` only
     sees native platforms; fronted ones come from the same ``GATEWAY_RELAY_PLATFORMS`` stamp
@@ -606,6 +475,9 @@ def _resolve_single_delivery_target(
     origin = _resolve_origin(job)
     if deliver_value == "local":
         return None
+    room_address = parse_room_deliver_token(deliver_value)
+    if room_address is not None:
+        return resolve_room_target(job, room_address)
     # Must precede the generic platform:chat_id split so the profile name isn't parsed as chat_id.
     bot_chat_profile = parse_bot_chat_deliver_token(deliver_value)
     if bot_chat_profile is not None:
@@ -1045,8 +917,12 @@ def _send_media_via_adapter(
                 method, path_kw = "send_image_file", "image_path"
             else:
                 method, path_kw = "send_document", "file_path"
+            # The voice sender decides bubble vs music-file from ``is_voice`` (Telegram
+            # transcodes non-Opus only when it is set), matching the gateway dispatch
+            # in BasePlatformAdapter._send_one.
+            extra = {"is_voice": _is_voice} if method == "send_voice" else {}
             coro = getattr(adapter, method)(
-                chat_id=chat_id, metadata=metadata, **{path_kw: media_path})
+                chat_id=chat_id, metadata=metadata, **{path_kw: media_path}, **extra)
             future = safe_schedule_threadsafe(coro, loop)
             if future is None:
                 _note_target_error(
@@ -1058,7 +934,12 @@ def _send_media_via_adapter(
             except TimeoutError:
                 future.cancel()
                 raise
-            if result and not getattr(result, "success", True):
+            raw = getattr(result, "raw_response", None)
+            if result and getattr(result, "success", False) and isinstance(raw, dict) and raw.get("ambiguous"):
+                # Sent but the ack was lost: possibly delivered, so never an error (a re-run
+                # would duplicate it); _live_send_media records the target as unverified.
+                job["_media_ack_lost"] = True
+            elif result and not getattr(result, "success", True):
                 _note_target_error(
                     job_ref,
                     f"media send failed for {media_path}: {getattr(result, 'error', 'unknown')}",
@@ -1462,7 +1343,8 @@ def _live_send_text(
 
 
 def _live_send_media(
-    t: _TargetDelivery, media_metadata: dict, media_files: list, delivery_errors: list) -> None:
+    t: _TargetDelivery, media_metadata: dict, media_files: list, delivery_errors: list,
+    unverified_targets: list) -> None:
     """Send extracted media as native attachments with the same routing as the text send."""
     routed_media_metadata = dict(media_metadata or {})
     if t.is_relay:
@@ -1477,6 +1359,8 @@ def _live_send_media(
         t.runtime_adapter, t.chat_id, media_files, routed_media_metadata or None, t.loop, t.job,
         platform=t.platform,
     )
+    if t.job.pop("_media_ack_lost", False) and t.where not in unverified_targets:
+        unverified_targets.append(t.where)
     # Surface per-file failures into run status: text delivered but attachment lost is not ok.
     for _me in _media_errors:
         delivery_errors.append(f"{_me} (target {t.where})")
@@ -1568,7 +1452,7 @@ def _deliver_via_live_adapter(
         # payload is already assumed delivered (#38922). Record the skipped attachments so the drop is
         # visible rather than silently lost.
         if adapter_ok and not timed_out and media_files:
-            _live_send_media(t, media_metadata, media_files, delivery_errors)
+            _live_send_media(t, media_metadata, media_files, delivery_errors, unverified_targets)
         elif timed_out and media_files:
             _note_target_error(
                 job,
@@ -1858,6 +1742,56 @@ def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
     return msg
 
 
+def _dispatch_special_platform_target(
+    job: dict, content: str, cleaned_delivery_content: str, target: dict, *, for_failure: bool,
+    delivery_errors: list, unverified_targets: list, user_cfg,
+) -> int:
+    """Handle one delivery target owned by a special platform (bot-chat, room, local,
+    api_server). Returns the target's suppression delta when it was consumed here
+    (0 or 1 — the caller adds it to its suppressed count and ``continue``s); -1 means
+    an ordinary push platform — the caller proceeds to the live/standalone lanes.
+    Extracted from ``_deliver_result`` (code-health CC ratchet: the v0.22.7 adoption
+    grew the dispatch to 22 > 20)."""
+    if target["platform"] == BOT_CHAT_PLATFORM:
+        # Bot Chat owns admission; never concurrently resume a live owner's transcript.
+        bot_chat_error = _deliver_to_bot_chat(job, content, target["chat_id"], for_failure=for_failure)
+        suppressed = job.pop("_notification_all_targets_suppressed", False)
+        if bot_chat_error:
+            receipt_target = f"bot-chat:{target['chat_id'] or '(own)'}"
+            receipt = job.get("_bot_chat_delivery_receipts", {}).get(receipt_target)
+            if not receipt or receipt["status"] not in ("queued", "claimed"):
+                delivery_errors.append(bot_chat_error)
+            if receipt and receipt["status"] == "ambiguous":
+                unverified_targets.append(bot_chat_error)
+        return 1 if suppressed else 0
+    if target["platform"] == ROOM_PLATFORM:
+        room_error = deliver_to_room(job, content, target["chat_id"], for_failure=for_failure)
+        if room_error:
+            delivery_errors.append(room_error)
+        return 0
+    if target["platform"] == "local":
+        from gateway.session_cron import deliver_to_local_chat
+        from hermes_constants import get_hermes_home
+        local_error = deliver_to_local_chat(get_hermes_home(), target["chat_id"],
+                                            cleaned_delivery_content, diagnostic=for_failure)
+        if local_error:
+            delivery_errors.append(local_error)
+        return 0
+    # api_server targets are transcript conversations, not push channels:
+    # send() is a permanent stub on this platform, so deliver by appending
+    # to the target session's transcript — the same visibility model the
+    # kanban wake lane uses. The output becomes visible when the client
+    # next polls history. The target chat_id for an api_server origin IS
+    # the raw session id.
+    if target["platform"] == "api_server":
+        api_err = _deliver_to_api_server_transcript(
+            job, target.get("chat_id") or "", content)
+        if api_err:
+            delivery_errors.append(api_err)
+        return 0
+    return -1
+
+
 def _deliver_result(
     job: dict, content: str, adapters=None, loop=None, *, for_failure: bool = False
 ) -> Optional[str]:
@@ -1880,7 +1814,7 @@ def _deliver_result(
     external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER", "")
     if (external_execution and adapters is None
             and external_execution == str(job.get("execution_id") or "")
-            and any(target["platform"] != BOT_CHAT_PLATFORM for target in targets)):
+            and any(target["platform"] not in (BOT_CHAT_PLATFORM, ROOM_PLATFORM) for target in targets)):
         from cron.delivery_queue import enqueue_and_wait
 
         _record_delivery_verification(job, [])
@@ -1972,30 +1906,14 @@ def _deliver_result(
                 and not warning_notifications_enabled(target["platform"], user_cfg)):
             suppressed_targets += 1
             continue
-        # Bot Chat owns admission; never concurrently resume a live owner's transcript.
-        if target["platform"] == BOT_CHAT_PLATFORM:
-            bot_chat_error = _deliver_to_bot_chat(job, content, target["chat_id"], for_failure=for_failure)
-            suppressed_targets += job.pop("_notification_all_targets_suppressed", False)
-            if bot_chat_error:
-                receipt_target = f"bot-chat:{target['chat_id'] or '(own)'}"
-                receipt = job.get("_bot_chat_delivery_receipts", {}).get(receipt_target)
-                if not receipt or receipt["status"] not in ("queued", "claimed"):
-                    delivery_errors.append(bot_chat_error)
-                if receipt and receipt["status"] == "ambiguous":
-                    unverified_targets.append(bot_chat_error)
-            continue
-
-        # api_server targets are transcript conversations, not push channels:
-        # send() is a permanent stub on this platform, so deliver by appending
-        # to the target session's transcript — the same visibility model the
-        # kanban wake lane uses. The output becomes visible when the client
-        # next polls history. The target chat_id for an api_server origin IS
-        # the raw session id.
-        if target["platform"] == "api_server":
-            api_err = _deliver_to_api_server_transcript(
-                job, target.get("chat_id") or "", content)
-            if api_err:
-                delivery_errors.append(api_err)
+        # Special platforms (bot-chat admission, room delivery, local transcripts, api_server
+        # transcripts) own their own lanes; the helper consumed the target or it is a push one.
+        special = _dispatch_special_platform_target(
+            job, content, cleaned_delivery_content, target, for_failure=for_failure,
+            delivery_errors=delivery_errors, unverified_targets=unverified_targets,
+            user_cfg=user_cfg)
+        if special >= 0:
+            suppressed_targets += special
             continue
 
         t = _prepare_target_delivery(
@@ -2027,6 +1945,21 @@ def _deliver_result(
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully
 # populated before ``scheduler`` re-exports from it.
 from cron import scheduler as _sched
+from cron.scheduler_delivery_home_targets import (
+    _KNOWN_DELIVERY_PLATFORMS,
+    _env_home_target_chat_id,
+    _get_config_home_channel,
+    _get_home_target_chat_id,
+    _get_home_target_thread_id,
+    _home_env_lookup,
+    _HOME_TARGET_PRIORITY,
+    _is_known_delivery_platform,
+    _iter_home_target_platforms,
+    _plugin_cron_env_var,
+    _resolve_home_env_var,
+)
+from cron.scheduler_delivery_room import (
+    ROOM_PLATFORM, deliver_to_room, parse_room_deliver_token, resolve_room_target)
 from cron import scheduler_delivery_origin as _origin
 from cron import scheduler_preflight as _preflight
 from cron import scheduler_script as _script

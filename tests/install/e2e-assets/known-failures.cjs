@@ -37,6 +37,7 @@ function collectLogs(root, logsDir = path.join(root, 'logs')) {
   const bootstrap =
     readOptional(path.join(logsDir, 'bootstrap-install.log')) ||
     readOptional(path.join(root, 'hermes-home', 'logs', 'bootstrap-installer.log')) ||
+    readOptional(path.join(root, 'home', '.hermes', 'logs', 'bootstrap-installer.log')) ||
     readOptional(path.join(logsDir, 'bootstrap-installer.log'))
   return {
     update: readOptional(path.join(logsDir, 'update.log')),
@@ -58,10 +59,21 @@ function classifyWorkRoot(root, installMethod, updateMethod, error, platform = '
   let current = null
   let oldRef = null
   if (!commit) {
-    const state = JSON.parse(fs.readFileSync(path.join(root, 'shas.json'), 'utf8').replace(/^\uFEFF/, ''))
-    commit = state.old
-    current = state.current
-    oldRef = state.old_ref
+    // Windows keeps shas.json; the macOS driver (upstream v0.22.6) keeps
+    // shas.env. Read whichever exists so both drivers classify unchanged.
+    const envFile = path.join(root, 'shas.env')
+    if (fs.existsSync(envFile)) {
+      const env = Object.fromEntries(fs.readFileSync(envFile, 'utf8')
+        .split(/\r?\n/).filter(line => line.includes('=')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]))
+      commit = env.OLD_SHA
+      current = env.TARGET_SHA
+      oldRef = env.OLD_REF
+    } else {
+      const state = JSON.parse(fs.readFileSync(path.join(root, 'shas.json'), 'utf8').replace(/^\uFEFF/, ''))
+      commit = state.old
+      current = state.current
+      oldRef = state.old_ref
+    }
   }
   const rule = matchKnownFailure({
     platform, phase, commit, installMethod, updateMethod, error,

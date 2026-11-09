@@ -207,6 +207,45 @@ def test_canonical_response_file_carries_pair_structurally(tmp_path):
     assert validate_completion_evidence(job, prose, "exec-abc") is None
 
 
+<<<<<<< HEAD
+=======
+def test_canonical_carrier_rejects_indented_marker_or_digest(tmp_path):
+    """The stamp tool emits exact first/second lines, never whitespace-padded ones."""
+    job, _, path, _, _ = _case(tmp_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    carrier = path.with_suffix(".response.md")
+    for body in (
+        " [CRON_EVIDENCE]\nsha256:" + digest + "\n",
+        "[CRON_EVIDENCE]\n sha256:" + digest + "\n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + " \n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + "\nInjected third line\n",
+    ):
+        carrier.write_text(body)
+        assert "marker" in validate_completion_evidence(
+            job, "Planning only; no explicit marker", "exec-abc"
+        )
+
+
+def test_canonical_carrier_rejects_noncanonical_line_endings(tmp_path):
+    """The stamp tool emits LF-only bytes; splitlines() normalization must not
+    admit CRLF/CR/vertical-tab/Unicode-separator carriers it could never write."""
+    job, _, path, _, _ = _case(tmp_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    carrier = path.with_suffix(".response.md")
+    for body in (
+        "[CRON_EVIDENCE]\r\nsha256:" + digest + "\r\n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + "\r\n",
+        "[CRON_EVIDENCE]\vsha256:" + digest + "\v",
+        "[CRON_EVIDENCE]sha256:" + digest + "",
+        "[CRON_EVIDENCE]\nsha256:" + digest,
+    ):
+        carrier.write_bytes(body.encode("utf-8"))
+        assert validate_completion_evidence(
+            job, "Planning only; no explicit marker", "exec-abc"
+        ) is not None
+
+
+>>>>>>> conductor-run-c33f40ea6566-implement-1
 def test_canonical_file_wrong_digest_fails_closed(tmp_path):
     job, _, _, _, _ = _case(tmp_path)
     (tmp_path / "receipts" / "exec-abc.response.md").write_text(

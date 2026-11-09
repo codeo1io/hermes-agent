@@ -33,9 +33,7 @@ def install_spy(monkeypatch):
         return len(calls["fail"] & set(names))
 
     def fake_sync_venv(extras=None, **kwargs):
-        # None = the CLI named no selection and delegated the default to
-        # sync_venv itself; a list (even []) would be an explicit selection.
-        calls["sync_extras"] = extras
+        calls["sync_extras"] = list(extras or [])
 
     def fake_activate(**kwargs):
         calls["activated"].append(kwargs)
@@ -52,9 +50,7 @@ def test_default_closure_includes_the_boot_interpreter(install_spy):
     assert "python" in install_spy["names"]
     assert "venv" not in install_spy["names"]
     assert all(not pm.cli.get_package(name).internal for name in install_spy["names"])
-    # The CLI names no selection: sync_venv applies its one default
-    # (a recorded selection, else the main-era carry — see pm.install).
-    assert install_spy["sync_extras"] is None
+    assert install_spy["sync_extras"] == ["all"]
     assert install_spy["activated"] == [{"allow_incomplete": True}]
 
 
@@ -79,9 +75,7 @@ def test_trust_recorded_skips_the_byte_check_and_still_syncs(install_spy):
         names=None, extra=[], target=None, tools_only=False, trust_recorded=True)) == 0
     assert "python" in install_spy["names"]
     assert install_spy["verified"] is False
-    # The CLI names no selection: sync_venv applies its one default
-    # (a recorded selection, else the main-era carry — see pm.install).
-    assert install_spy["sync_extras"] is None
+    assert install_spy["sync_extras"] == ["all"]
 
 
 @pytest.mark.parametrize("kwargs, message", [
@@ -116,29 +110,27 @@ def _bare_install(install_spy, **kwargs) -> list[str]:
 
 
 def test_browser_tools_are_a_default_the_user_can_decline_and_restore(install_spy):
-    assert "agent-browser" in _bare_install(install_spy)
-    assert "agent-browser" not in _bare_install(install_spy, without=["agent-browser"])
+    assert "chromium" in _bare_install(install_spy)
+    assert "chromium" not in _bare_install(install_spy, without=["chromium"])
     # The opt-out is recorded: a later bare install (the updater's shape) keeps it.
-    assert "agent-browser" not in _bare_install(install_spy)
+    assert "chromium" not in _bare_install(install_spy)
     install_spy["names"] = None
-    assert pm.cli.cmd_install(argparse.Namespace(names=["agent-browser"], tools_only=False)) == 0
-    assert "agent-browser" in _bare_install(install_spy)
+    assert pm.cli.cmd_install(argparse.Namespace(names=["chromium"], tools_only=False)) == 0
+    assert "chromium" in _bare_install(install_spy)
 
 
 def test_a_failed_default_download_does_not_fail_the_install(install_spy, capsys):
-    install_spy["fail"] = {"agent-browser"}
-    assert "agent-browser" in _bare_install(install_spy)
-    # The CLI names no selection: sync_venv applies its one default
-    # (a recorded selection, else the main-era carry — see pm.install).
-    assert install_spy["sync_extras"] is None
-    assert "hermes pm install agent-browser" in capsys.readouterr().out
+    install_spy["fail"] = {"chromium"}
+    assert "chromium" in _bare_install(install_spy)
+    assert install_spy["sync_extras"] == ["all"]
+    assert "hermes pm install chromium" in capsys.readouterr().out
 
 
 def test_termux_has_no_pm_browser_default():
     from pm.defaults import default_packages
 
     names = pm.cli._lockfile().names()
-    assert "agent-browser" in default_packages(names, target="linux-x64", declined_names=frozenset())
+    assert "chromium" in default_packages(names, target="linux-x64", declined_names=frozenset())
     assert default_packages(names, target="linux-arm64-bionic", declined_names=frozenset()) == []
 
 

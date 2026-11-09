@@ -43,7 +43,9 @@ class FakeTransport:
         elif self.default is not None:
             nxt = self.default
         else:
-            raise AssertionError(f"unexpected request after scripted responses: {method} {path}")
+            raise AssertionError(
+                f"unexpected request after scripted responses: {method} {path}"
+            )
         if callable(nxt):
             nxt = nxt(method, path, body)
         status, payload = nxt
@@ -53,7 +55,12 @@ class FakeTransport:
 
 def _msg(mid, role, text, created=1):
     return {
-        "info": {"id": mid, "sessionID": "ses_x", "role": role, "time": {"created": created}},
+        "info": {
+            "id": mid,
+            "sessionID": "ses_x",
+            "role": role,
+            "time": {"created": created},
+        },
         "parts": [{"id": f"prt_{mid}", "type": "text", "text": text}],
     }
 
@@ -84,6 +91,47 @@ def test_start_creates_session_and_returns_native_id():
     assert method == "POST" and path.startswith("/session")
     assert "directory" in path
     assert body == {"title": "Hermes test"}
+
+
+def test_new_session_creation_uses_bootstrap_timeout_without_retry(monkeypatch):
+    """A slow first POST must not die at the generic 60s transport timeout.
+
+    The POST is non-idempotent: do not retry it after an uncertain timeout.
+    Only the initial create gets the extended bounded request deadline.
+    """
+    calls = []
+    transports = []
+
+    class SlowCreateTransport:
+        def __init__(self, base_url, timeout=60.0):
+            self.base_url = base_url
+            self.timeout = timeout
+            transports.append(self)
+
+        def request(self, method, path, body=None):
+            calls.append((method, path, self.timeout))
+            if method == "POST" and path.startswith("/session?"):
+                if self.timeout <= 60:
+                    raise TimeoutError("timed out")
+                return 200, json.dumps({"id": "ses_slow_create"})
+            raise AssertionError(f"unexpected request {method} {path}")
+
+    monkeypatch.setattr(oc, "_UrllibTransport", SlowCreateTransport)
+    monkeypatch.setattr(
+        oc,
+        "acquire_opencode_server",
+        lambda **kwargs: oc._ServerHandle("http://127.0.0.1:9999", None),
+    )
+    client = OpenCodeClient(session_id="logical-handle", acp_cwd="/tmp")
+    assert client.start(timeout=600.0)["sessionId"] == "ses_slow_create"
+    assert [method for method, _, _ in calls] == ["POST"]
+    assert calls[0][2] == 240.0
+    assert len(transports) == 2
+    # #561 (b6e30011): the session-create/resume transport inherits the same ceiling the
+    # readiness ladder grants the spawn — max(start budget, default), NOT the legacy flat 60s
+    # the original #559 assertion pinned (that test landed red on main: main's own push run
+    # 41684516617 fails it). The one-off create POST stays bounded at min(ready, 240).
+    assert transports[0].timeout == 600.0
 
 
 @pytest.mark.parametrize("status", [404, 503])
@@ -134,18 +182,29 @@ def _question_script(question, assistant_text="done", mid="m2"):
     reply/reject was actually POSTed, proving the answer path unblocked the turn."""
     state: dict = {"replied": False}
     empty_msgs = (200, [_msg("m1", "user", "hi", 1)])
-    final_msgs = (200, [_msg("m1", "user", "hi", 1), _msg(mid, "assistant", assistant_text, 2)])
+    final_msgs = (
+        200,
+        [_msg("m1", "user", "hi", 1), _msg(mid, "assistant", assistant_text, 2)],
+    )
     qdir = "?" + urllib.parse.urlencode({"directory": "/tmp"})
 
     def questions(_m, path, _b):
         # Only answer the scoped listing; the completion check polls it too.
-        return (200, [question]) if (not state["replied"] and path == f"/question{qdir}") else (200, [])
+        return (
+            (200, [question])
+            if (not state["replied"] and path == f"/question{qdir}")
+            else (200, [])
+        )
 
     def messages(_m, _p, _b):
         return final_msgs if state["replied"] else empty_msgs
 
     def capture(method, path, body):
-        if method == "POST" and "/question/" in path and (f"/reply{qdir}" in path or f"/reject{qdir}" in path):
+        if (
+            method == "POST"
+            and "/question/" in path
+            and (f"/reply{qdir}" in path or f"/reject{qdir}" in path)
+        ):
             state["replied"] = True
             return (204, "")
         raise AssertionError(f"unexpected POST in question script: {path}")
@@ -175,7 +234,10 @@ def test_question_answered_with_reply_payload():
             {
                 "question": "Which color?",
                 "header": "Color",
-                "options": [{"label": "red", "description": "r"}, {"label": "blue", "description": "b"}],
+                "options": [
+                    {"label": "red", "description": "r"},
+                    {"label": "blue", "description": "b"},
+                ],
                 "multiple": False,
                 "custom": False,
             }
@@ -204,7 +266,15 @@ def test_question_unanswerable_rejected():
     question = {
         "id": "que_2",
         "sessionID": "ses_x",
-        "questions": [{"question": "Q?", "header": "H", "options": [], "multiple": False, "custom": False}],
+        "questions": [
+            {
+                "question": "Q?",
+                "header": "H",
+                "options": [],
+                "multiple": False,
+                "custom": False,
+            }
+        ],
     }
     transport = scripted, router = _question_script(question, assistant_text="ok")
     transport = FakeTransport(scripted, default=router)
@@ -216,7 +286,11 @@ def test_question_unanswerable_rejected():
 
 
 def test_question_for_other_session_ignored():
-    question = {"id": "que_3", "sessionID": "ses_OTHER", "questions": [{"question": "?", "header": "H", "options": []}]}
+    question = {
+        "id": "que_3",
+        "sessionID": "ses_OTHER",
+        "questions": [{"question": "?", "header": "H", "options": []}],
+    }
     final = [_msg("m1", "user", "hi", 1), _msg("m2", "assistant", "ok", 2)]
 
     def route(method, path, body):
@@ -233,8 +307,13 @@ def test_question_for_other_session_ignored():
         ],
         default=route,
     )
-    client = make_client(transport, answerer=lambda *a: pytest.fail("must not answer other sessions"))
-    assert client.run_session_prompt("hi", timeout_seconds=5.0, poll_interval=0.05)["text"] == "ok"
+    client = make_client(
+        transport, answerer=lambda *a: pytest.fail("must not answer other sessions")
+    )
+    assert (
+        client.run_session_prompt("hi", timeout_seconds=5.0, poll_interval=0.05)["text"]
+        == "ok"
+    )
     assert not any("/question/que_3/reply" in r[1] for r in transport.requests)
 
 
@@ -255,7 +334,16 @@ def test_abort_and_messages_and_close():
 
 
 def test_get_messages_missing_session_is_error():
-    transport = FakeTransport([(404, json.dumps({"name": "NotFoundError", "data": {"message": "SessionNotFound"}}))])
+    transport = FakeTransport(
+        [
+            (
+                404,
+                json.dumps(
+                    {"name": "NotFoundError", "data": {"message": "SessionNotFound"}}
+                ),
+            )
+        ]
+    )
     client = make_client(transport)
     with pytest.raises(RuntimeError):
         client.get_messages(timeout=5.0)
@@ -418,7 +506,9 @@ def test_server_recycles_idle_process_on_config_change(monkeypatch):
         oc._reset_server_singleton()
 
 
-def test_server_rolls_over_on_config_change_without_interrupting_active_clients(monkeypatch):
+def test_server_rolls_over_on_config_change_without_interrupting_active_clients(
+    monkeypatch,
+):
     class FakeProc:
         def __init__(self):
             self.returncode = None
@@ -516,11 +606,17 @@ def test_config_fingerprint_tracks_xdg_opencode_files(tmp_path, monkeypatch):
     config_dir = config_home / "opencode"
     config_dir.mkdir(parents=True)
     config_file = config_dir / "opencode.jsonc"
-    config_file.write_text("{\"default_agent\":\"build\"}")
-    monkeypatch.setattr(oc.os, "getenv", lambda name, default="": str(config_home) if name == "XDG_CONFIG_HOME" else default)
+    config_file.write_text('{"default_agent":"build"}')
+    monkeypatch.setattr(
+        oc.os,
+        "getenv",
+        lambda name, default="": (
+            str(config_home) if name == "XDG_CONFIG_HOME" else default
+        ),
+    )
 
     first = oc._opencode_config_fingerprint()
-    config_file.write_text("{\"default_agent\":\"plan\",\"plugin\":[\"systematic\"]}")
+    config_file.write_text('{"default_agent":"plan","plugin":["systematic"]}')
     second = oc._opencode_config_fingerprint()
 
     assert first != second
@@ -621,6 +717,7 @@ def test_wait_ready_stages_wait_longer_than_legacy_timeout(monkeypatch):
     fixed 30s gate killed every boot slower than 30s (fresh ``opencode serve``
     takes 40-160s under load), which re-spawned another server — the exact
     herd the ladder exists to prevent."""
+
     # /session answers 200 only after 5 failed probes; a fresh transport is
     # built per poll tick, so the counter must be class-level.
     class SlowBoot:
@@ -642,7 +739,9 @@ def test_wait_ready_stages_wait_longer_than_legacy_timeout(monkeypatch):
     monkeypatch.setattr(oc, "_UrllibTransport", SlowBoot)
     # Stage 1 (0.2s ≈ <5 ticks at 0.25s each) cannot cover 5 failures; only
     # reaching stage 2 lets the 6th probe succeed — not raising IS the proof.
-    oc._wait_ready("http://127.0.0.1:1", timeout=0.2, stages=[0.2, 5.0], proc=FakeProc())
+    oc._wait_ready(
+        "http://127.0.0.1:1", timeout=0.2, stages=[0.2, 5.0], proc=FakeProc()
+    )
 
 
 def test_wait_ready_dead_process_fails_fast_between_stages(monkeypatch):
@@ -658,7 +757,9 @@ def test_wait_ready_dead_process_fails_fast_between_stages(monkeypatch):
 
     monkeypatch.setattr(oc, "_UrllibTransport", never)
     with pytest.raises(RuntimeError, match="exited with code 7"):
-        oc._wait_ready("http://127.0.0.1:1", timeout=5.0, stages=[0.2, 5.0], proc=DeadProc())
+        oc._wait_ready(
+            "http://127.0.0.1:1", timeout=5.0, stages=[0.2, 5.0], proc=DeadProc()
+        )
 
 
 def test_wait_ready_legacy_call_shape_unchanged(monkeypatch):

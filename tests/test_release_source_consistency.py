@@ -25,7 +25,8 @@ GUARDED_MODULES = [
     "agent/anthropic_adapter.py",
     "agent/agent_runtime_helpers.py",
     "tools/vision_tools.py",
-    "tools/browser_tool_vision.py",
+    # upstream 68500d9ff94 deleted tools/browser_tool_vision.py; the fork guard
+    # keeps only modules that exist on the adopted line
     "tools/browser_use_cli.py",
 ]
 

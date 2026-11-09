@@ -68,13 +68,43 @@ import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, Future
+
+try:  # scripts dir is sys.path[0] when run as a script; tests copy this file alone into tmp trees
+    from runner_cgroup_limits import (
+        _CGROUP_V2_MOUNT_ROOT,
+        _PROC_SELF_CGROUP,
+        _cgroup_chain_limits,
+        _derive_default_workers,
+        _env_workers_override,
+    )
+except ImportError:  # anchor to this file's own directory instead
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from runner_cgroup_limits import (
+        _CGROUP_V2_MOUNT_ROOT,
+        _PROC_SELF_CGROUP,
+        _cgroup_chain_limits,
+        _derive_default_workers,
+        _env_workers_override,
+    )
+
+# Re-exported for tests that drive the cgroup helpers through this module.
+from runner_cgroup_limits import (
+    _PIDS_HEADROOM_DIVISOR,
+    _PIDS_STATIC_DIVISOR,
+    _parse_cpu_max,
+    _read_int_file,
+    _read_text,
+    _resolve_self_cgroup_dir,
+    _scan_cgroup_node,
+)
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # The CI lane selector owns the platforms() spec resolver; share it so the
 # "skipped on this host" note and the lanes can never disagree.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.ci.list_os_marked_tests import gated_specs, spec_hosts
+from scripts.run_tests_launch import start_pytest
 
 
 def _sweep_killed_run_roots(root: str) -> None:
@@ -178,19 +208,6 @@ _DURATIONS_FILE = "test_durations.json"
 # pytest subprocesses; past pids.max every further spawn dies with EAGAIN —
 # the "tests dispatch but never run" failure mode. The bound is derived
 # from the same numbers the kernel enforces, so sessions coordinate with
-# no config knob. Systemd TasksMax sizing itself stays the ops lane.
-_CGROUP_V2_MOUNT_ROOT = "/sys/fs/cgroup"  # monkeypatch/inject in tests
-_PROC_SELF_CGROUP = "/proc/self/cgroup"
-
-# Static pids ceiling: never plan more than 1/32 of pids.max in workers
-# alone (16 concurrent sessions × 768/32 = 384 planned processes — an
-# order below a TasksMax of 768).
-_PIDS_STATIC_DIVISOR = 32
-
-# Live headroom: a starting runner claims at most 1/8 of the pids budget
-# still free, so a fleet already nearing pids.max progressively starves
-# new fan-outs instead of tripping EAGAIN mid-suite. Read once at start.
-_PIDS_HEADROOM_DIVISOR = 8
 
 
 def _split_pathspec(value: str) -> list[str]:
@@ -302,6 +319,13 @@ def _select_files(
         # were supplied, otherwise --paths (which itself defaults to 'tests').
         if args.paths_positional:
             roots = [repo_root / p for p in args.paths_positional]
+            # Discovery skips a root that does not exist, which is right for
+            # the --paths defaults but turns a mistyped or deleted file the
+            # caller NAMED into a green run that never tested it.
+            missing = [p for p, root in zip(args.paths_positional, roots) if not root.exists()]
+            if missing:
+                print(f"error: no such test path: {' '.join(missing)}", file=sys.stderr)
+                sys.exit(2)
         else:
             roots = [repo_root / p for p in _split_pathspec(args.paths)]
 
@@ -656,7 +680,6 @@ def _run_one_file_once(
     file_timeout: float,
 ) -> tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
 
     # Give this subprocess its own pytest temp root.
     #
@@ -713,31 +736,7 @@ def _run_one_file_once(
     env["TMPDIR"] = temproot
 
     subproc_start = time.monotonic()
-    # launch the pytest process
-    proc = subprocess.Popen(
-        cmd,
-        cwd=repo_root,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace",
-        env=env,
-        # POSIX: place the child at the head of its own process group so
-        # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
-        start_new_session=True,
-    )
-
-    # Capture the pgid NOW, before the leader can exit and be reaped. Once
-    # the leader is reaped, os.getpgid(proc.pid) raises ProcessLookupError
-    # even though grandchildren in that group are still alive — defeating
-    # the whole cleanup. None on Windows where the pgid concept doesn't apply.
-    pgid: int | None = None
-    if sys.platform != "win32":
-        try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError):
-            pgid = None
+    proc, pgid = start_pytest(file, pytest_args, repo_root, env, _runner_scratch_root())
 
     try:
         output, _ = proc.communicate(timeout=file_timeout)
@@ -777,6 +776,10 @@ def _run_one_file_once(
 
     if rc not in (0, 5) and not output.strip():
         output = f"pytest child exited {rc} (0x{rc & 0xffffffff:08x}) with no output: {file}\n"
+    elif rc > 1 and rc not in (5, 124):
+        # A file can pass every test and still exit non-zero; without the
+        # status the failure dump shows only a green pytest summary.
+        output += f"(pytest child exit status {rc})\n"
 
     if rc == 5:
         # No tests collected in THIS file — legitimate per-file: a
@@ -787,6 +790,8 @@ def _run_one_file_once(
         # (venv without pytest, -k that matches nothing) can't report green.
         rc = 0
     summary = _parse_pytest_summary(output)
+    if rc != 0 and _COLLECTION_ERROR_RE.search(output):
+        summary["collect_error"] = 1
     crash = _describe_interpreter_crash(rc, output) if rc != 0 else None
     if crash:
         # Same convention as the timeout path: the diagnosis leads the
@@ -1014,6 +1019,14 @@ def _save_durations(
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+#: Estimate for a file with no cached duration (roughly the P50 from profiling).
+_DEFAULT_FILE_DURATION = 2.0
+
+
+def _estimated_duration(file: Path, durations: dict[str, float], repo_root: Path) -> float:
+    return float(durations.get(_format_file(file, repo_root), _DEFAULT_FILE_DURATION))
+
+
 def _compute_lpt_slices(
     files: list[Path],
     slice_count: int,
@@ -1026,8 +1039,7 @@ def _compute_lpt_slices(
     file to the slice with the smallest accumulated time so far. This
     minimizes the makespan (max slice duration) and keeps CI jobs balanced.
 
-    Files with no cached duration get a default estimate of 2.0s (roughly
-    the P50 from profiling). This means first-time runs (no cache) still
+    Files with no cached duration get _DEFAULT_FILE_DURATION. This means first-time runs (no cache) still
     get reasonable distribution, and new files don't all land in one slice.
 
     Returns a list of N file-lists, one per slice (0-indexed).
@@ -1035,11 +1047,9 @@ def _compute_lpt_slices(
     if slice_count < 2:
         return [files]
 
-    default_dur = 2.0
     file_durs: list[tuple[Path, float]] = []
     for f in files:
-        rel = _format_file(f, repo_root)
-        dur = durations.get(rel, default_dur)
+        dur = _estimated_duration(f, durations, repo_root)
         file_durs.append((f, dur))
 
     # Sort longest first (LPT).
@@ -1056,6 +1066,22 @@ def _compute_lpt_slices(
         bucket_totals[min_idx] += dur
 
     return bucket_files
+
+
+def _longest_first(
+    files: list[Path], durations: dict[str, float], repo_root: Path
+) -> list[Path]:
+    """Order files for submission: slowest cached duration first.
+
+    The pool starts files in submission order, so a slow file submitted late
+    runs alone at the end while the other workers sit idle. Starting the slow
+    ones first leaves only short files for the tail. Files without a cached
+    duration get _DEFAULT_FILE_DURATION. Ties keep their original order, so an
+    empty cache leaves the order unchanged.
+    """
+    if not durations:
+        return files  # skip a path resolve per file when there is nothing to sort by
+    return sorted(files, key=lambda f: -_estimated_duration(f, durations, repo_root))
 
 
 def _slice_files(
@@ -1087,13 +1113,9 @@ def _slice_files(
     bucket_files = _compute_lpt_slices(sorted(files), slice_count, {}, repo_root)
 
     target = bucket_files[slice_index - 1]
-    target_dur = sum(
-        durations.get(_format_file(f, repo_root), 2.0) for f in target
-    )
+    target_dur = sum(_estimated_duration(f, durations, repo_root) for f in target)
     total_dur = sum(
-        durations.get(_format_file(f, repo_root), 2.0)
-        for bucket in bucket_files
-        for f in bucket
+        _estimated_duration(f, durations, repo_root) for bucket in bucket_files for f in bucket
     )
     print(
         f"Slice {slice_index}/{slice_count}: {len(target)} files "
@@ -1161,193 +1183,6 @@ def _pytest_flag_error(tokens: list[str]) -> Optional[str]:
     return f"unrecognized arguments: {' '.join(unknown)}" if unknown else None
 
 
-# All helpers below are pure over injectable paths so tests can drive them
-# against fixture cgroup trees instead of the live host; every read
-# fail-opens to "no limit" (missing file, wrong shape, "max", no cgroups).
-
-
-def _read_text(path) -> Optional[str]:
-    """File content, or None — an unreadable file means "no truth", never
-    an error: each term of the worker bound is independently optional."""
-    try:
-        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
-            return fh.read()
-    except OSError:
-        return None
-
-
-def _read_int_file(path) -> Optional[int]:
-    """A single-int cgroup file ("768\n") as an int; "max", empty or
-    malformed content → None (treated as no limit)."""
-    text = _read_text(path)
-    if text is None:
-        return None
-    value = text.strip()
-    if not value or value == "max":
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
-def _parse_cpu_max(content: str) -> Optional[float]:
-    """A cgroup v2 ``cpu.max`` value ("<quota> <period>") as CPU cores
-    ("600000 100000" → 6.0). "max <period>", malformed, or non-positive
-    numbers → None (no limit)."""
-    parts = content.split()
-    if len(parts) != 2:
-        return None
-    quota_str, period_str = parts
-    if quota_str == "max":
-        return None
-    try:
-        quota, period = int(quota_str), int(period_str)
-    except ValueError:
-        return None
-    if quota <= 0 or period <= 0:
-        return None
-    return quota / period
-
-
-def _scan_cgroup_node(node: Path) -> tuple[Optional[float], Optional[int], Optional[int]]:
-    """One cgroup dir's (cpu cores, pids.max, pids.current), each fail-open.
-
-    v1 quota files are read alongside v2 ``cpu.max`` because a node only
-    ever carries one shape — the absent one reads as None and is skipped.
-    pids.current is only meaningful at a level that has pids.max (v2
-    accounts the whole subtree there), so it is None when pids.max is.
-    """
-    cores = _parse_cpu_max(_read_text(node / "cpu.max") or "")
-    quota = _read_int_file(node / "cpu.cfs_quota_us")  # v1: -1 = unlimited
-    period = _read_int_file(node / "cpu.cfs_period_us")
-    if quota is not None and quota > 0 and period is not None and period > 0:
-        v1 = quota / period
-        cores = v1 if cores is None else min(cores, v1)
-    pids_max = _read_int_file(node / "pids.max")
-    pids_current = _read_int_file(node / "pids.current") if pids_max is not None else None
-    return cores, pids_max, pids_current
-
-
-def _resolve_self_cgroup_dir(
-    proc_self_cgroup: Optional[str] = None,
-    mount_root: Optional[str] = None,
-) -> Optional[Path]:
-    """This process's cgroup v2 dir (the "0::<rel>" line of
-    /proc/self/cgroup) under mount_root; a "/" relpath resolves to the
-    mount root itself. None when the file is absent or the host has no
-    unified hierarchy (cgroup v1) — callers fall back to per-controller
-    mounts or skip the axis entirely."""
-    if proc_self_cgroup is None:
-        proc_self_cgroup = _PROC_SELF_CGROUP
-    if mount_root is None:
-        mount_root = _CGROUP_V2_MOUNT_ROOT
-    for line in (_read_text(proc_self_cgroup) or "").splitlines():
-        parts = line.split(":", 2)
-        if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
-            rel = parts[2].strip("/")
-            return Path(mount_root) if not rel else Path(mount_root) / rel
-    return None
-
-
-def _cgroup_chain_limits(
-    proc_self_cgroup: Optional[str] = None,
-    mount_root: Optional[str] = None,
-) -> tuple[Optional[float], Optional[int], Optional[int]]:
-    """The most-binding (cpu cores, pids.max, pids.current) over this
-    process's cgroup dir and every ancestor up to the mount root.
-
-    v2 primary (unified hierarchy); on a v1 host, best-effort walk of the
-    ``cpu``/``pids`` controller mounts named in /proc/self/cgroup. An
-    axis that cannot be resolved is None — the derivation fail-opens to
-    the remaining terms. pids.current is taken from the deepest level
-    that carries pids.max."""
-    if proc_self_cgroup is None:
-        proc_self_cgroup = _PROC_SELF_CGROUP
-    if mount_root is None:
-        mount_root = _CGROUP_V2_MOUNT_ROOT
-    mount = Path(mount_root)
-    chains = []  # (deepest dir, chain root) pairs to walk upward through
-    v2_dir = _resolve_self_cgroup_dir(proc_self_cgroup, mount_root)
-    if v2_dir is not None:
-        chains.append((v2_dir, mount))
-    else:
-        for line in (_read_text(proc_self_cgroup) or "").splitlines():
-            parts = line.split(":", 2)
-            if len(parts) != 3 or not parts[1]:
-                continue
-            for controller in parts[1].split(","):
-                if controller in ("cpu", "pids"):
-                    base = mount / controller
-                    rel = parts[2].strip("/")
-                    chains.append((base if not rel else base / rel, base))
-    cpu_ceiling: Optional[float] = None
-    pids_max: Optional[int] = None
-    pids_current: Optional[int] = None
-    for deepest, chain_root in chains:
-        node = deepest
-        while True:
-            cores, node_pids_max, node_pids_current = _scan_cgroup_node(node)
-            if cores is not None:
-                cpu_ceiling = cores if cpu_ceiling is None else min(cpu_ceiling, cores)
-            if node_pids_max is not None:
-                pids_max = node_pids_max if pids_max is None else min(pids_max, node_pids_max)
-                if pids_current is None and node_pids_current is not None:
-                    pids_current = node_pids_current
-            if node == chain_root or node.parent == node:
-                break
-            node = node.parent
-    return cpu_ceiling, pids_max, pids_current
-
-
-def _derive_default_workers(
-    cpu_count: Optional[int] = None,
-    limits: Optional[tuple[Optional[float], Optional[int], Optional[int]]] = None,
-    proc_self_cgroup: Optional[str] = None,
-    mount_root: Optional[str] = None,
-) -> int:
-    """The default worker bound: min of legacy cpu_count*2, the cgroup cpu
-    ceiling (ceil of cores), pids.max/_PIDS_STATIC_DIVISOR, and live
-    (pids_max - pids_current)/_PIDS_HEADROOM_DIVISOR — floored at 1. Terms
-    with no readable truth are skipped (fail-open)."""
-    if cpu_count is None:
-        cpu_count = os.cpu_count() or 4
-    if limits is None:
-        limits = _cgroup_chain_limits(proc_self_cgroup, mount_root)
-    cpu_ceiling, pids_max, pids_current = limits
-    candidates = [cpu_count * 2]
-    if cpu_ceiling is not None and cpu_ceiling > 0:
-        candidates.append(math.ceil(cpu_ceiling))
-    if pids_max is not None and pids_max > 0:
-        candidates.append(pids_max // _PIDS_STATIC_DIVISOR)
-        if pids_current is not None:
-            candidates.append(max(0, pids_max - pids_current) // _PIDS_HEADROOM_DIVISOR)
-    return max(1, min(candidates))
-
-
-def _env_workers_override(env: Optional[dict[str, str]] = None) -> Optional[int]:
-    """HERMES_TEST_WORKERS as a positive int, or None (unset, malformed, or
-    non-positive — tolerant so one bad value can't crash main() at
-    argparse-default time; mirrors agent/pi_rpc_client._env_float)."""
-    source = os.environ if env is None else env
-    raw = str(source.get("HERMES_TEST_WORKERS", "")).strip()
-    if not raw:
-        return None
-    try:
-        value = int(raw)
-    except ValueError:
-        warnings.warn(
-            f"Ignoring malformed HERMES_TEST_WORKERS={raw!r}; using the derived default",
-            stacklevel=2,
-        )
-        return None
-    if value <= 0:
-        warnings.warn(
-            f"Ignoring non-positive HERMES_TEST_WORKERS={raw!r}; using the derived default",
-            stacklevel=2,
-        )
-        return None
-    return value
 
 
 def _default_jobs(
@@ -1390,6 +1225,78 @@ def _report_skips(
     return True
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'s' if n != 1 else ''}"
+
+
+# A file that dies while importing/collecting is interrupted by pytest with
+# exit 2 and ``collected 0 items / 1 error``: it has no failed-test count, so
+# it must be named as its own cause or a run reads "N passed, 0 failed".
+_COLLECTION_ERROR_RE = re.compile(
+    r"\d+ errors? during collection|^_+ ERROR collecting ", re.MULTILINE,
+)
+
+
+def _collection_error_reason(output: str) -> str:
+    """The one-line cause pytest gave for a file that failed to import/collect."""
+    # The traceback's last ``E`` line is whole; the short-summary ``ERROR``
+    # line is cut to the terminal width and only stands in under --tb=no.
+    lines = output.splitlines()
+    for prefix in ("E   ", "ERROR "):
+        for line in reversed(lines):
+            if line.startswith(prefix):
+                return line[len(prefix):].strip()
+    return "(see the failure output above)"
+
+
+def _failure_cause(summary: dict[str, int]) -> str:
+    """Bucket key for one failing file, most specific diagnosis first."""
+    if summary.get("crashed"):
+        return "crashed"
+    if summary.get("collect_error"):
+        return "collect"
+    if summary.get("failed", 0):
+        return "failed"
+    if summary.get("errors", 0):
+        return "errors"
+    if summary.get("passed", 0):
+        return "nonzero"
+    return "none_ran"
+
+
+# cause -> (header after "=== N file(s) ", per-file detail(output, summary)),
+# printed in this order.
+_FAILURE_BUCKETS: dict[str, tuple[str, Callable[[str, dict[str, int]], str]]] = {
+    "crashed": (
+        "where the interpreter CRASHED mid-run (native fault — a real bug, not a "
+        "collection error; the tests that did run are not counted)",
+        lambda out, _s: out.splitlines()[0],
+    ),
+    "collect": (
+        "that FAILED AT IMPORT/COLLECTION (0 tests ran)",
+        lambda out, _s: _collection_error_reason(out),
+    ),
+    "failed": (
+        "with test failures",
+        lambda _o, s: f"({_plural(s.get('failed', 0), 'test')} failed)",
+    ),
+    # Setup/teardown ERRORs with no test failures: under "all tests passed but
+    # pytest exited non-zero" they read like a warnings-as-errors quirk.
+    "errors": (
+        "with pytest ERRORs (fixture setup/teardown; grep '^ERROR ' in the failure output)",
+        lambda _o, s: f"({s.get('passed', 0)} passed, {_plural(s.get('errors', 0), 'error')})",
+    ),
+    "nonzero": (
+        "where all tests passed but pytest exited non-zero (warnings-as-errors, hook failures, etc.)",
+        lambda _o, s: f"({s.get('passed', 0)} passed)",
+    ),
+    "none_ran": (
+        "where no tests ran (timeout before collection, pytest usage error, etc.)",
+        lambda _o, _s: "",
+    ),
+}
+
+
 def _print_failure_report(
     failures: list[tuple[Path, str, dict[str, int]]], repo_root: Path,
 ) -> None:
@@ -1401,43 +1308,49 @@ def _print_failure_report(
         print(f"--- {_format_file(file, repo_root)} ---")
         print(output.rstrip())
     print()
-    # Split: files with actual test failures vs non-zero exit for other reasons
-    crashed_files = [(f, o, s) for f, o, s in failures if s.get("crashed")]
-    rest = [(f, s) for f, _o, s in failures if not s.get("crashed")]
-    test_fail_files = [(f, s) for f, s in rest if s.get("failed", 0) > 0]
-    all_passed_but_nonzero = [(f, s) for f, s in rest
-                              if s.get("failed", 0) == 0 and s.get("passed", 0) > 0]
-    no_tests_ran = [(f, s) for f, s in rest
-                    if s.get("failed", 0) == 0 and s.get("passed", 0) == 0]
-    if crashed_files:
-        print(f"=== {len(crashed_files)} file{'s' if len(crashed_files) != 1 else ''} where the interpreter CRASHED mid-run (native fault — a real bug, not a collection error; the tests that did run are not counted) ===")
-        for file, output, _s in crashed_files:
-            print(f"  {_format_file(file, repo_root)}  {output.splitlines()[0]}")
-    if test_fail_files:
-        total_tf = sum(s.get("failed", 0) for _, s in test_fail_files)
-        print(f"=== {len(test_fail_files)} file{'s' if len(test_fail_files) != 1 else ''} with test failures ({total_tf} test{'s' if total_tf != 1 else ''} failed) ===")
-        for file, s in test_fail_files:
-            nf = s.get("failed", 0)
-            print(f"  {_format_file(file, repo_root)}  ({nf} test{'s' if nf != 1 else ''} failed)")
-    if all_passed_but_nonzero:
-        print(f"=== {len(all_passed_but_nonzero)} file{'s' if len(all_passed_but_nonzero) != 1 else ''} where all tests passed but pytest exited non-zero (warnings-as-errors, hook failures, etc.) ===")
-        for file, s in all_passed_but_nonzero:
-            print(f"  {_format_file(file, repo_root)}  ({s.get('passed', 0)} passed)")
-    if no_tests_ran:
-        print(f"=== {len(no_tests_ran)} file{'s' if len(no_tests_ran) != 1 else ''} where no tests ran (collection/import error, timeout before collection, etc.) ===")
-        for file, s in no_tests_ran:
-            print(f"  {_format_file(file, repo_root)}")
+    by_cause: dict[str, list[tuple[Path, str, dict[str, int]]]] = {}
+    for failure in failures:
+        by_cause.setdefault(_failure_cause(failure[2]), []).append(failure)
+    for cause, (header, detail) in _FAILURE_BUCKETS.items():
+        group = by_cause.get(cause, [])
+        if not group:
+            continue
+        print(f"=== {_plural(len(group), 'file')} {header} ===")
+        for file, output, summary in group:
+            print(f"  {_format_file(file, repo_root)}  {detail(output, summary)}".rstrip())
+
+
+def _summary_notes(
+    failures: list[tuple[Path, str, dict[str, int]]],
+    total_files: int,
+    tests_errored: int,
+    files_crashed: int,
+    tests_skipped: int,
+) -> str:
+    """Everything the Summary line must say beyond passed/failed counts.
+
+    ERRORs, crashes and import/collection failures have no failed-test count;
+    without these notes a red run reads "N passed, 0 failed" on the one line
+    everyone reads, while the exit code says 1.
+    """
+    notes = ""
+    if tests_errored:
+        notes += f", {_plural(tests_errored, 'error')}"
+    if files_crashed:
+        notes += f", {_plural(files_crashed, 'file')} CRASHED"
+    if tests_skipped:
+        notes += f", {tests_skipped} skipped"
+    if failures:
+        collect = sum(1 for _f, _o, s in failures if s.get("collect_error"))
+        notes += f"; FAILED: {len(failures)} of {_plural(total_files, 'file')}"
+        if collect:
+            notes += f" ({collect} at import/collection)"
+    return notes
 
 
 
-def main() -> int:
-    _make_stdio_glyph_safe()
-    # Cgroup truth is read ONCE here and threaded to both the argparse
-    # default and the startup banner, so they quote identical numbers —
-    # and so later-starting runners on a shared unit see earlier starters'
-    # committed tasks (read-once, never per file).
-    cgroup_limits = _cgroup_chain_limits()
-    derived_jobs = _derive_default_workers(limits=cgroup_limits)
+def _build_arg_parser(cgroup_limits, derived_jobs) -> argparse.ArgumentParser:
+    """Construct the CLI parser (extracted from ``main``: code-health FUNC_LINES)."""
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1556,6 +1469,21 @@ def main() -> int:
             "separator is passed through to each per-file pytest invocation."
         ),
     )
+    return parser
+
+
+def main() -> int:
+    _make_stdio_glyph_safe()
+    # Cgroup truth is read ONCE here and threaded to both the argparse
+    # default and the startup banner, so they quote identical numbers —
+    # and so later-starting runners on a shared unit see earlier starters'
+    # committed tasks (read-once, never per file).
+    # read the runner-module globals at call time so tests monkeypatching
+    # THIS module's _PROC_SELF_CGROUP/_CGROUP_V2_MOUNT_ROOT still take effect
+    cgroup_limits = _cgroup_chain_limits(
+        proc_self_cgroup=_PROC_SELF_CGROUP, mount_root=_CGROUP_V2_MOUNT_ROOT)
+    derived_jobs = _derive_default_workers(limits=cgroup_limits)
+    parser = _build_arg_parser(cgroup_limits, derived_jobs)
     # Split argv into "our flags + positional paths" vs "pytest passthrough".
     #
     # Two ways to pass args through to the per-file pytest invocation:
@@ -1784,6 +1712,10 @@ def main() -> int:
     tests_failed = 0
     tests_skipped = 0
     skipped_files: list[tuple[Path, int]] = []
+    # pytest setup/teardown ERRORs ("41 passed, 7 errors"). Not failures, but
+    # they make pytest exit non-zero, so the Summary line must name them or it
+    # reads "0 failed" under an exit code of 1.
+    tests_errored = 0
     # Every collected outcome, not just pass/fail: a legitimately all-skipped
     # (platform-gated) file reports "2 skipped" and must NOT trip the
     # nothing-ran guard, whereas a file that died before collection reports
@@ -1794,7 +1726,7 @@ def main() -> int:
 
     def _on_done(file: Path, started_at: float, fut: Future[tuple[Path, int, str, dict[str, int], float]]) -> None:
         nonlocal files_done, tests_done, pass_count, fail_count, tests_passed, tests_failed, tests_skipped
-        nonlocal tests_collected, files_crashed
+        nonlocal tests_collected, files_crashed, tests_errored
         n_tests = test_counts.get(file, 0)
         try:
             fpath, rc, output, summary, subproc_wall = fut.result()
@@ -1821,6 +1753,7 @@ def main() -> int:
             tests_skipped += summary.get("skipped", 0)
             if summary.get("skipped", 0):
                 skipped_files.append((fpath, summary["skipped"]))
+            tests_errored += summary.get("errors", 0)
             files_crashed += summary.get("crashed", 0)
             tests_collected += sum(
                 summary.get(k, 0)
@@ -1853,7 +1786,7 @@ def main() -> int:
         # CI load (see _effective_file_timeout).
         timeout_durations = _load_durations(repo_root)
         futures: list[Future] = []
-        for file in files:
+        for file in _longest_first(files, timeout_durations, repo_root):
             t0 = time.monotonic()
             fut = pool.submit(
                 _run_one_file, file, pytest_passthrough, repo_root,
@@ -1873,14 +1806,8 @@ def main() -> int:
     elapsed = time.monotonic() - started
     print()
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0
-    skipped_note = f", {tests_skipped} skipped" if tests_skipped else ""
-    # A crashed interpreter has no failed-test count; say so on the one line
-    # everyone reads, or "0 failed" + exit 1 looks like a runner bug.
-    crashed_note = (
-        f", {files_crashed} file{'s' if files_crashed != 1 else ''} CRASHED"
-        if files_crashed else ""
-    )
-    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{crashed_note}{skipped_note} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
+    notes = _summary_notes(failures, len(files), tests_errored, files_crashed, tests_skipped)
+    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed{notes} ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
 
     # Host-OS gating note: tests marked for another OS were skipped by the
     # conftest hook, not run. Say so explicitly — a green local run on Linux

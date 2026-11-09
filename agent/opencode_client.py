@@ -305,6 +305,7 @@ def acquire_opencode_server(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # detached-spawn: ok -- shared opencode serve daemon, explicitly terminated at close
                 start_new_session=True,
             )
             handle = _ServerHandle(
@@ -444,9 +445,16 @@ class OpenCodeClient:
         return self._transport
 
     def _request(
-        self, method: str, path: str, body: Optional[dict] = None
+        self, method: str, path: str, body: Optional[dict] = None,
+        *, timeout: Optional[float] = None,
     ) -> tuple[int, Any]:
-        status, text = self._http().request(method, path, body)
+        transport = self._http()
+        if timeout is not None and isinstance(transport, _UrllibTransport):
+            # A one-off deadline for non-idempotent session creation. Never
+            # retry a timed-out POST: the server may have created the session.
+            # Keep the normal transport deadline unchanged for later turns.
+            transport = _UrllibTransport(transport.base_url, timeout=timeout)
+        status, text = transport.request(method, path, body)
         if status >= 400:
             raise RuntimeError(
                 f"opencode server {method} {path} failed: HTTP {status}: {text[:500]}"
@@ -511,7 +519,17 @@ class OpenCodeClient:
                 ready_timeout=self._ready_timeout or _DEFAULT_READY_TIMEOUT,
                 stages=ready_stages,
             )
-        _status, payload = self._request("POST", f"/session{self._qdir()}", {"title": self.session_name})
+        # OpenCode may accept /session before plugin initialization finishes;
+        # creating the first session then takes >60s on a loaded host. The
+        # generic transport timeout incorrectly killed this single POST after
+        # 60s (M5 -005, 2026-11-01), with an unknown server-side outcome.
+        # Use a bounded portion of the already-authorized bootstrap budget,
+        # without retrying or changing subsequent request timeouts.
+        create_timeout = max(60.0, min(self._ready_timeout, 240.0))
+        _status, payload = self._request(
+            "POST", f"/session{self._qdir()}", {"title": self.session_name},
+            timeout=create_timeout,
+        )
         if not isinstance(payload, dict) or not payload.get("id"):
             raise RuntimeError(
                 f"opencode session create returned no id: {payload!r}"[:500]

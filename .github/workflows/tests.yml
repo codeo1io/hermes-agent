@@ -46,6 +46,9 @@ jobs:
     # 89.8% at the 60-min wall on 4 cores (run 37226448600); slicing halves
     # each lane, and 150 minutes holds the observed ~10%/15min pace with
     # headroom for the slowest tail files either way.
+    # (Upstream v0.23.0 runs three 32-core blacksmith slices with
+    # HERMES_TEST_FORKSERVER=1; the fork keeps its hosted 4-core recipe —
+    # 12 workers, 3 file retries, 150-minute wall — proven green here.)
     name: Run tests (${{ matrix.slice }}/2)
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -76,7 +79,7 @@ jobs:
       - name: Set up locked Python and test dependencies
         uses: ./.github/actions/setup-pm
         with:
-          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web"]'
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
           test-environment: 'true'
           prune-python-cache: true
 
@@ -140,7 +143,7 @@ jobs:
         with:
           path: test_durations.json
           # Per-slice key: each slice's file keeps the restored entries for the other
-          # slice's files and refreshes its own, so the cache stays complete.
+          # slices' files and refreshes its own, so the cache stays complete.
           key: test-durations-${{ github.run_id }}-${{ matrix.slice }}
 
       - name: Check the checkout is clean
@@ -410,7 +413,7 @@ jobs:
         # in the venv up front.
         uses: ./.github/actions/retry
         with:
-          command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web
+          command: uv sync --locked --python 3.14 --extra all --group dev --extra anthropic --extra mistral --extra fal --extra modal --extra daytona --extra parallel-web --extra keychain
 
       - name: Install bubblewrap
         # Every spawned updater runs in bwrap (own PID namespace, no user
