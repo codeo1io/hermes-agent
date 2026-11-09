@@ -91,7 +91,8 @@ def test_entries_are_isolated_per_key():
 
 
 @pytest.mark.parametrize(
-    "error_class", ["resource_exhausted", "agent_stall", "unknown", "transport", ""]
+    "error_class",
+    ["resource_exhausted", "agent_stall", "unknown", "transport", "", "local_kill", "local_budget_expired"],
 )
 def test_non_provider_classes_never_open(error_class):
     ledger, _clock = make_ledger()
@@ -202,6 +203,154 @@ def test_success_closes_and_resets_the_streak():
     assert ledger.check(KEY) is None
     ledger.record_failure(KEY, "rate_limit")
     assert isinstance(ledger.check(KEY), CircuitOpen)
+
+
+# --- locally-initiated kills never feed the breaker (plan U3) ----------
+# The storm-count poisoning leg of finding 7892c6c904fb: kill prose from OUR
+# own stall-abort / zombie rider / supervisor close used to classify
+# ``timeout`` (a provider class) and open the (backend, model) breaker,
+# refusing healthy dispatches. Origin-threaded classification
+# (agent/delegate_errors.py, plan U1) makes those kills structurally local;
+# this lane pins the BREAKER side of the contract in both directions.
+
+
+def test_stall_kill_prose_with_local_origin_never_poisons_the_breaker():
+    """End to end at the ledger boundary: the exact text a locally-
+    initiated kill produces classifies OUT of the provider vocabulary once
+    the kill site threads its origin — no number of local kills opens the
+    (backend, model) circuit."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "operation was aborted during local kill",
+        zero_activity=False,
+        origin="local_kill",
+    )
+    assert error_class == "local_kill"
+    ledger, clock = make_ledger()
+    for _ in range(FAILURE_THRESHOLD * 3):
+        ledger.record_failure(KEY, error_class)
+        clock.advance(1.0)
+    assert ledger.check(KEY) is None
+
+
+def test_provider_evidence_with_local_origin_still_escalates():
+    """The other direction of the same contract: origin threading must not
+    mask genuine provider refusals — rate-limit evidence under a local kill
+    still opens the breaker exactly as before."""
+    error_class, _signal, _retry = classify_delegate_failure(
+        "429 Too Many Requests (cooling down)",
+        zero_activity=False,
+        origin="local_kill",
+    )
+    assert error_class == "rate_limit"
+    ledger, clock = make_ledger()
+    for i in range(FAILURE_THRESHOLD):
+        ledger.record_failure(KEY, error_class)
+        if i < FAILURE_THRESHOLD - 1:
+            clock.advance(1.0)
+    assert isinstance(ledger.check(KEY), CircuitOpen)
+
+
+def test_local_kill_probe_death_resolves_inconclusive():
+    """A half-open probe turn that dies to a LOCAL kill (supervisor stop,
+    rider) consumed the probe without a provider signal: resolve it
+    inconclusive and re-arm — the same seam as agent_stall, extended to the
+    origin-threaded classes."""
+    ledger, clock = make_ledger()
+    open_ledger(ledger, clock)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # the single probe is granted
+    ledger.record_failure(KEY, "local_kill")  # probe turn killed locally
+    state = ledger.check(KEY)
+    assert isinstance(state, CircuitOpen)
+    assert state.retry_after_s == pytest.approx(INITIAL_COOLDOWN_S)
+    clock.advance(INITIAL_COOLDOWN_S)
+    assert ledger.check(KEY) is None  # fresh probe — not wedged
+
+
+# The wiring seam itself: a turn that dies because the supervisor closed the
+# client mid-flight must carry its local origin THROUGH the tool's
+# classifier into the ledger forward, never reading as provider evidence.
+
+
+class _RecordingLedger:
+    """Hermetic ledger stand-in that records every forwarded class."""
+
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+        self.successes: list = []
+
+    def check(self, key):
+        return None
+
+    def record_success(self, key):
+        self.successes.append(key)
+
+    def record_failure(self, key, error_class):
+        self.failures.append(error_class)
+
+
+class _LocallyKilledClient:
+    """Native-client stand-in for a supervisor close mid-turn: the real
+    PiRPCClient marks exactly this shape with ``local_kill_disposition``."""
+
+    local_kill_disposition = "local_kill"
+
+    def run_session_prompt(self, message, timeout_seconds=None):
+        raise RuntimeError("pi rpc process exited with code -15")
+
+    def get_messages(self, *, timeout=30.0, stages=None):
+        return []
+
+
+def test_tool_exception_classifier_threads_local_kill_origin():
+    """``_classify_turn_exception`` maps the close-during-turn exception to
+    ``local_kill`` when the origin is threaded, and keeps today's transport
+    mapping when it is not (fail-open for unknown-origin callers)."""
+    from tools.delegate_session_tool import _classify_turn_exception
+
+    exc = RuntimeError("pi rpc process exited with code -15")
+    error_class, retry_after = _classify_turn_exception(exc, origin="local_kill")
+    assert error_class == "local_kill"
+    assert retry_after is None
+    error_class, _retry = _classify_turn_exception(exc)
+    assert error_class == "transport"
+
+
+def test_run_turn_forwards_local_kill_class_to_the_ledger(tmp_path, monkeypatch):
+    """The ledger forward that closes the loop (plan U3): a locally-killed
+    turn banks ``error_class=local_kill`` durably and forwards exactly that
+    class — the breaker sees no provider signal, so it cannot open."""
+    import time
+
+    from tools import delegate_session_tool
+    from tools.delegate_session_tool import _metadata_path, _run_turn
+
+    monkeypatch.setattr(delegate_session_tool, "_OBSERVER_POLL_S", 0.05)
+    ledger = _RecordingLedger()
+    now = time.time()
+    record = {
+        "session_id": "u3-local-kill-t1",
+        "native_session_id": "u3-local-kill-t1",
+        "backend": "pi",
+        "model": "",
+        "client": _LocallyKilledClient(),
+        "owner": "tests/agent/test_delegate_health.py",
+        "owner_scope": "test",
+        "cwd": str(tmp_path),
+        "created_at": now,
+        "updated_at": now,
+        "status": "idle",
+        "consecutive_failures": 0,
+        "_scope_store_root": tmp_path,
+        "_scope_ledger": ledger,
+    }
+    _run_turn(record, "finish the phase", timeout=5.0)
+    assert record["error_class"] == "local_kill"
+    assert ledger.failures == ["local_kill"]
+    data = json.loads(
+        _metadata_path("u3-local-kill-t1", root=tmp_path).read_text(encoding="utf-8")
+    )
+    assert data["error_class"] == "local_kill"
 
 
 def test_reset_delegate_health_ledger_clears_global_state():

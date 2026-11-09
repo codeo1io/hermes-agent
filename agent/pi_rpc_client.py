@@ -281,6 +281,23 @@ class PiRPCClient:
         self._last_turn_activity = time.monotonic()
         self._last_turn_activity_at = time.time()
         self.text_streamed = False
+        # Local-kill origin for the NEXT classification of a turn this
+        # process ends itself (close during an active turn). Kill sites
+        # that know they killed thread their origin into
+        # classify_delegate_failure so kill prose ("aborted", "timed out",
+        # the exit code of OUR SIGTERM) classifies structurally local
+        # instead of lexically provider-side (finding 7892c6c904fb).
+        self._local_kill_disposition: str | None = None
+
+    @property
+    def local_kill_disposition(self) -> str | None:
+        """``local_kill`` when this client ended an in-flight turn itself.
+
+        Read by the delegate tool's failure classifier after a turn dies:
+        a supervisor-initiated close is a local kill, and its downstream
+        classification must never read as provider evidence.
+        """
+        return self._local_kill_disposition
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -318,12 +335,25 @@ class PiRPCClient:
         self._proc = None
         if proc is None:
             return
+        # Closing mid-turn ends a live delegated turn ourselves: mark the
+        # local origin BEFORE the kill so the turn thread's classification
+        # (racing this close from its exception path) reads it. Only a LIVE
+        # child counts — a process that died on its own keeps unknown
+        # origin (its death may still be provider evidence).
+        with self._turn_activity_lock:
+            if self._turn_active and proc.poll() is None:
+                self._local_kill_disposition = "local_kill"
         try:
             proc.terminate()
             proc.wait(timeout=2)
         except Exception:
             try:
                 proc.kill()
+                # Bounded reap after the kill: a SIGTERM-trapping child is
+                # only settled by SIGKILL, and an unreaped corpse stays a
+                # zombie until GC runs Popen.__del__ — close() must return
+                # having observed the kill, never past it.
+                proc.wait(timeout=2)
             except Exception:
                 pass
 
@@ -462,7 +492,16 @@ class PiRPCClient:
                 f"Could not start pi binary '{self._pi_bin}'. Install pi or set HERMES_PI_BIN."
             ) from exc
         if proc.stdin is None or proc.stdout is None:
+            # Unusable for the RPC protocol: kill AND reap before raising —
+            # the raise drops the last reference, and an unreaped corpse
+            # would zombie until GC runs Popen.__del__.
             proc.kill()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                # Pathological (unkillable D-state) child: nothing more can
+                # be done, and the RuntimeError below is the real signal.
+                pass
             raise RuntimeError("pi rpc process did not expose stdin/stdout pipes.")
         self._proc = proc
         self._process_exited_error = None
@@ -849,13 +888,15 @@ class PiRPCClient:
         holds delegate capacity while producing nothing until a supervisor
         notices. A dead `_proc` makes the next `_spawn` respawn the same
         `--session-id`, so the session binding survives transparently. Reader
-        threads EOF-exit on their own; we join them (bounded) so their cleanup
-        writes (`_settled.set()`, `_process_exited_error`, pending waiters)
-        land BEFORE a follow-up turn replaces that state, instead of racing
-        it. Fail-open by design: every failure mode still lets the caller
-        raise the typed stall.
+        threads are snapshotted at entry and only THAT snapshot is joined:
+        a steer()-triggered ``_spawn`` installs a respawn's readers without
+        holding the prompt lock and can land while this rider is between its
+        kill and its join — joining or clearing the respawn's readers would
+        drop tracking of live threads. Fail-open by design: every failure
+        mode still lets the caller raise the typed stall.
         """
         proc = self._proc
+        readers = list(self._reader_threads)
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
@@ -869,10 +910,14 @@ class PiRPCClient:
                         pass
             except Exception:
                 pass
-        for thread in self._reader_threads:
+        for thread in readers:
             if thread is not threading.current_thread():
                 thread.join(timeout=2.0)
-        self._reader_threads = []
+        # Remove exactly the snapshotted readers: a racing respawn's list
+        # survives intact (and with no respawn this clears, as before).
+        self._reader_threads = [
+            thread for thread in self._reader_threads if thread not in readers
+        ]
 
     def _liveness_triage(self, *, probe_timeout: float = 2.0) -> dict[str, Any]:
         """Probe the child at stall time: wedge vs responsive-but-unproductive.
@@ -996,7 +1041,18 @@ class PiRPCClient:
                         # native session, not a lost one.
                         self._terminate_after_stall()
                     error_class, provider_signal, retry_after = (
-                        classify_delegate_failure(evidence, zero_activity=zero_activity)
+                        classify_delegate_failure(
+                            evidence,
+                            zero_activity=zero_activity,
+                            # Origin-threaded (finding 7892c6c904fb): this
+                            # abort is OUR kill decision, so generic
+                            # abort/timeout prose must classify local, not
+                            # provider. Provider-refusal evidence and the
+                            # zero-activity signal still outrank the origin
+                            # in the classifier — a genuinely dead provider
+                            # keeps its provider class.
+                            origin="local_kill",
+                        )
                     )
                     detail = (
                         "pi session turn timed out: "
