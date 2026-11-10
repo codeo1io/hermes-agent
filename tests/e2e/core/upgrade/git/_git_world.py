@@ -56,7 +56,7 @@ def reported_success(cp: subprocess.CompletedProcess) -> bool:
 
 def n1_tag() -> str:
     """N-1: the newest release tag strictly before HEAD."""
-    return I.git("describe", "--tags", "--abbrev=0", "--match", "v20[0-9][0-9].*", "HEAD~1", cwd=H.WORKTREE)
+    return I.git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*[0-9]", "HEAD~1", cwd=H.WORKTREE)
 
 
 def n1_base() -> str:

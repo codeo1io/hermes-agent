@@ -29,11 +29,16 @@ def _series(tag: str) -> str | None:
     ("v2026.10.1", "2026.10"),
     ("v2026.9.11", "2026.9"),
     ("v2026.8.18", "2026.8"),
-    # Not dated-release tags: describe can land on any annotated tag.
+    # The fork's own SemVer scheme (minted from 2026-11-05) is a first-class series.
+    ("v0.23.0", "0.23"),
+    ("v0.22.4", "0.22"),
+    ("v1.0.0", "1.0"),
+    # Not release tags: describe can land on any annotated tag.
     ("v0.21.4+canary.20261004T084456Z", None),
     ("rc.35-v0.21.5", None),
     ("e2e-upgrade-base", None),
     ("v2026.9.24-rc1", None),
+    ("v0.23.0-rc1", None),
 ])
 def test_release_series_extraction(tag, series):
     assert _series(tag) == series
@@ -43,6 +48,23 @@ def test_same_series_base_is_allowed(monkeypatch):
     monkeypatch.setattr(up, "_refs", lambda: up._Refs(head="h" * 40, base_tag="v2026.9.24",
                                                       base="b" * 40))
     monkeypatch.setattr(up, "_git", lambda *a, **k: "v2026.9.24")
+    assert up._stale_base_reason() is None
+
+
+def test_scheme_handoff_head_with_calver_base_is_allowed(monkeypatch):
+    """The live 2026-11-10 shape: HEAD carries the fork's SemVer (v0.23.0 series 0.23)
+    while the newest CalVer release (v2026.9.24) predates the scheme handoff.
+
+    The guard's job is to catch a checkout MISSING its tags (HEAD describes to None
+    or an unrelated series because the fork never fetched them) — not to reject the
+    legitimate boundary where the fork minted a new scheme after its last CalVer
+    release. N-1 CalVer + HEAD SemVer is exactly the real upgrade this lane must
+    exercise: updating a v2026.9.x install to a v0.23.x tree.
+    """
+    monkeypatch.setattr(up, "_refs", lambda: up._Refs(head="h" * 40, base_tag="v2026.9.24",
+                                                      base="b" * 40))
+    monkeypatch.delenv("HERMES_E2E_UPGRADE_BASE", raising=False)
+    monkeypatch.setattr(up, "_git", lambda *a, **k: "v0.23.0")
     assert up._stale_base_reason() is None
 
 
@@ -58,12 +80,23 @@ def test_stale_series_base_fails_with_tag_advice(monkeypatch):
 
 
 def test_no_dated_tag_on_head_still_guards(monkeypatch):
-    """HEAD describing to no dated release tag cannot vouch for any base series."""
+    """HEAD describing to no release tag cannot vouch for any base series."""
     monkeypatch.setattr(up, "_refs", lambda: up._Refs(head="h" * 40, base_tag="v2026.8.18",
                                                       base="b" * 40))
     monkeypatch.setenv("HERMES_E2E_UPGRADE_BASE", "")
-    monkeypatch.setattr(up, "_git", lambda *a, **k: "v0.21.4")
+    monkeypatch.setattr(up, "_git", lambda *a, **k: "e2e-upgrade-base")
     assert up._stale_base_reason() is not None
+
+
+def test_unrelated_same_scheme_series_still_fails(monkeypatch):
+    """Both ends carry SemVer release tags but from unrelated series: not a handoff,
+    not the same series — the checkout cannot vouch for the base."""
+    monkeypatch.setattr(up, "_refs", lambda: up._Refs(head="h" * 40, base_tag="v0.13.2",
+                                                      base="b" * 40))
+    monkeypatch.delenv("HERMES_E2E_UPGRADE_BASE", raising=False)
+    monkeypatch.setattr(up, "_git", lambda *a, **k: "v0.23.0")
+    reason = up._stale_base_reason()
+    assert reason is not None and "fetch them" in reason
 
 
 def test_explicit_same_series_base_allowed(monkeypatch):
@@ -86,11 +119,11 @@ def test_explicit_cross_series_base_fails(monkeypatch):
 
 
 def test_explicit_base_on_untagged_head_allowed(monkeypatch):
-    """No dated tag describes HEAD: the explicit override is the only escape, keep it working."""
+    """No release tag describes HEAD: the explicit override is the only escape, keep it working."""
     monkeypatch.setattr(up, "_refs", lambda: up._Refs(head="h" * 40, base_tag="v2026.8.18",
                                                       base="b" * 40))
     monkeypatch.setenv("HERMES_E2E_UPGRADE_BASE", "v2026.8.18")
-    monkeypatch.setattr(up, "_git", lambda *a, **k: "v0.21.4")
+    monkeypatch.setattr(up, "_git", lambda *a, **k: "v0.21.4+canary.20261004T084456Z")
     assert up._stale_base_reason() is None
 
 

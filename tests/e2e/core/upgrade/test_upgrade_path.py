@@ -102,18 +102,25 @@ class _Refs(NamedTuple):
     base: str
 
 
+# Release tags under either scheme the fork carries: upstream CalVer (v2026.9.24)
+# and the fork's own SemVer (v0.23.0). Canaries/rc/branch tags never match.
+_RELEASE_TAG_GLOB = "v[0-9]*[0-9]"
+
+
 @functools.cache
 def _refs() -> _Refs:
     """HEAD and release N-1, resolved on first use: collection (every CI shard) runs no git.
 
-    N-1 is the nearest CalVer release tag before HEAD; HERMES_E2E_UPGRADE_BASE=<ref> starts from any
-    older ref instead (e.g. the pre-handoff v2026.9.14, or a patched base when proving a leg red
-    against the N-1 side).
+    N-1 is the nearest release tag before HEAD under either scheme this fork carries —
+    CalVer (``v2026.9.24``, upstream through the 2026-10 re-parent) or the fork's own
+    SemVer (``v0.23.0``); see _release_series. HERMES_E2E_UPGRADE_BASE=<ref> starts from
+    any older ref instead (e.g. the pre-handoff v2026.9.14, or a patched base when
+    proving a leg red against the N-1 side).
     """
     head = _git("rev-parse", "HEAD", cwd=H.WORKTREE)
     try:
         tag = os.environ.get("HERMES_E2E_UPGRADE_BASE") or _git(
-            "describe", "--tags", "--match", "v20[0-9][0-9].*", "--abbrev=0", "HEAD~1",
+            "describe", "--tags", "--match", _RELEASE_TAG_GLOB, "--abbrev=0", "HEAD~1",
             cwd=H.WORKTREE,
         )
         return _Refs(head, tag, _git("rev-parse", f"{tag}^{{commit}}", cwd=H.WORKTREE))
@@ -122,9 +129,21 @@ def _refs() -> _Refs:
 
 
 def _release_series(tag: str) -> str | None:
-    """``v2026.9.24`` -> ``2026.9``; None for anything that is not a dated release tag."""
-    match = re.fullmatch(r"v(\d{4})\.(\d{1,2})\.\d+", tag)
-    return f"{match.group(1)}.{int(match.group(2))}" if match else None
+    """``v2026.9.24`` -> ``2026.9``; ``v0.23.0`` -> ``0.23``; None for anything else.
+
+    Two release schemes share this fork: upstream's CalVer (``v2026.9.24``, through the
+    2026-10 re-parent handoff) and the fork's own SemVer (``v0.23.0``, minted from
+    2026-11-05). Both vouch for HEAD's series equally; canaries (``+canary.…`` suffix),
+    rc tags and branch tags do not. CalVer is matched first so ``v2026.9.24`` can never
+    misread as SemVer ``2026.9.24``.
+    """
+    calver = re.fullmatch(r"v(\d{4})\.(\d{1,2})\.(\d+)", tag)
+    if calver:
+        return f"{calver.group(1)}.{int(calver.group(2))}"
+    semver = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
+    if semver and len(semver.group(1)) != 4:  # a 4-digit first component was CalVer above
+        return f"{semver.group(1)}.{int(semver.group(2))}"
+    return None
 
 
 def _stale_base_reason() -> str | None:
@@ -143,7 +162,9 @@ def _stale_base_reason() -> str | None:
     if not refs.base_tag:
         return None  # already reported by _upgrade_prerequisites as "no release tag"
     base_series = _release_series(refs.base_tag)
-    head_series = _release_series(_git("describe", "--tags", "--abbrev=0", "HEAD", cwd=H.WORKTREE))
+    head_series = _release_series(
+        _git("describe", "--tags", "--match", _RELEASE_TAG_GLOB, "--abbrev=0", "HEAD",
+             cwd=H.WORKTREE))
     explicit = os.environ.get("HERMES_E2E_UPGRADE_BASE")
     if explicit:
         if head_series and base_series and head_series != base_series:
@@ -151,11 +172,47 @@ def _stale_base_reason() -> str | None:
                     f"describes to {head_series}; the override is for replaying an upgrade within "
                     "one release series, not for crossing series blind")
         return None
-    if base_series is None or head_series is None or base_series != head_series:
-        return (f"N-1 resolved to {refs.base_tag or 'no tag'} ({base_series}) while HEAD describes to "
+    if base_series is None:
+        # The resolved base tag itself is not a release tag (a canary/branch tag won
+        # describe); the checkout's tags cannot vouch for anything.
+        return (f"N-1 resolved to {refs.base_tag or 'no tag'} ({base_series}); the checkout's own "
+                "release tags are missing from this clone — fetch them (git fetch --tags origin) "
+                "before burning the lane")
+    if head_series is None:
+        # No release tag describes HEAD at all: the clone predates every release of
+        # the branch under test — the exact 2026-10-04 shape (main parked at a stale
+        # upstream tag six weeks old).
+        return (f"N-1 resolved to {refs.base_tag} ({base_series}) while HEAD describes to "
+                f"another series ({head_series}); the checkout's own release tags are missing from "
+                "this clone — fetch them (git fetch --tags origin) before burning the lane")
+    # Both ends carry release tags. A same-series base is the ordinary case; a base in
+    # the predecessor scheme is the legitimate scheme-handoff boundary (upstream CalVer
+    # v2026.9.24 -> the fork's own SemVer v0.23.0, minted 2026-11-05) — updating a
+    # predecessor-scheme install to this tree is exactly the upgrade the lane proves.
+    # Anything else (HEAD's series exists yet N-1 sits in an unrelated third series)
+    # means the resolved base predates the fork's own history: fail rather than burn
+    # the lane on shapes fixed releases ago.
+    if head_series != base_series and not _is_scheme_handoff(base_series, head_series):
+        return (f"N-1 resolved to {refs.base_tag} ({base_series}) while HEAD describes to "
                 f"another series ({head_series}); the checkout's own release tags are missing from "
                 "this clone — fetch them (git fetch --tags origin) before burning the lane")
     return None
+
+
+def _is_scheme_handoff(base_series: str | None, head_series: str | None) -> bool:
+    """True when base sits in the predecessor release scheme of HEAD's scheme.
+
+    CalVer series look like ``2026.9`` (4-digit year first component); SemVer series
+    like ``0.23``. A CalVer base with a SemVer HEAD is the fork's scheme handoff
+    (upstream CalVer releases -> the fork minting its own SemVer from 2026-11-05);
+    a SemVer base with a CalVer HEAD would be the mirror image. Same-scheme and
+    unrelated same-scheme pairs are not handoffs.
+    """
+    if not base_series or not head_series:
+        return False
+    base_calver, head_calver = base_series.split(".")[0].isdigit() and len(base_series.split(".")[0]) == 4, \
+        head_series.split(".")[0].isdigit() and len(head_series.split(".")[0]) == 4
+    return base_calver != head_calver
 
 
 @pytest.fixture(scope="module", autouse=True)

@@ -61,7 +61,7 @@ def refs() -> Refs:
     head = I.head_sha()
     try:
         tag = os.environ.get("HERMES_E2E_UPGRADE_BASE") or I.git(
-            "describe", "--tags", "--match", "v20[0-9][0-9].*", "--abbrev=0", "HEAD~1", cwd=H.WORKTREE)
+            "describe", "--tags", "--match", "v[0-9]*[0-9]", "--abbrev=0", "HEAD~1", cwd=H.WORKTREE)
         return Refs(head, tag, I.git("rev-parse", f"{tag}^{{commit}}", cwd=H.WORKTREE))
     except AssertionError:  # shallow checkout without tags
         return Refs(head, "", "")
