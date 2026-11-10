@@ -497,11 +497,11 @@ def _standalone_send(
                     timeout=30), None
             finally:
                 pool.shutdown(wait=False)
-        except Exception as e:
+        except Exception as e:  # health: allow BLE001 -- best-effort fallback lane: _failed logs the full traceback (exc_info=True) and the remaining targets must still get their turn
             if sd._sched._interpreter_shutting_down(e):
                 return _warned(shutdown_msg)
             return _failed(e)
-    except Exception as e:
+    except Exception as e:  # health: allow BLE001 -- last-resort delivery boundary: _failed logs the full traceback (exc_info=True); a send failure must surface as a delivery error, never crash the tick
         return _failed(e)
 
 
