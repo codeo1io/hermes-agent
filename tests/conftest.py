@@ -239,6 +239,81 @@ if not HOST_LOCK_DIR_AT_CONFTEST_IMPORT:
 # See ``scripts/run_tests.sh`` for the runner.
 
 
+# ── Conductor gate lanes adopt the canonical runner ─────────────────────────
+#
+# The conductor validation gate runs this suite as a bare ``python -m pytest -q``
+# lane behind a wall-clock bound sized for parallel execution, and exports
+# CONDUCTOR_LOCAL_VALIDATION_WORKERS — the worker budget it granted the lane
+# (the same budget it caps a ``-n``/``--jobs`` flag to). One plain process is
+# not this suite's supported shape: the per-file interpreter isolation that
+# stops cross-file module-state leakage comes from the canonical runner above,
+# and ~7k files cannot fit the gate's bound through a single stream. Under the
+# gate — and only under it — a bare whole-suite invocation therefore adopts the
+# canonical shape: re-exec ``scripts/run_tests.sh`` with the granted worker
+# budget so every file still runs in its own freshly-spawned pytest subprocess.
+# The runner's hermetic env rebuild drops CONDUCTOR_* for the per-file children
+# and the adoption marker refuses to nest, so children can never re-enter this
+# path; every other invocation (dev single-file runs, collect-only, CI lanes)
+# is unchanged.
+
+_GATE_LANE_WORKERS_ENV = "CONDUCTOR_LOCAL_VALIDATION_WORKERS"
+_GATE_LANE_ADOPTION_MARK = "HERMES_TEST_GATE_ADOPTED_RUNNER"
+
+
+def _gate_lane_runner_plan(env, *, positional_args, collect_only):
+    """The canonical-runner adoption plan for a conductor gate lane, or ``None``.
+
+    Pure so tests can pin the contract: only a bare whole-suite run under the
+    gate's granted budget adopts — never a path-scoped or collect-only
+    invocation, never a nested adoption.
+    """
+    if env.get(_GATE_LANE_ADOPTION_MARK) or collect_only:
+        return None
+    if any(arg.rstrip("/\\") != "tests" for arg in positional_args):
+        return None
+    granted = env.get(_GATE_LANE_WORKERS_ENV, "")
+    if not granted.isdigit() or int(granted) < 1:
+        return None  # unset / "pending" / malformed — not an admitted gate lane
+    return {
+        "argv": ["bash", str(PROJECT_ROOT / "scripts" / "run_tests.sh")],
+        "env": {
+            _GATE_LANE_ADOPTION_MARK: "1",
+            # The gate's own granted budget; the runner forwards it through its
+            # hermetic env rebuild (it forwards every HERMES_TEST_* knob).
+            "HERMES_TEST_WORKERS": granted,
+            # This interpreter already imports pytest, so run_tests.sh takes its
+            # explicit-HERMES_PYTHON branch instead of re-syncing the checkout's
+            # environment mid-lane.
+            "HERMES_PYTHON": sys.executable,
+        },
+    }
+
+
+def _adopt_canonical_runner_under_gate_lane(config):
+    """Re-exec the canonical runner when this is an admitted conductor gate lane.
+
+    Returns for every other invocation. Kept as an adapter beside the pure
+    plan helper so the surviving ``pytest_configure`` (this file defines more
+    than one historically; the last definition wins) can call it first.
+    """
+    plan = _gate_lane_runner_plan(
+        os.environ,
+        positional_args=tuple(config.args or ()),
+        collect_only=bool(getattr(config.option, "collectonly", False)),
+    )
+    if plan is None:
+        return
+    import subprocess
+
+    completed = subprocess.run(
+        plan["argv"], check=False, env={**os.environ, **plan["env"]}, cwd=str(PROJECT_ROOT)
+    )
+    pytest.exit(
+        f"conductor gate lane: canonical runner exit code {completed.returncode}",
+        returncode=completed.returncode,
+    )
+
+
 # Topic modules split out to keep this file under the size gate. They are
 # imported rather than listed in ``pytest_plugins``: this is not the rootdir
 # conftest (that is the repo root), and pytest fails a run that loads a
@@ -1261,6 +1336,7 @@ def pytest_unconfigure(config):
 @pytest.hookimpl(trylast=True)  # after _pytest.tmpdir has built config._tmp_path_factory
 def pytest_configure(config):
     """Register markers used by hermetic conftest."""
+    _adopt_canonical_runner_under_gate_lane(config)  # re-execs for gate lanes
     _relocate_basetemp_outside_operator_home(config)
     config.addinivalue_line(
         "markers",
