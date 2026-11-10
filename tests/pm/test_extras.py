@@ -319,8 +319,9 @@ def test_legacy_selection_never_fabricates_an_undeclared_all_extra(tmp_path):
         "[project.optional-dependencies]\ntelegram = []\n",
         encoding="utf-8",
     )
-    site = tmp_path / "venv" / "lib" / "python3.11" / "site-packages"
-    (site / "telegram").mkdir(parents=True)
+    # Upstream v0.23.1: a pre-PM venv only counts when Hermes is installed in
+    # it (hermes_agent-*.dist-info present) — use the shared main-era fake.
+    main_era_venv(tmp_path, "telegram")
     assert extras.legacy_selection(tmp_path) == ["telegram"]
 
 
