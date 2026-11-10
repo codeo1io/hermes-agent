@@ -43,11 +43,26 @@ _INTERPRETER_PREFIXES = tuple({
     # trips on its first traceback.
     Path(__file__).resolve().parent.parent,
 })
+# PM's installation discovery reads beside and above this checkout: the sealed-payload probe
+# (pm.environments._payload_manifest opens <checkout>/../manifest.json — "every install asks",
+# and a stray manifest beside a checkout must read as "not a payload", never an error) and the
+# shared install-stamp.json the store resolver stats in every ancestor (pm.paths.install_stamp_path).
+# A checkout under the real home (the default ~/.hermes/hermes-agent install, conductor worktrees)
+# resolves those probes inside the guarded root. They are installation metadata, not Hermes
+# state, so NON-DESTRUCTIVE probes pass; a write to either file still refuses (it would corrupt
+# discovery for real installs).
+_CHECKOUT_ROOT = Path(__file__).resolve().parent.parent
 # The same prefixes as plain strings for the check() fast path. PurePath comparison folds case on
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
+# The pm-discovery exemption set, normalized the same way as the prefix strings above.
+_PM_DISCOVERY_PATHS = frozenset(
+    _normcase(os.fspath(path))
+    for path in (_CHECKOUT_ROOT.parent / "manifest.json",
+                 *(ancestor / "install-stamp.json" for ancestor in _CHECKOUT_ROOT.parents))
+)
 
 
 def _within(path: str, prefix: str) -> bool:
@@ -120,6 +135,10 @@ class HomeIOGuard:
             for prefix in _INTERPRETER_PREFIX_STRS:
                 if _within(absolute, prefix) or (metadata and _contains(absolute, prefix)):
                     return
+            # PM's read-only installation-discovery probes beside/above this checkout
+            # (manifest payload seal + ancestor install stamps): reads pass, writes refuse.
+            if not destructive and absolute in _PM_DISCOVERY_PATHS:
+                return
             # Check the lexical path first: resolving must not probe a protected
             # tree merely to decide that the original path was forbidden.
             for root in roots:

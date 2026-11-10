@@ -216,6 +216,26 @@ def test_checkout_inside_a_guarded_root_is_not_hermes_state():
         guard.check(PROJECT_ROOT.parent / "config.yaml")
 
 
+def test_pm_installation_discovery_probes_read_but_never_write():
+    """PM's discovery reads beside and above the checkout — the sealed-payload
+    probe ``<checkout>/../manifest.json`` ("every install asks", so a stray
+    manifest must read as not-a-payload, never an error) and the shared
+    ``install-stamp.json`` the store resolver stats in every ancestor
+    (pm.paths.install_stamp_path). With the checkout under the guarded root
+    (default install, conductor worktrees) those READ probes pass; writes to
+    them still refuse (they would corrupt discovery for real installs), and
+    sibling files beside them keep refusing."""
+    from tests.home_io_guard import HomeIOGuard, _CHECKOUT_ROOT
+
+    guard = HomeIOGuard(lambda: [_CHECKOUT_ROOT.parent])
+    guard.check(_CHECKOUT_ROOT.parent / "manifest.json", metadata=True)
+    guard.check(_CHECKOUT_ROOT.parent / "install-stamp.json", metadata=True)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(_CHECKOUT_ROOT.parent / "manifest.json", metadata=True, destructive=True)
+    with pytest.raises(AssertionError, match="REAL hermes home"):
+        guard.check(_CHECKOUT_ROOT.parent / "other.json", metadata=True)
+
+
 @pytest.mark.parametrize("kind", ["environments", "test-environment"])
 def test_pm_generation_dir_around_the_running_venv_is_the_interpreter(tmp_path, kind):
     """scripts/run_tests.sh runs ``<home>/installs/<key>/<kind>/<gen>/venv`` with HOME pointed at the
