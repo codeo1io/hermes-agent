@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { load as loadYaml } from 'js-yaml'
 
+import { load as loadYaml } from 'js-yaml'
 import { describe, test } from 'vitest'
 
 /**
