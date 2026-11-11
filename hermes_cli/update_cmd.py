@@ -500,7 +500,7 @@ def _log_only_write(text: str) -> None:
 
     During ``hermes update`` ``sys.stdout`` is an ``_UpdateOutputStream`` that
     mirrors to both the terminal and ``update.log``. Loud, low-signal
-    subprocess output (npm installs, the Electron/vite build, the cua-driver
+    subprocess output (pnpm installs, the Electron/vite build, the cua-driver
     installer's "Next steps" wall) should be captured and tucked into the log
     so failures stay debuggable, without flooding the user's terminal. This
     reaches past the mirroring stream straight to the underlying log handle.
@@ -654,19 +654,6 @@ def _is_shallow_checkout(git_cmd) -> bool:
 def _tip_shas(git_cmd, target_ref: str, base: str = "HEAD") -> tuple[str, str]:
     """``(<base> sha, <target_ref> sha)`` as printed by rev-parse ("" when unresolvable)."""
     return tuple(_git_run(git_cmd, ["rev-parse", ref]).stdout.strip() for ref in (base, target_ref))
-
-
-def _print_update_check_result(behind: int | None, compare_branch: str) -> None:
-    """Report ``--check``'s verdict: up to date, N commits behind, or behind by an unknown count."""
-    if behind == 0:
-        print("✓ Already up to date.")
-        return
-    if behind is not None:
-        print(f"☤ Update available: {behind} {'commit' if behind == 1 else 'commits'} behind {compare_branch}.")
-    else:
-        print(f"☤ Update available (behind {compare_branch}).")
-    from hermes_cli.config import recommended_update_command
-    print(f"  Run '{recommended_update_command()}' to install.")
 
 
 def _source_completion_request(opts, plan, snapshot_id, windows_resume, desktop, gateway_mode) -> dict:
@@ -870,17 +857,12 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
 
 
 def _rollback_if_pulled_syntax_error(git_cmd, pre_pull_sha, *, rollback_branch=None, _windows_gateway_resume=None) -> None:
-    """Post-pull syntax guard: roll back to *pre_pull_sha* and ``sys.exit(1)`` when a critical
-    file no longer compiles (a bad admin-merge past CI must not brick the CLI)."""
-    pyproject = Path(_m().PROJECT_ROOT) / "pyproject.toml"
-    if pyproject.is_file() and _commit.requires_other_python(pyproject.read_bytes()):
-        # A newer Python's syntax: judged by an installed interpreter the target admits (N15).
-        broken = _commit.tree_syntax_error(_m().PROJECT_ROOT, _UPDATE_CRITICAL_FILES)
-        syntax_ok, failing_path, syntax_error = (broken is None, *(broken or (None, None)))
-    else:
-        syntax_ok, failing_path, syntax_error = _validate_critical_files_syntax(_m().PROJECT_ROOT)
-    if not syntax_ok:
-        _roll_back_broken_update(git_cmd, pre_pull_sha, failing_path, syntax_error, rollback_branch=rollback_branch,
+    """Post-pull syntax guard: roll back to *pre_pull_sha* and ``sys.exit(1)`` when a startup file
+    the pulled tree declares is missing or no longer compiles (a bad admin-merge past CI must not
+    brick the CLI), judged by an interpreter the tree's ``requires-python`` admits (N15)."""
+    broken = _commit.tree_syntax_error(_m().PROJECT_ROOT, _UPDATE_CRITICAL_FILES)
+    if broken is not None:
+        _roll_back_broken_update(git_cmd, pre_pull_sha, *broken, rollback_branch=rollback_branch,
                                  _windows_gateway_resume=_windows_gateway_resume)
 
 

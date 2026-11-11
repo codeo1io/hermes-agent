@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { load as loadYaml } from 'js-yaml'
 import { describe, test } from 'vitest'
 
 /**
@@ -21,13 +22,6 @@ const REPO_ROOT = path.resolve(__dirname, '..')
 // npm releases bundled with a Node major, newest-per-major. Not a catalog
 // snapshot: the point is that *some* real, shipping toolchain must clear the
 // floor, and these are the ones users actually arrive with.
-const STOCK_NPM_BY_NODE_MAJOR: Record<number, string> = {
-  20: '10.8.2',
-  22: '10.9.8',
-  24: '11.16.0',
-  26: '11.17.0',
-}
-
 interface Engines {
   node?: string
   npm?: string
@@ -38,7 +32,7 @@ interface Manifest {
 }
 
 interface Lockfile {
-  packages?: Record<string, { engines?: Engines }>
+  packages?: Record<string, { engines?: { node?: string } }>
 }
 
 function readJson<T>(relativePath: string): T {
@@ -106,7 +100,11 @@ function normalizeRange(spec: string): string {
 }
 
 const rootManifest = readJson<Manifest>('package.json')
-const lockfile = readJson<Lockfile>('package-lock.json')
+// Upstream v0.23.1 switched the workspace npm→pnpm (7062229090a):
+// package-lock.json is gone; pnpm-lock.yaml is the lock of record.
+const lockfile = loadYaml(
+  fs.readFileSync(path.join(REPO_ROOT, 'pnpm-lock.yaml'), 'utf-8'),
+) as Lockfile
 
 function engines(label: string): Engines {
   assert.ok(rootManifest.engines?.node && rootManifest.engines?.npm, `${label} must declare engines`)
@@ -137,13 +135,24 @@ function managedNodeMajor(): number {
 }
 
 describe('Engines are satisfiable', () => {
-  test('npm floor is met by a shipping Node', () => {
-    // Without this, a fresh install cannot run `npm ci` at all: the installer
-    // provisions a Node from nodejs.org and immediately uses its bundled npm.
-    const satisfying = Object.entries(STOCK_NPM_BY_NODE_MAJOR).filter(([, npm]) =>
-      satisfiesRange(npm, rootEngines.npm!)
+  test('npm is refused (pnpm is the installer)', () => {
+    // Upstream v0.23.1 switched the workspaces npm→pnpm (7062229090a):
+    // engines.npm is now a prose refusal, so a bare `npm install` dies at
+    // the engines gate instead of silently building a second lockfile tree.
+    assert.match(
+      rootEngines.npm ?? '',
+      /refused/i,
+      `engines.npm must refuse npm (got ${JSON.stringify(rootEngines.npm)})`,
     )
-    assert.ok(satisfying.length > 0, `engines.npm is ${rootEngines.npm}, which no shipping Node bundles`)
+  })
+
+  test('pnpm range is satisfiable by the pnpm 12 line', () => {
+    const pnpmRange = (rootManifest.engines as Record<string, string | undefined>).pnpm
+    assert.ok(pnpmRange, 'engines.pnpm must be declared (pnpm is the installer)')
+    assert.ok(
+      satisfiesRange('12.999.999', pnpmRange),
+      `engines.pnpm is ${pnpmRange}, which no pnpm 12.x satisfies`,
+    )
   })
 
   test('node floor is met by the managed runtime', () => {
@@ -156,16 +165,9 @@ describe('Engines are satisfiable', () => {
     )
   })
 
-  test('managed Node bundles an npm the engines accept', () => {
-    // Node 22 bundles npm 11.16.0 — inside the excluded 11.10–11.16 band:
-    // fresh Hermes-managed installs die at `npm ci` with EBADENGINE.
+  test('managed Node line satisfies the root floor', () => {
     const major = managedNodeMajor()
-    const stockNpm = STOCK_NPM_BY_NODE_MAJOR[major]
-    assert.ok(stockNpm, `managed Node major ${major} is not in the known stock map`)
-    assert.ok(
-      satisfiesRange(stockNpm, rootEngines.npm!),
-      `pm provisions Node ${major}.x (stock npm ${stockNpm}) but engines.npm is ${rootEngines.npm}`
-    )
+    assert.ok(major >= 26, `managed Node major ${major} below the >=26 workspace floor`)
   })
 
   test('desktop node floor is not stricter than its toolchain', () => {
@@ -187,23 +189,24 @@ describe('Engines are satisfiable', () => {
   })
 })
 
-describe('Excluded npm band', () => {
-  // npm 11.10–11.16 honor `min-release-age` but ignore `min-release-age-exclude`;
-  // `.npmrc` sets both, so that band applies the age gate to exempted packages
-  // and installs fail with ETARGET. The floor must keep excluding them.
-  test.each(['11.10.0', '11.12.1', '11.16.0'])('rejects npm %s (ignores the exclude list)', badNpm => {
-    assert.ok(!satisfiesRange(badNpm, rootEngines.npm!))
-  })
-
-  test.each(['10.9.8', '11.17.0', '12.0.2'])('accepts npm %s (handles .npmrc correctly)', goodNpm => {
-    assert.ok(satisfiesRange(goodNpm, rootEngines.npm!))
+describe('Excluded npm band (historical: npm refused since v0.23.1)', () => {
+  // npm 11.10–11.16 ignored min-release-age-exclude and died at ETARGET —
+  // the reason the old floor excluded them. npm is refused outright now;
+  // the durable pin is that the refusal STAYS a refusal.
+  test('the npm engines field never returns to a satisfiable range', () => {
+    assert.doesNotMatch(
+      rootEngines.npm ?? '',
+      /\d+\.\d+/,
+      'engines.npm became a semver range again — npm is not the installer',
+    )
   })
 })
 
 describe('Manifest mirrors', () => {
-  test('lockfile engines match the manifest', () => {
-    // A stale lockfile mirror re-imposes the old floor on `npm ci`.
-    assert.deepEqual(lockfile.packages?.['']?.engines, rootManifest.engines)
+  test('lockfile parses with a packages section', () => {
+    // pnpm has no root '' mirror entry; the structural contract is that the
+    // lock of record parses and carries the locked tree the floor test walks.
+    assert.ok(Object.keys(lockfile.packages ?? {}).length > 0, 'pnpm-lock.yaml has no packages')
   })
 })
 
