@@ -108,3 +108,75 @@ def test_env_writer_denylist_guards_upper_snake_names_and_unknown_names_get_a_no
     cfg.set_config_value("SOME_PLUGIN_ONLY_KNOB", "xyz")
     assert "SOME_PLUGIN_ONLY_KNOB=xyz" in (tmp_path / ".env").read_text(encoding="utf-8")
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test/model"}}
+
+
+def test_credential_suffixed_lowercase_name_routes_to_env_and_round_trips(tmp_path, monkeypatch, capsys):
+    """A bare lowercase name ending in a credential suffix (``some_tool_password`` — unregistered,
+    not ``UPPER_SNAKE``) is still a secret: per the #465/#469 contract ``config set`` stores it in
+    ``.env``, never in plaintext ``config.yaml``, and ``get``/``unset`` resolve the same file."""
+    from hermes_cli import config as cfg
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "managed"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  default: test/model\n", encoding="utf-8")
+
+    cfg.set_config_value("some_tool_password", "hunter2")
+    capsys.readouterr()
+    assert "SOME_TOOL_PASSWORD=hunter2" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test/model"}}
+
+    cfg.get_config_value("some_tool_password")
+    assert capsys.readouterr().out.strip() == "hunter2"
+
+    cfg.unset_config_value("some_tool_password")
+    capsys.readouterr()
+    assert "SOME_TOOL_PASSWORD" not in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test/model"}}
+
+
+def test_mixed_case_credential_shape_routes_to_env_uppercased(tmp_path, monkeypatch, capsys):
+    """A mixed-case spelling of a credential-suffixed name (``Widget_Access_Key``) follows the same
+    secret routing (#465/#469): ``.env`` under the uppercased name, no plaintext ``config.yaml``
+    copy, and ``get`` resolves the uppercased ``.env`` entry."""
+    from hermes_cli import config as cfg
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "managed"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  default: test/model\n", encoding="utf-8")
+
+    cfg.set_config_value("Widget_Access_Key", "wak-123")
+    capsys.readouterr()
+    assert "WIDGET_ACCESS_KEY=wak-123" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test/model"}}
+
+    cfg.get_config_value("Widget_Access_Key")
+    assert capsys.readouterr().out.strip() == "wak-123"
+
+
+def test_catalog_secret_spellings_route_to_env_and_plain_lowercase_stays_in_yaml(
+        tmp_path, monkeypatch, capsys):
+    """Characterization pin for the #469 review: catalog secrets land in ``.env`` in every
+    documented casing — ``BLUEBUBBLES_PASSWORD``/``MATRIX_RECOVERY_KEY`` by shape,
+    ``irc_server_password`` as a registered name — while a lowercase non-secret bare name
+    (``my_flag``) keeps the open ``config.yaml`` top-level namespace."""
+    from hermes_cli import config as cfg
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "managed"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  default: test/model\n", encoding="utf-8")
+
+    cfg.set_config_value("BLUEBUBBLES_PASSWORD", "bb-pass")
+    cfg.set_config_value("irc_server_password", "irc-pass")
+    cfg.set_config_value("MATRIX_RECOVERY_KEY", "mr-key")
+    cfg.set_config_value("my_flag", "hello")
+    capsys.readouterr()
+
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "BLUEBUBBLES_PASSWORD=bb-pass" in env_text
+    assert "IRC_SERVER_PASSWORD=irc-pass" in env_text
+    assert "MATRIX_RECOVERY_KEY=mr-key" in env_text
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {
+        "model": {"default": "test/model"}, "my_flag": "hello"}

@@ -2953,8 +2953,8 @@ _SECRET_CONFIG_KEYS = frozenset({
     "api_key", "apikey", "key", "token", "access_token", "refresh_token", "id_token",
     "secret", "client_secret", "password", "passwd", "authorization",
     "private_key", "bearer", "jwt"})
-# Env-map shapes (``mcp_servers.<s>.env.FOO_API_KEY``, ``FAL_KEY``, ``AWS_SECRET_ACCESS_KEY``) and
-# the suffixes ``_is_env_config_key`` routes to .env. Suffix-only so ``token_count`` stays visible.
+# Canonical credential suffixes (suffix-only so ``token_count`` stays visible): feed redaction here
+# and config_env_routing's secret-shape channel; ``_is_env_config_key``'s own tuple is narrower.
 _SECRET_CONFIG_KEY_SUFFIXES = ("_api_key", "_token", "_secret", "_password", "_key", "_access_key")
 # .env-routed keys are credentials by default; these suffixes name the non-secret exceptions
 # (``TERMINAL_SSH_HOST``, ``TOOL_GATEWAY_URL``, ``BROWSERBASE_PROJECT_ID``).
