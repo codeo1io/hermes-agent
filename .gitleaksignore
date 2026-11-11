@@ -310,3 +310,19 @@ ca2c115d193555f9f6f0470129f9e60e0dc6a0f4:tests/hermes_cli/test_runtime_provider_
 fdaffcb9fb04c2fbd5607b8019773b1cface9888:tests/hermes_cli/test_web_delegation_routing.py:generic-api-key:35
 1d5744295952a9c86261c5a74e0b5d0f2bb3513f:hermes_cli/left_core_migration.py:generic-api-key:206
 1d5744295952a9c86261c5a74e0b5d0f2bb3513f:tests/hermes_cli/test_custom_entry_shadow_key_env.py:generic-api-key:316
+
+# 2026-11-11: upstream v0.23.1 adoption (#578) — 14 synthetic findings (test fixtures + doc curl examples); SARIF startLine fingerprints
+156daf077bbad321ac1f9aefe6bfa57a3ce6ea5c:tests/agent/test_redact.py:private-key:1820
+156daf077bbad321ac1f9aefe6bfa57a3ce6ea5c:tests/agent/test_redact.py:github-app-private-key:1910
+156daf077bbad321ac1f9aefe6bfa57a3ce6ea5c:tests/gateway/test_service_tier_follow_profile.py:generic-api-key:33
+156daf077bbad321ac1f9aefe6bfa57a3ce6ea5c:tests/gateway/test_service_tier_follow_profile.py:generic-api-key:75
+19b43bed5be8438c9a1bd726f3b487aaa5421407:tests/agent/test_nous_transient_401_interrupt.py:generic-api-key:23
+19b43bed5be8438c9a1bd726f3b487aaa5421407:tests/agent/test_prepared_compaction.py:generic-api-key:672
+19b43bed5be8438c9a1bd726f3b487aaa5421407:tests/agent/test_stream_stale_abandon.py:generic-api-key:33
+19b43bed5be8438c9a1bd726f3b487aaa5421407:tests/agent/test_turn_budget_durable_rows.py:generic-api-key:49
+19b43bed5be8438c9a1bd726f3b487aaa5421407:tests/hermes_cli/test_auth_registry_profile_rows.py:generic-api-key:80
+19b43bed5be8438c9a1bd726f3b487aaa5421407:website/docs/user-guide/messaging/mattermost.md:curl-auth-header:112
+19b43bed5be8438c9a1bd726f3b487aaa5421407:website/i18n/zh-Hans/docusaurus-plugin-content-docs/current/user-guide/messaging/mattermost.md:curl-auth-header:112
+a146eb27faafee43ea94ae93b7ad7acd9ef76b4b:tests/agent/test_fork_memory_under_checkpoint_gate.py:generic-api-key:167
+a146eb27faafee43ea94ae93b7ad7acd9ef76b4b:tests/tui_gateway/test_vault_preview_fill.py:generic-api-key:149
+a146eb27faafee43ea94ae93b7ad7acd9ef76b4b:tests/tui_gateway/test_vault_preview_fill.py:generic-api-key:166
