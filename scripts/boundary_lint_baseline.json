@@ -264,6 +264,7 @@
     "plugins/model-providers/openrouter/__init__.py agent.transports.codex._cache_scope_from_session_id": 1,
     "plugins/model-providers/openrouter/__init__.py hermes_cli.models.clamp_reasoning_effort_to_supported": 1,
     "plugins/model-providers/openrouter/__init__.py hermes_cli.models_reasoning_caps.openrouter_model_reasoning_capabilities": 1,
+    "plugins/model-providers/pi-rpc/__init__.py agent.pi_rpc_client.PiRPCClient": 1,
     "plugins/model-providers/router/__init__.py agent.reasoning_effort.EFFORT_LADDER": 1,
     "plugins/model-providers/router/__init__.py hermes_cli.urllib_security.open_credentialed_url": 1,
     "plugins/model-providers/router/__init__.py hermes_cli.version_info.hermes_user_agent": 1,
