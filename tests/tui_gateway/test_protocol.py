@@ -1937,7 +1937,10 @@ def test_approval_for_a_ws_client_that_never_advertised_settles_the_queue_entry(
         waited = time.monotonic() - t0
     finally:
         approval_mod.unregister_gateway_notify("ws-old-approval")
-    assert waited < 1, decision
+    # The settle must beat the configured approval timeout (3s), not an
+    # arbitrary wall-clock bound: loaded 12-worker CI runners measured 1.6s+
+    # for the same deterministic ordering (v0.23.1 adoption PR queue).
+    assert waited < 3, decision
     assert decision["choice"] is None and decision["cancelled"]
     assert peer.frames == []
     assert "ws-old-approval" not in approval_mod._gateway_queues

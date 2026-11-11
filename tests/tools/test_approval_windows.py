@@ -222,4 +222,7 @@ class TestPowerShellPositionalScriptAndAbbreviatedSwitches:
     def test_repeated_launcher_words_scan_in_linear_time(self, command):
         start = time.perf_counter()
         assert not _is_dangerous(command)
-        assert time.perf_counter() - start < 2, command[:30]
+        # The pin is linearity (a quadratic scan over 3000 repetitions would
+        # run ~100x slower), not a wall-clock SLA: loaded 12-worker CI
+        # runners measured >2s for the same linear scan (v0.23.1 adoption PR).
+        assert time.perf_counter() - start < 10, command[:30]

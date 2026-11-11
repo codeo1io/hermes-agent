@@ -33,7 +33,13 @@ async def test_removed_sessions_keep_profile_idle_watermark(tmp_path, monkeypatc
                 gateway._sessions["watermark"] = {
                     "last_active": recent, "running": False, "profile_home": str(tmp_path)}
             assert gateway._close_session_by_id("watermark", end_reason=reason)
-            assert _skill_maintenance_idle_for(recent - 3600) < 2
+            # The idle clock must be anchored to the closed session's activity
+            # (recent), not the tick's started_at an hour back. The bound is
+            # generous: it only needs to exclude the ~3600s failure mode while
+            # tolerating loaded-CI latency between the two loop iterations
+            # (observed 2.0-3.3s under 12-worker runners; the assertion held
+            # the queue for an hour on the v0.23.1 adoption PR).
+            assert _skill_maintenance_idle_for(recent - 3600) < 300
         # An active sibling profile must not hold this profile's idle clock.
         with gateway._sessions_lock:
             gateway._sessions["other-profile"] = {
