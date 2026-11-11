@@ -13,7 +13,14 @@ import time
 
 
 def test_authenticated_relay_uses_canonical_admission(tmp_path):
-    env = dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(tmp_path), PYTHONUNBUFFERED='1')
+    # QUEUED_AFTER_BLOCK pins queue-mode FIFO semantics ("the FIFO is the authority's, not a
+    # second adapter queue"): busy_text_mode=queue keeps v0.23.1's live-turn busy resolution
+    # (admission-time steer/redirect of a running turn's follow-up) from consuming relay-4
+    # before its admission row commits. The default 'interrupt' mode races the turn's agent
+    # liveness — deterministic on hosted runners with the turn parked in the fixture's model
+    # gate, timing-dependent elsewhere (fork determinism pin, same family as 347ad1977c1).
+    env = dict(os.environ, HOME=str(tmp_path), HERMES_HOME=str(tmp_path), PYTHONUNBUFFERED='1',
+               HERMES_GATEWAY_BUSY_TEXT_MODE='queue')
     result = subprocess.run([sys.executable, __file__, 'peer'], env=env,
                             capture_output=True, text=True, timeout=100, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
