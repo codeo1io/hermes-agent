@@ -487,6 +487,16 @@ def _start_backend_heartbeat_refresher() -> None:
         _refresh_backend_heartbeat()
     except Exception:
         logger.debug("initial backend heartbeat write failed", exc_info=True)
+    # Boot reclaim, right after the first synchronous own-refresh and before the startup orphan
+    # sweep can read the table (both wiring sites start the refresher before scheduling the
+    # sweep): a restarting gateway clears its dead predecessor's row immediately instead of
+    # waiting for the sweep's freshness gate. Runs with the refresher disabled too — a
+    # "register once" sidecar is still the next live process able to notice the dead row.
+    # Swallowed like a refresh failure: a wedged reclaim must never break gateway startup.
+    try:
+        _reclaim_dead_backend_heartbeat_rows()
+    except Exception:
+        logger.debug("backend heartbeat reclaim pass failed", exc_info=True)
     if _HEARTBEAT_REFRESH_S <= 0:
         return
     stop_event = threading.Event()
@@ -497,6 +507,15 @@ def _start_backend_heartbeat_refresher() -> None:
                 _refresh_backend_heartbeat()
             except Exception:
                 logger.debug("heartbeat refresh loop iteration failed", exc_info=True)
+            # Crash-window backstop: the boot pass cannot see processes that die later, so the
+            # reclaim rides every refresh tick — a crashed row's life is bounded to about one
+            # interval. Swallowed like a refresh failure: a raising reclaim must never kill the
+            # refresher thread (that would also stop OUR heartbeat, the exact opposite of the
+            # pass's purpose).
+            try:
+                _reclaim_dead_backend_heartbeat_rows()
+            except Exception:
+                logger.debug("backend heartbeat reclaim pass failed", exc_info=True)
             stop_event.wait(_HEARTBEAT_REFRESH_S)
 
     def _atexit_clear():

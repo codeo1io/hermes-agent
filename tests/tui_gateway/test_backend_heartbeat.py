@@ -16,6 +16,7 @@ refreshes it periodically.  This file verifies:
 from __future__ import annotations
 
 import io
+import time
 
 import pytest
 
@@ -82,6 +83,9 @@ class TestBackendHeartbeatRefresher:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(server, "_refresh_backend_heartbeat", _boom)
+        # Keep the starter hermetic: without this the boot reclaim pass would reach for the
+        # real launch-home state.db once the reclaim predicate lands.
+        monkeypatch.setattr(server, "_reclaim_dead_backend_heartbeat_rows", lambda: None, raising=False)
         monkeypatch.setattr(server, "_HEARTBEAT_REFRESH_S", 0.0)
         monkeypatch.setattr(server, "_heartbeat_refresher_started", False)
 
@@ -147,3 +151,108 @@ class TestEntryAndWsWiring:
 
         asyncio.run(ws_mod.handle_ws(FakeWS()))
         assert started["n"] == 1
+
+
+class TestHeartbeatReclaimWiring:
+    """Reclaim wiring: the reclaim pass rides the refresher lifecycle — once at boot, after the
+    first synchronous own-refresh (even when the refresher is disabled: a register-once
+    sidecar still clears a dead predecessor's row before the startup orphan sweep reads the
+    table), and once per daemon tick after each refresh, bounding a crashed row's life to
+    about one refresh interval.
+
+    These tests pin the WIRING only; the dead-owner fence predicate itself
+    (``_reclaim_dead_backend_heartbeat_rows``) is always monkeypatched here."""
+
+    def test_boot_reclaim_runs_after_first_refresh(self, db, monkeypatch):
+        from tui_gateway import server
+
+        order: list[str] = []
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_HEARTBEAT_REFRESH_S", 0.0)  # register-once sidecar mode
+        monkeypatch.setattr(server, "_heartbeat_refresher_started", False)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "wiring-A")
+        monkeypatch.setattr(server, "_refresh_backend_heartbeat", lambda: order.append("refresh"))
+        monkeypatch.setattr(
+            server, "_reclaim_dead_backend_heartbeat_rows", lambda: order.append("reclaim"),
+            raising=False)
+
+        server._start_backend_heartbeat_refresher()
+
+        # Own row first, then the reclaim — exactly one of each: interval 0 spawns no thread.
+        assert order == ["refresh", "reclaim"]
+
+    def test_tick_runs_reclaim_after_each_refresh(self, db, monkeypatch):
+        import threading as threading_mod
+
+        from tui_gateway import server
+
+        order: list[str] = []
+        stop_events: list = []
+        real_event = threading_mod.Event
+
+        def _captured_event():
+            event = real_event()
+            stop_events.append(event)
+            return event
+
+        # Capture the loop's stop event so the daemon thread can be stopped BEFORE monkeypatch
+        # teardown — a leaked tick would run the real refresh against the launch-home state.db.
+        monkeypatch.setattr(threading_mod, "Event", _captured_event)
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_HEARTBEAT_REFRESH_S", 0.02)
+        monkeypatch.setattr(server, "_heartbeat_refresher_started", False)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "wiring-A")
+        monkeypatch.setattr(server, "_refresh_backend_heartbeat", lambda: order.append("refresh"))
+        monkeypatch.setattr(
+            server, "_reclaim_dead_backend_heartbeat_rows", lambda: order.append("reclaim"),
+            raising=False)
+
+        server._start_backend_heartbeat_refresher()
+        deadline = time.monotonic() + 5.0
+        while len(order) < 6 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stop_events[0].set()
+
+        # Boot pass plus at least two ticks, and every reclaim directly behind its refresh.
+        assert order[:2] == ["refresh", "reclaim"]
+        assert order.count("reclaim") >= 3
+        assert order[::2] == ["refresh"] * len(order[::2])
+        assert order[1::2] == ["reclaim"] * len(order[1::2])
+
+    def test_reclaim_failure_is_swallowed_at_boot_and_in_the_tick(self, db, monkeypatch):
+        import threading as threading_mod
+
+        from tui_gateway import server
+
+        def _boom():
+            raise RuntimeError("malformed db")
+
+        refreshes = {"n": 0}
+        stop_events: list = []
+        real_event = threading_mod.Event
+
+        def _captured_event():
+            event = real_event()
+            stop_events.append(event)
+            return event
+
+        monkeypatch.setattr(threading_mod, "Event", _captured_event)
+        monkeypatch.setattr(server, "_get_db", lambda: db)
+        monkeypatch.setattr(server, "_HEARTBEAT_REFRESH_S", 0.02)
+        monkeypatch.setattr(server, "_heartbeat_refresher_started", False)
+        monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "wiring-A")
+        monkeypatch.setattr(
+            server, "_refresh_backend_heartbeat",
+            lambda: refreshes.__setitem__("n", refreshes["n"] + 1))
+        monkeypatch.setattr(server, "_reclaim_dead_backend_heartbeat_rows", _boom, raising=False)
+
+        # Boot: must not raise despite the failing reclaim pass.
+        server._start_backend_heartbeat_refresher()
+        deadline = time.monotonic() + 5.0
+        while refreshes["n"] < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        stop_events[0].set()
+
+        # Tick: the refresher thread survives the raising reclaim and keeps refreshing — a
+        # dead thread would also stop this process's own heartbeat, the opposite of the fix.
+        assert refreshes["n"] >= 3

@@ -908,16 +908,35 @@ class SessionGatewayMixin:
             (str(backend_id), int(pid), float(started_at), ts, str(profile), str(host)))
 
     def clear_backend_heartbeat(self, backend_id: str) -> bool:
-        """Remove this backend's heartbeat row (from ``atexit``); True if removed. A crashed
-        backend's row is reclaimed later by ``prune_stale_heartbeats``."""
+        """Remove this backend's heartbeat row (``atexit`` / signal-initiated clear); True if
+        removed. A crashed backend's row is reclaimed by the heartbeat refresher's reclaim pass
+        (dead-owner fence + TTL), never by this method."""
         if not backend_id:
             return False
         return self._write_rowcount(
             "DELETE FROM gateway_heartbeats WHERE backend_id = ?", (str(backend_id),)) > 0
 
+    def drop_backend_heartbeats(self, observed: dict[str, float]) -> list[str]:
+        """Race-guarded bulk delete for the heartbeat refresher's reclaim pass: remove rows by
+        backend id, but only while ``last_heartbeat`` has not advanced past the caller's
+        observed snapshot — a live owner that refreshed between the pass's list and this delete
+        is spared (its timestamp moved, so its row is liveness proof again). One DELETE per id:
+        the table is tiny and the guard is per-row, so partial deletes are independent. Returns
+        the ids actually removed; unknown or already-refreshed ids stay silent."""
+        removed: list[str] = []
+        for backend_id, observed_ts in observed.items():
+            if self._write_rowcount(
+                    "DELETE FROM gateway_heartbeats WHERE backend_id = ? AND last_heartbeat <= ?",
+                    (str(backend_id), float(observed_ts))) > 0:
+                removed.append(str(backend_id))
+        return removed
+
     def prune_stale_heartbeats(self, *, max_age_seconds: float) -> list[str]:
         """Drop heartbeat rows older than the staleness window; return removed backend ids.
-        Safe from any process — only stale rows are touched."""
+        Superseded in production by the heartbeat refresher's reclaim pass (which fences
+        same-host rows on owner liveness — dead pid, pid reuse, a same-host staleness bound —
+        before age, and ages foreign-host rows out at the sweep's own exemption window);
+        kept as a storage-level primitive, safe from any process — only stale rows are touched."""
         if max_age_seconds <= 0:
             return []
         cutoff = time.time() - max_age_seconds
