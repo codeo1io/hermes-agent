@@ -245,6 +245,7 @@ jobs:
     name: Windows install and chat
     needs: validate
     if: inputs.platform == 'win32'
+    runs-on: windows-latest
     # fork: plain GitHub-hosted windows-latest — upstream's windows-latest-32-core /
     # -32-arm-core labels are paid larger runners (billing-blocked on this account);
     # upstream f1b290e7734's blacksmith MSIX exit-before-attach rationale noted, labels
