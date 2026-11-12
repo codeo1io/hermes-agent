@@ -157,6 +157,12 @@ def _handle_exit_flush_signal(signum, frame) -> None:
         # An inherited ignore (`cmd &` from a non-interactive shell) ends nothing: stopping turns here
         # would raise the one-way exit fence in a process that keeps running and refuses every command.
         return
+    # Own heartbeat row first, at RECEIPT: gone before the bounded flush, the prior handler, and
+    # any supervisor SIGKILL that cuts the graceful shutdown short — not at exit. Maestro counts a
+    # 180s-stale row as an operational violation (A4, finding 34ce45cd2093); the observed stale row
+    # was a live pid in slow shutdown, so only signal-time reclamation closes that window. The
+    # helper is fully suppressed: a failed clear must never block the flush/chain below.
+    _clear_own_backend_heartbeat()
     with contextlib.suppress(Exception):
         _flush_sessions_before_exit()
     # The group signal that stopped us never reaches a command in its own session: reap it now,
@@ -436,9 +442,18 @@ def _sweep_orphaned_session_rows() -> list[str]:
 # Each serve / gateway process registers a heartbeat row in ``gateway_heartbeats`` so the startup sweep can tell
 # "owned by a live but idle backend" from "truly orphaned" (else the first process to restart reaped every
 # inactive row of the other N−1). Refresh 60s default — far shorter than the 6h TTL so a refresh always lands
-# inside the staleness window. Removed at exit; a crashed row ages out.
+# inside the staleness window. Removed at exit or at signal receipt; a crashed row is reclaimed at the next
+# refresher tick (``_reclaim_dead_backend_heartbeat_rows``) — "ages out eventually" was never true: maestro's
+# probe counts ANY 180s-stale row as an operational violation (A4, finding 34ce45cd2093).
 _HEARTBEAT_REFRESH_S = max(0.0, env_float("HERMES_GATEWAY_HEARTBEAT_REFRESH_S", 60.0))
+# Same-host staleness backstop of the reclaim fence: a row whose pid is alive-and-owner-shaped but whose
+# heartbeat is stale past max(3 missed refreshes, this floor) is no longer liveness proof (wedged process /
+# dead refresher thread) and is reclaimed even though the pid lives. The floor keeps the backstop slower than
+# the refresh cadence, so a healthy owner is never mistaken for a wedged one; a genuinely wedged gateway may
+# still fail one maestro scan before the next tick reclaims it — that flag is real signal, not noise.
+_HEARTBEAT_RECLAIM_MIN_STALE_S = 180.0
 _heartbeat_refresher_started = False
+_heartbeat_refresher_stop: threading.Event | None = None
 _heartbeat_refresher_lock = threading.Lock()
 _BACKEND_NONCE = secrets.token_hex(4)
 
@@ -474,6 +489,79 @@ def _refresh_backend_heartbeat() -> None:
         logger.debug("backend heartbeat refresh failed", exc_info=True)
 
 
+def _heartbeat_owner_is_gone(row: dict, *, now: float, stale_s: float) -> bool:
+    """Same-host fence of the reclaim pass — ``gateway.lifecycle_ledger._pid_is_sentinel_owner``'s
+    convention adapted to heartbeat rows. True (owner provably gone) when:
+
+    * the pid is dead (zombies report dead) — at ANY freshness: R1's crash window is a SIGKILLed
+      gateway whose row was refreshed moments before it died;
+    * the pid is alive but was BORN after ``started_at + 2s`` — PID reuse: the owner died and the
+      OS recycled its pid. DIRECTIONAL ONLY (``create_time > started_at + 2.0``): ``started_at``
+      is a wiring-time proxy (≥ the true birth, see ``_gateway_started_at``), so the same process
+      always satisfies ``create_time <= started_at`` and an equality comparison would
+      false-positive on every live owner;
+    * otherwise the row is reclaimable only through the ``stale_s`` backstop: alive-and-
+      owner-shaped and create-time-unprobeable (no psutil) both mean "cannot prove the owner
+      gone" — never delete a possibly-owned fresh row (R4).
+    """
+    pid = int(row["pid"])
+    from gateway.status import _pid_exists
+    if not _pid_exists(pid):
+        return True
+    from hermes_cli.process_identity import _process_create_time
+    create_time = _process_create_time(pid)
+    if create_time is not None and create_time > float(row["started_at"]) + 2.0:
+        return True
+    return (now - float(row["last_heartbeat"])) > stale_s
+
+
+def _reclaim_dead_backend_heartbeat_rows() -> list[str]:
+    """Drop ``gateway_heartbeats`` rows whose owner is provably gone (or aged past every bound).
+
+    Maestro's session-state probe counts any row with ``last_heartbeat`` older than 180s as an
+    operational violation (contract phase1.session.operational, finding 34ce45cd2093), and the
+    old design left crashed rows to "age out" with nothing actually removing them. Runs from
+    the refresher lifecycle (boot pass + every tick):
+
+    * own row: never — this process is its live owner;
+    * same-host rows: the ``_heartbeat_owner_is_gone`` fence (dead pid / pid reuse at any
+      freshness, else the ``max(3 × refresh, 180s)`` staleness backstop);
+    * foreign-host rows: pid probing is meaningless across hosts (a matching pid here is a
+      different process), so they only age out at ``2 × _SESSION_TTL_S`` — the orphan sweep's
+      own heartbeat-exemption window, past which deleting the row cannot change any sweep
+      outcome.
+
+    Deletion goes through ``drop_backend_heartbeats``'s race guard: an owner that refreshed
+    between this pass's list and its delete is spared. Failures are the caller's to swallow
+    (both call sites wrap it like a refresh failure).
+    """
+    db = _get_db()
+    if db is None:
+        return []
+    own_id = _backend_id_for_this_process()
+    now = time.time()
+    stale_s = max(3.0 * _HEARTBEAT_REFRESH_S, _HEARTBEAT_RECLAIM_MIN_STALE_S)
+    foreign_ttl_s = 2.0 * _SESSION_TTL_S
+    observed: dict[str, float] = {}
+    for row in db.list_backend_heartbeats():
+        backend_id = str(row["backend_id"])
+        if backend_id == own_id:
+            continue
+        last = float(row["last_heartbeat"])
+        if str(row["host"]) == _reaper_hostname():
+            if _heartbeat_owner_is_gone(row, now=now, stale_s=stale_s):
+                observed[backend_id] = last
+        elif foreign_ttl_s > 0 and (now - last) > foreign_ttl_s:
+            observed[backend_id] = last
+    if not observed:
+        return []
+    removed = db.drop_backend_heartbeats(observed)
+    if removed:
+        logger.info("Reclaimed %d dead-backend gateway heartbeat row(s): %s",
+                    len(removed), ", ".join(removed))
+    return removed
+
+
 def _start_backend_heartbeat_refresher() -> None:
     """Register this backend and start the refresher thread (once per process). The first refresh writes the row
     synchronously so this process's own sweep sees itself in the heartbeat table. ``_HEARTBEAT_REFRESH_S <= 0``
@@ -499,7 +587,9 @@ def _start_backend_heartbeat_refresher() -> None:
         logger.debug("backend heartbeat reclaim pass failed", exc_info=True)
     if _HEARTBEAT_REFRESH_S <= 0:
         return
+    global _heartbeat_refresher_stop
     stop_event = threading.Event()
+    _heartbeat_refresher_stop = stop_event
 
     def _loop() -> None:
         while not stop_event.is_set():
@@ -519,13 +609,28 @@ def _start_backend_heartbeat_refresher() -> None:
             stop_event.wait(_HEARTBEAT_REFRESH_S)
 
     def _atexit_clear():
-        stop_event.set()
-        with contextlib.suppress(Exception):
-            if (db := _get_db()) is not None:
-                db.clear_backend_heartbeat(_backend_id_for_this_process())
+        # Backup path: the signal-receipt clear (in ``_handle_exit_flush_signal``) usually ran
+        # first; atexit still catches exits that reach interpreter shutdown without a signal.
+        _clear_own_backend_heartbeat()
 
     atexit.register(_atexit_clear)
     threading.Thread(target=_loop, name="hermes-gateway-heartbeat", daemon=True).start()
+
+
+def _clear_own_backend_heartbeat() -> None:
+    """Stop the heartbeat refresher and delete this backend's row, best-effort. Shared by the
+    exit-flush signal path and ``atexit``. The signal path runs it at RECEIPT — milliseconds
+    after SIGTERM — because the row must be gone before a supervisor's post-grace SIGKILL can
+    cut the shutdown short: the observed A4 failure (34ce45cd2093) was a row going stale while
+    its live gateway spent minutes in graceful shutdown, and atexit either lands far too late
+    or (SIGKILL) never. Suppressed throughout: a DB failure here must never block the flush and
+    handler chain that follow — a leftover row ages out via the reclaim fence at next boot."""
+    stop_event = _heartbeat_refresher_stop
+    if stop_event is not None:
+        stop_event.set()
+    with contextlib.suppress(Exception):
+        if (db := _get_db()) is not None:
+            db.clear_backend_heartbeat(_backend_id_for_this_process())
 
 
 def _schedule_startup_orphan_sweep() -> None:
