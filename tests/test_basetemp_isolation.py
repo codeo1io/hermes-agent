@@ -32,6 +32,13 @@ def _config_with_basetemp(given: Path | None) -> SimpleNamespace:
     )
 
 
+@pytest.mark.allow_real_home_io
+# WHY: this test drives pytest_unconfigure() — suite-level teardown that, in a real
+# session, runs AFTER the autouse home-I/O guard is uninstalled. Its reap scan
+# (_processes_with_hermes_home_under) legitimately resolves REAL-home profile paths,
+# which the active guard refuses on hosts that have a real ~/.hermes (CI has none,
+# so the guard is inert there and this stays green upstream). Bypass the guard for
+# this test to match the real teardown-time conditions it simulates.
 def test_basetemp_inside_the_native_home_is_relocated_outside_it(tmp_path, monkeypatch):
     native = tmp_path / "native-home"
     native.mkdir()
