@@ -44,13 +44,8 @@ Respect the user's repo: don't commit, push, or rewrite history unless asked, an
 
 ===== context =====
 Workspace (snapshot at session start — re-check with `git` before acting on it):
-- Root: /home/agent/.hermes
-- Branch: main
-- Status: 6 modified, 7 untracked
-- Recent commits:
-    44aca0d item 447: item-445 live-only patch homecome — parity 39/41->41/41, PR#448 9f3f1e10 merged; queue receipt + STATUS entry pointer
-    ca26940 item 446 evidence: AFT cache restore + sentinel pin leg; STATUS + queue receipt
-    98360a1 item 446: AFT versioned-cache pin leg in venv-interpreter sentinel (2nd wipe-class victim: ~/.cache/aft deleted 11-16/17 while opencode server PID2389 live); restore v0.62.0+v0.64.0 provenance-verified; selftest 16/16 x2; hermeticity leak in old worlds closed
+- Root: <HOME>/code
+- Project: pyproject.toml
 
 You are in a plain terminal (CLI). Markdown does NOT render — asterisks, headers, and fences appear as literal characters, so write plain text (indentation and blank lines are your only layout tools). Files: there is no attachment channel and MEDIA:/path tags are NOT intercepted here (they print as literal text) — deliver a file by stating its absolute path or URL in plain text; the user opens it themselves.
 
