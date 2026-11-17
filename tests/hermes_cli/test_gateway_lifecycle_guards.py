@@ -325,3 +325,49 @@ def test_live_sessions_ask_yes_no_on_a_terminal(monkeypatch, capsys, answer):
             guards.refuse_while_sessions_live(verb, args, host_home="/h", profile="coder")
         assert "Cancelled" in capsys.readouterr().out
     assert asked == [False]
+
+
+# ── Invariant 2b: the refusal counts only work a restart would interrupt ──────────────────────────
+
+
+def test_refusal_excludes_restart_safe_external_workers_and_wedged_units():
+    """Mirror of the drain's own semantics (``_awaitable_work_count``): restart-safe scoped
+    external cron workers outlive the restart (their systemd scope is not the gateway's) and
+    wedged units are skipped (restart is their remedy), so the preflight refusal must not count
+    them as ``would be interrupted``. 2026-11-12 incident: 22h without a fireable window on a
+    host whose executor runs 24/7 in a scoped worker."""
+    from hermes_cli import gateway_lifecycle_guards as guards
+    work = {"active_agents": 2, "active_work": [
+        {"kind": "cron", "job_id": "exec1", "pid": 111, "external": True, "restart_safe": True},
+        {"kind": "cron", "job_id": "stale1", "pid": 112, "external": False, "wedged": True},
+    ]}
+    assert guards._work_lines("restart", Path("/h"), work, "hermes gateway restart --yes") == []
+
+
+def test_refusal_still_counts_in_process_cron_and_live_turns():
+    """In-process cron, chat turns and delegations ARE interrupted by the verb and still refuse."""
+    from hermes_cli import gateway_lifecycle_guards as guards
+    work = {"active_agents": 3, "active_work": [
+        {"kind": "cron", "job_id": "inproc", "pid": 4242, "external": False},
+        {"kind": "chat", "session": "agent:main:telegram:dm:7", "pid": 4242},
+        {"kind": "delegation", "delegation_id": "deleg_ab12cd34", "pid": 4242},
+        {"kind": "cron", "job_id": "scoped-ok-to-skip", "pid": 113, "external": True, "restart_safe": True},
+    ]}
+    lines = guards._work_lines("restart", Path("/h"), work, "hermes gateway restart --yes")
+    assert len(lines) == 6  # header + 3 named units + hint pair
+    assert "3 live session(s)" in lines[0]
+    assert any("inproc" in ln for ln in lines)
+    assert any("agent:main:telegram:dm:7" in ln for ln in lines)
+    assert not any("scoped-ok-to-skip" in ln for ln in lines)
+
+
+def test_refusal_counts_unnamed_excess_conservatively():
+    """An older gateway naming fewer units than ``active_agents`` publishes: the unnamed excess
+    cannot be classified and stays counted (fail-safe, unchanged behavior)."""
+    from hermes_cli import gateway_lifecycle_guards as guards
+    work = {"active_agents": 5, "active_work": [
+        {"kind": "cron", "job_id": "scoped", "pid": 111, "external": True, "restart_safe": True},
+    ]}
+    lines = guards._work_lines("stop", Path("/h"), work, "hermes gateway stop --yes")
+    assert "4 live session(s)" in lines[0]  # 5 published minus the 1 classified restart-safe
+    assert "active agent run(s)" in lines[1]

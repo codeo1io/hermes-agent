@@ -78,11 +78,41 @@ def refusal_lines(verb: str, homes: list[Path], *, flag_hint: str = f"hermes gat
     return []
 
 
+def _interrupted_units(work: dict[str, Any]) -> tuple[int, list[dict[str, Any]]]:
+    """(interrupted count, interruptible units) mirroring the restart drain's own semantics.
+
+    The stop/restart drain (``GatewayShutdownMixin._awaitable_work_count``) deliberately does NOT
+    wait for two classes of in-flight work because a restart does not interrupt them:
+
+    * cron runs executing in a restart-safe external worker (their systemd scope outlives the
+      gateway process — ``split_inflight``'s ``restart_safe``), and
+    * wedged units (idle past the stale-inflight allowance; ``restart is their remedy``,
+      #115469).
+
+    This preflight refusal counts work the verb would interrupt. Counting restart-safe external
+    workers as ``would be interrupted`` is factually wrong and makes the sanctioned verb
+    structurally unfireable on hosts where such workers run around the clock (measured 22h
+    without a fireable window: 2026-11-12). In-process cron and non-scoped runs still count —
+    they genuinely are interrupted. ``active_agents`` can exceed the named units (older
+    gateways); it is clamped, never below the named interruptible units.
+    """
+    named = [u for u in work.get("active_work") or [] if isinstance(u, dict)]
+    interruptible = [
+        u for u in named
+        if not (u.get("kind") == "cron" and u.get("external") and u.get("restart_safe"))
+        and not u.get("wedged")
+    ]
+    # Unnamed excess (older gateways whose active_agents exceeds the named units) is
+    # conservatively interruptible: without names there is nothing to classify.
+    unnamed = max(0, int(work.get("active_agents") or 0) - len(named))
+    count = len(interruptible) + unnamed
+    return count, interruptible
+
+
 def _work_lines(verb: str, home: Path, work: dict[str, Any], flag_hint: str) -> list[str]:
     from hermes_cli.update_cmd_drain_report import describe_active_work_unit
 
-    units = [u for u in work.get("active_work") or [] if isinstance(u, dict)]
-    count = max(len(units), int(work.get("active_agents") or 0))
+    count, units = _interrupted_units(work)
     if not count:
         return []
     lines = [f"Refusing to {verb} the gateway: {count} live session(s) would be interrupted."]
