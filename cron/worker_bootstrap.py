@@ -63,7 +63,8 @@ def worker_bootstrap() -> None:
     root = Path(__file__).resolve().parent.parent
     from pm.environments import activate_dependencies
 
-    activate_dependencies(root)
+    from hermes_cli._startup_fast import project_root_str
+    activate_dependencies(Path(project_root_str()))
     import importlib.util
 
     # Top-level probe: a dotted find_spec raises on the missing parent instead of
