@@ -60,7 +60,6 @@ def worker_bootstrap() -> None:
         return
     import sys
 
-    root = Path(__file__).resolve().parent.parent
     from pm.environments import activate_dependencies
 
     from hermes_cli._startup_fast import project_root_str
