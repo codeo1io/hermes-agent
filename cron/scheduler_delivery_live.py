@@ -312,7 +312,7 @@ def _live_send_media(
                 routed_media_metadata["scope_id"] = logical_home.scope_id
     _media_errors = sd._send_media_via_adapter(
         t.runtime_adapter, t.chat_id, media_files, routed_media_metadata or None, t.loop, t.job,
-        platform=t.platform,
+        platform=t.platform, force_document=t.force_document,
     )
     if (topic_name and len(media_files) == sum("thread not found" in e.lower() for e in _media_errors)
             and sd._resolve_named_dm_topic(t, topic_name, routed_media_metadata, delivery_errors,
@@ -320,7 +320,7 @@ def _live_send_media(
         # The named topic vanished (a media-only job never runs the router's text refresh): recreate once.
         _media_errors = sd._send_media_via_adapter(
             t.runtime_adapter, t.chat_id, media_files, routed_media_metadata, t.loop, t.job,
-            platform=t.platform)
+            platform=t.platform, force_document=t.force_document)
     if t.job.pop("_media_ack_lost", False) and t.where not in unverified_targets:
         unverified_targets.append(t.where)
     # Surface per-file failures into run status: text delivered but attachment lost is not ok.

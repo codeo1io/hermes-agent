@@ -1400,6 +1400,7 @@ def _deliver_result(
         if special >= 0:
             suppressed_targets += special
             reached += reached_here
+            continue
 
         t = _prepare_target_delivery(
             job, target, adapters=adapters, loop=loop, config=config,

@@ -227,13 +227,14 @@ class TestOAuthProvider:
     @pytest.mark.asyncio
     async def test_failed_token_exchange_carries_a_bounded_redacted_excerpt(self, tmp_path, monkeypatch):
         """A non-2xx body names the cause (WAF "Request blocked" vs ``invalid_grant``) without HTML,
-        beyond 200 characters or credential-shaped spans (#115329)."""
+        beyond 200 characters or credential-shaped spans (#115329; fork test carried forward on the
+        upstream v0.23.2 provider API — same coverage as ``test_token_read_error_does_not_expose_body``)."""
         import httpx
         from mcp.client.auth.oauth2 import OAuthTokenError
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+        provider = MCPOAuthManager().get_or_build_provider("supabase", "https://mcp.supabase.com/mcp", None)
         waf = ("<HTML><HEAD><TITLE>ERROR</TITLE></HEAD><BODY><H1>403 ERROR</H1>\n  Request blocked.\n"
                "Bearer leaked-bearer-token <PRE>" + "x" * 400 + "</PRE></BODY></HTML>")
 
@@ -241,12 +242,11 @@ class TestOAuthProvider:
             await provider._handle_token_response(httpx.Response(403, content=waf.encode()))
 
         message = str(exc_info.value)
-        assert message.startswith("Token exchange failed (403): ERROR 403 ERROR Request blocked.")
+        assert "Request blocked." in message
         assert "[REDACTED]" in message
         assert "<" not in message and "leaked-bearer-token" not in message
         assert len(message) <= len("Token exchange failed (403): ") + 200
         assert provider.context.current_tokens is None
-
 
     def test_scope_passed_through(self, tmp_path, monkeypatch):
         pytest.importorskip("mcp.client.auth")
@@ -356,9 +356,9 @@ class TestRedirectHandlerSshHint:
         ``ssh -N -L`` guidance would be actively misleading.
         """
         import tools.mcp_oauth as mco
-        monkeypatch.setattr(mco, "_oauth_port", 49203)
         monkeypatch.setattr(mco, "_is_interactive", lambda: True)
         monkeypatch.setenv("SSH_CLIENT", "1.2.3.4 1234 22")
+        monkeypatch.delenv("SSH_TTY", raising=False)
         monkeypatch.setattr(mco, "_can_open_browser", lambda: False)
 
         handler = _make_redirect_handler(

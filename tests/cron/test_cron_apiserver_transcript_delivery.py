@@ -135,8 +135,8 @@ class TestBareTokenResolution:
     def test_explicit_session_target_passes_through(self):
         """api_server:<session-id> is handed to the resolver unchanged (the
         transcript helper validates existence at delivery time)."""
-        with patch("tools.send_message_tool.prepare_send_message_platforms"), \
-             patch("tools.send_message_tool.resolve_send_target",
+        with patch("gateway.outbound.send.prepare_send_message_platforms"), \
+             patch("gateway.outbound.send.resolve_send_target",
                    return_value=("sess-x", None, None)) as rst:
             target = self._resolve(_job(), "api_server:sess-x")
         assert target is not None
