@@ -90,7 +90,12 @@ def _usage_summary(response: Any) -> Optional[dict[str, Any]]:
     # tokens first, so the native api_mode/provider shape would read zeros here.
     cu = normalize_usage(raw_usage, api_mode="chat_completions")
     summary = asdict(cu)
+    # Per-response detail fields are dropped like ``raw_usage``: the mirror and the
+    # top level must stay equal (``response["usage"] == post["usage"]`` is ONE
+    # contract), and ``raw_usage``/``cache_write_by_ttl`` are the non-comparable
+    # ones (raw dict vs normalized tuple fields).
     summary.pop("raw_usage", None)
+    summary.pop("cache_write_by_ttl", None)
     summary["prompt_tokens"] = cu.prompt_tokens
     summary["total_tokens"] = cu.total_tokens
     return summary

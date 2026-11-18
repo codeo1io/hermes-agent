@@ -370,7 +370,8 @@ def test_is_relay_media_url_requires_connector_origin_and_base_path(base, url, e
 
 
 @pytest.mark.asyncio
-async def test_download_never_sends_bearer_to_foreign_origin_with_relay_path(monkeypatch):
+@patch("gateway.relay.media.is_safe_url", return_value=True)
+async def test_download_never_sends_bearer_to_foreign_origin_with_relay_path(_safe, monkeypatch):
     """A platform-supplied URL on another host that merely contains /relay/media/
     is fetched as public media: no connector bearer leaves the gateway (#71559)."""
     seen: list[tuple[str, dict]] = []

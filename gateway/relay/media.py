@@ -259,8 +259,8 @@ class RelayMediaClient:
         """
         if not url:
             return None
-        needs_auth = self.is_relay_media_url(url) and self.is_own_rehost(url)
-        if self.is_relay_media_url(url) and not needs_auth:
+        needs_auth = self.is_relay_media_url(url)
+        if not needs_auth:
             self._warn_foreign_rehost(url)
         if needs_auth and not self.enabled:
             return None
