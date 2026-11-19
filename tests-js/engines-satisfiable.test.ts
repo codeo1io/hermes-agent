@@ -45,17 +45,20 @@ function readText(relativePath: string): string {
 
 function parseVersion(version: string): [number, number, number] {
   const [major = 0, minor = 0, patch = 0] = version.split('-')[0].split('.').map(Number)
+
   return [major, minor, patch]
 }
 
 function compare(left: string, right: string): number {
   const have = parseVersion(left)
   const want = parseVersion(right)
+
   for (let index = 0; index < have.length; index += 1) {
     if (have[index] !== want[index]) {
       return have[index] - want[index]
     }
   }
+
   return 0
 }
 
@@ -65,14 +68,18 @@ function satisfiesClause(version: string, clause: string): boolean {
     /^(?:\^|>=|<=|>|<|=)?\d+(?:\.\d+){0,2}$/,
     `unsupported semver clause: ${clause}`
   )
+
   if (clause.startsWith('^')) {
     const bound = clause.slice(1)
+
     return parseVersion(version)[0] === parseVersion(bound)[0] && compare(version, bound) >= 0
   }
+
   const match = clause.match(/^(>=|<=|>|<|=)?(.+)$/)
   assert.ok(match)
   const [, operator = '=', bound] = match
   const result = compare(version, bound)
+
   return operator === '>='
     ? result >= 0
     : operator === '<='
@@ -87,6 +94,7 @@ function satisfiesClause(version: string, clause: string): boolean {
 function satisfiesRange(version: string, range: string): boolean {
   const alternatives = range.split('||').map(alternative => alternative.trim().split(/\s+/))
   alternatives.flat().forEach(clause => satisfiesClause(version, clause))
+
   return alternatives.some(clauses => clauses.every(clause => satisfiesClause(version, clause)))
 }
 
@@ -100,6 +108,7 @@ function normalizeRange(spec: string): string {
 }
 
 const rootManifest = readJson<Manifest>('package.json')
+
 // Upstream v0.23.1 switched the workspace npm→pnpm (7062229090a):
 // package-lock.json is gone; pnpm-lock.yaml is the lock of record.
 const lockfile = loadYaml(
@@ -108,6 +117,7 @@ const lockfile = loadYaml(
 
 function engines(label: string): Engines {
   assert.ok(rootManifest.engines?.node && rootManifest.engines?.npm, `${label} must declare engines`)
+
   return rootManifest.engines
 }
 
@@ -122,6 +132,7 @@ function managedNodeMajor(): number {
   const openArms = rootEngines.node!.split('||').map(arm => arm.trim()).filter(arm => arm.startsWith('>='))
   assert.ok(openArms.length > 0, `engines.node ${rootEngines.node} has no open >=major arm for pm-managed LTS installs`)
   const major = parseVersion(openArms[openArms.length - 1].replace(/^>=/, ''))[0]
+
   for (const arm of rootEngines.node!.split('||').map(a => a.trim())) {
     if (arm.startsWith('^')) {
       const caretMajor = parseVersion(arm.replace(/^\^/, ''))[0]
@@ -131,6 +142,7 @@ function managedNodeMajor(): number {
       )
     }
   }
+
   return major
 }
 
@@ -219,21 +231,27 @@ describe('Declared floors clear the locked tree', () => {
 
   test('every engines arm floor clears every locked dependency', () => {
     const lockedRanges = new Map<string, string>()
+
     for (const [pkgPath, meta] of Object.entries(lockfile.packages ?? {})) {
       const nodeRange = meta?.engines?.node
+
       if (typeof nodeRange === 'string' && nodeRange.trim() !== '' && nodeRange.trim() !== '*') {
         lockedRanges.set(nodeRange, pkgPath)
       }
     }
+
     const violations: Array<[string, string, string]> = []
+
     for (const arm of rootEngines.node!.split('||')) {
       const floor = arm.trim().replace(/^(\^|>=|=)/, '')
+
       for (const [depRange, example] of lockedRanges) {
         if (!satisfiesRange(floor, normalizeRange(depRange))) {
           violations.push([floor, depRange, example])
         }
       }
     }
+
     assert.deepEqual(violations, [])
   })
 
