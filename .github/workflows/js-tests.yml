@@ -20,7 +20,12 @@ jobs:
     # One larger runner installs one time. vitest, tsc and eslint each size
     # their own worker pool from the core count.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Fork CI policy (#20694 runner tier): the upstream wall is 30m and fits
+    # upstream's runners (22m54s observed on the identical merged tree), but
+    # on the fork's hosted tier this job hit the 30m boundary twice in a row
+    # (runs 44507606249, 44559824167) under load. 60m matches the repo's own
+    # long-wall precedent (.github/workflows/archive-inputs.yml).
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1
         with:
@@ -38,7 +43,10 @@ jobs:
 
       - name: Install zsh and a virtual display for Electron
         if: runner.os == 'Linux'
+        # Refresh the package index first, like every other apt step here: a
+        # runner image without a populated list can't resolve zsh/libnotify4.
         run: |
+          sudo apt-get update -qq
           sudo apt-get install -y zsh xvfb \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
             libx11-dev libxi-dev \
