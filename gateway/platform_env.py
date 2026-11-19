@@ -192,8 +192,7 @@ def bundled_sibling(directory: str, stem: str = "gateway_env") -> Any:
     from gateway.config import Platform
     if directory not in Platform._scan_bundled_plugin_platforms()[0]:
         return None
-    from hermes_cli.plugins import get_bundled_plugins_dir
-    path = get_bundled_plugins_dir() / "platforms" / directory / f"{stem}.py"
+    path = Path(__file__).resolve().parent.parent / "plugins" / "platforms" / directory / f"{stem}.py"
     if not path.is_file():
         return None
     spec = importlib.util.spec_from_file_location(f"_hermes_bundled_{stem}_{directory}", path)

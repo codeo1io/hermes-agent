@@ -13,11 +13,11 @@ from tools.computer_use import cua_backend_daemon, cua_backend_driver
 
 @pytest.fixture(autouse=True)
 def _reset_computer_use_state():
-    from tests.computer_use_fakes import reset_backend
+    from tools.computer_use.tool import reset_backend_for_tests
 
-    reset_backend()
+    reset_backend_for_tests()
     yield
-    reset_backend()
+    reset_backend_for_tests()
 
 
 def test_normal_hermes_session_maps_to_standard_mode():

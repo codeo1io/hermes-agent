@@ -8,9 +8,9 @@ from tools.connectors import operation as op
 
 @pytest.fixture(autouse=True)
 def _clean():
-    live._open.clear()
+    live.reset_for_tests()
     yield
-    live._open.clear()
+    live.reset_for_tests()
 
 
 def _op(session="s1"):

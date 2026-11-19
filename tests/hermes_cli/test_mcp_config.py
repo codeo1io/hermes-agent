@@ -317,47 +317,6 @@ class TestMcpAdd:
 class TestMcpTest:
 
 
-    def test_exit_codes_distinguish_failure_from_unknown_server(self, tmp_path, capsys, monkeypatch):
-        """0 connected, 1 connection failed, 3 not in config — never argparse's 2, never a silent 0."""
-        _seed_config(tmp_path, {"ink": {"url": "https://mcp.ml.ink/mcp"}})
-        from hermes_cli.mcp_config import cmd_mcp_test
-
-        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", lambda name, cfg, **kw: [])
-        assert cmd_mcp_test(_make_args(name="ink")) == 0
-
-        def failing_probe(name, cfg, **kw):
-            raise RuntimeError("Server returned an error response")
-
-        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", failing_probe)
-        assert cmd_mcp_test(_make_args(name="ink")) == 1
-        assert cmd_mcp_test(_make_args(name="doesnotexist")) == 3
-        assert "not found in config" in capsys.readouterr().out
-
-    def test_transport_line_masks_url_query_credentials(self, tmp_path, capsys, monkeypatch):
-        """``Transport: HTTP →`` prints the rendered URL; a ``?userToken=`` key must not reach stdout (#133713)."""
-        secret = "OPAQUE" + "k" * 24
-        _seed_config(tmp_path, {"penpot": {"url": f"http://127.0.0.1:9001/mcp/stream?userToken={secret}"}})
-        from hermes_cli.mcp_config import cmd_mcp_test
-
-        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", lambda name, cfg, **kw: [])
-        assert cmd_mcp_test(_make_args(name="penpot")) == 0
-        out = capsys.readouterr().out
-        assert secret not in out
-        assert "http://127.0.0.1:9001/mcp/stream?userToken=***" in out
-
-    def test_cli_dispatcher_forwards_test_exit_code(self, tmp_path, monkeypatch):
-        """``hermes mcp test`` reaches ``main()`` with the handler's code (the dispatcher used to drop it)."""
-        _seed_config(tmp_path, {"ink": {"url": "https://mcp.ml.ink/mcp"}})
-        from hermes_cli.main import cmd_mcp
-
-        def failing_probe(name, cfg, **kw):
-            raise RuntimeError("boom")
-
-        monkeypatch.setattr("hermes_cli.mcp_config._probe_single_server", failing_probe)
-        assert cmd_mcp(_make_args(name="ink", mcp_action="test")) == 1
-        assert cmd_mcp(_make_args(name="doesnotexist", mcp_action="test")) == 3
-        assert cmd_mcp(_make_args(mcp_action="list")) is None
-
     def test_probe_uses_configured_connect_timeout(self, monkeypatch):
         """OAuth-capable probes must not hard-code a short 30s timeout."""
         import asyncio

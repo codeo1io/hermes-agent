@@ -48,7 +48,6 @@ class FakePortal:
         self.token_error = ""             # an RFC 8628 error code the token endpoint answers with
         self.on_token = None              # called when the token grant is issued
         self.token_grants = 0
-        self.token_inference_url = INFERENCE    # the device-code grant's ``inference_base_url``
         self.token_polls = 0
         self.claim_reply = {"status": "claimed", "account_email": EMAIL, "cohort_carried": False,
                             "connectors": {"kind": "moved", "moved_toolkits": ["gmail"], "dropped_toolkits": []}}
@@ -92,7 +91,7 @@ class FakePortal:
             return httpx.Response(200, json={
                 "access_token": _jwt(sub="nas_user:9", client_id="hermes-cli", account_tier="free", email=EMAIL),
                 "refresh_token": REFRESH_TOKEN, "token_type": "Bearer", "expires_in": 900,
-                "scope": "inference:invoke", "inference_base_url": self.token_inference_url})
+                "scope": "inference:invoke", "inference_base_url": INFERENCE})
         return httpx.Response(500, json={"error": f"unexpected {path}"})
 
 

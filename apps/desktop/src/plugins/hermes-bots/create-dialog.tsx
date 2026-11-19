@@ -1,4 +1,3 @@
-import type { ProfilesCreateResult } from '@hermes/plugin-sdk'
 import {
   Badge,
   Button,
@@ -254,47 +253,17 @@ function slugTaken(roster: RosterRow[], slug: string, target: string, draft: nul
  *  (`draftTargetRef`, recorded with it): the "Create on" picker may point
  *  elsewhere by then, and a same-named bot there is not the draft. Each discard,
  *  and the dialog unmounting, bumps `draftGenRef` so an in-flight create
- *  deletes its own draft and configures nothing. `draftReceiptRef` is what
- *  the flight that recorded the draft learned: the connection it was created
- *  on and its creation warnings. Every discard drops it, and a submit
- *  publishes the warnings only while the receipt is still the recorded one. */
-interface DraftReceipt {
-  owner: string
-  warning: null | { message: string; title: string }
-}
-
-/** A creation warning names the profile and the machine it was created on
- *  (no machine on a legacy gateway without connection ids: never guess 'local'). */
-function creationWarningTitle(profile: string, connectionId: string, connections: ConnectionRow[] | null) {
-  const machine = (connections || []).find(c => c.id === connectionId)?.label
-
-  return connectionId ? `${profile} — ${machine ? `${machine} (${connectionId})` : connectionId}` : profile
-}
-
-/** The bot's live roster row on the connection it was created on (what Edit
- *  Profile gets from the roster). Until the roster lists it: `fallback` while
- *  that connection is still the active one, else a row pinned to it, so a
- *  same-named bot on the gateway switched to is never the one edited. */
-function liveRosterRow(name: string, connectionId: string, fallback: RosterRow): RosterRow {
-  const key = botRosterKey({ connectionId: connectionId || undefined, name })
-  const live = $lastRoster.get().find(row => botRosterKey(row) === key)
-  const active = String(host.state?.connectionId?.get?.() || '').trim()
-
-  return live ?? (connectionId && connectionId !== active ? { ...fallback, connectionId, sourceScoped: true } : fallback)
-}
-
+ *  deletes its own draft and configures nothing. */
 function useDraftProfile(
   createdRef: { current: null | string },
   flightRef: { current: Promise<null | string> | null }
 ) {
   const draftGenRef = useRef(0)
   const draftTargetRef = useRef('')
-  const draftReceiptRef = useRef<DraftReceipt | null>(null)
 
   const discardDraft = () => {
     const draft = createdRef.current
     draftGenRef.current += 1
-    draftReceiptRef.current = null
     createdRef.current = flightRef.current = null
 
     if (draft) {
@@ -309,7 +278,7 @@ function useDraftProfile(
     []
   )
 
-  return { discardDraft, draftGenRef, draftTargetRef, draftReceiptRef }
+  return { discardDraft, draftGenRef, draftTargetRef }
 }
 
 export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: CreateAgentDialogProps) {
@@ -325,7 +294,7 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
   // button + MCP setup buttons). Distinct from createdRef on purpose:
   // createdRef must stay a slug string for its sibling consumers.
   const flightRef = useRef<Promise<null | string> | null>(null)
-  const { discardDraft, draftGenRef, draftTargetRef, draftReceiptRef } = useDraftProfile(createdRef, flightRef)
+  const { discardDraft, draftGenRef, draftTargetRef } = useDraftProfile(createdRef, flightRef)
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   // Default shapes mode: deterministic blob face drawn from the agent's name
@@ -442,7 +411,8 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
     setTargetConnection('')
     setBusy(false)
     setError(null)
-    createdRef.current = flightRef.current = draftReceiptRef.current = null
+    createdRef.current = null
+    flightRef.current = null
   }
 
   // Capability catalog for the tabs: the profile doesn't exist yet, so show
@@ -547,7 +517,7 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
     const target = createTarget
 
     const flight = singleFlight(flightRef, async () => {
-      const created = await requestForTarget<ProfilesCreateResult>('profiles.create', {
+      await requestForTarget('profiles.create', {
         name: slug,
         description: descriptionText,
         // Clone sources are profiles of the TARGET backend. The picker's
@@ -556,10 +526,9 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
         // the remote box doesn't have.
         clone_from: cloneFrom === '__none__' ? null : remoteTarget ? 'default' : cloneFrom,
         no_skills: noSkills,
-        // Shared (not copied) auth keeps ONE OAuth/token pool with the default
-        // profile, so refreshes can't invalidate each other. From a named launch
-        // profile the gateway copies its logins instead (single-use OAuth still
-        // read from the default profile). Older gateways ignore the param and copy.
+        // Shared (not copied) auth keeps ONE OAuth/token pool with the main
+        // profile, so refreshes can't invalidate each other. Older gateways
+        // ignore the param and copy — still functional, just forked.
         share_auth: shareAuth,
         soul: composeSoul({
           name: slug,
@@ -591,13 +560,6 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
 
       createdRef.current = slug
       draftTargetRef.current = target
-      const owner = target || activeConnectionId
-      draftReceiptRef.current = {
-        owner,
-        warning: created?.warnings?.length
-          ? { title: creationWarningTitle(slug, owner, connections), message: created.warnings.join('\n') }
-          : null
-      }
 
       // Apply capability picks from the Advanced tabs (best-effort; the
       // profile exists either way and Edit Profile can finish the job).
@@ -691,10 +653,6 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
         return
       }
 
-      // Kept even if the dialog closes during readiness; a discard drops it.
-      const receipt = draftReceiptRef.current
-      const createdOn = receipt?.owner ?? activeConnectionId
-
       // The intro turn is a real model call. Probe the new profile's route
       // first so a bot whose machine has no usable credential lands as
       // "created, needs a model" instead of a doomed "No LLM provider" turn.
@@ -714,27 +672,15 @@ export function CreateAgentDialog({ open, onClose, onConfigureModel, roster }: C
         ...(remoteTarget ? { connectionId: targetConnection, remoteSource: true } : {})
       }
 
-      // Not for a draft a target change discarded while readiness ran.
-      if (receipt?.warning && draftReceiptRef.current === receipt) {
-        host.notify({ kind: 'warning', title: receipt.warning.title, message: receipt.warning.message, persistent: true })
-      }
-
-      // Persistent: opening the chat clears ordinary notices.
       host.notify(
         needsModel
           ? {
               kind: 'warning',
               title: createdMessage,
               message: b.editor.needsModel,
-              persistent: true,
               detail: readiness?.error,
               ...(!remoteTarget && onConfigureModel
-                ? {
-                    action: {
-                      label: b.editor.configureModel,
-                      onClick: () => onConfigureModel(liveRosterRow(slugCreated, createdOn, bot))
-                    }
-                  }
+                ? { action: { label: b.editor.configureModel, onClick: () => onConfigureModel(bot) } }
                 : {})
             }
           : { kind: 'success', message: createdMessage }

@@ -163,7 +163,7 @@ def _cfgset_guarded(fn):
     def setter(rid, params, key, value, session):
         try:
             return fn(rid, params, key, value, session)
-        except (ConfigWriteError, SessionNotOwned):
+        except ConfigWriteError:
             raise
         except Exception as e:
             return _err(rid, 5001, str(e))

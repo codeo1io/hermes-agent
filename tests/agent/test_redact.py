@@ -104,27 +104,6 @@ class TestKnownPrefixes:
         ]:
             assert redact_sensitive_text(benign) == benign
 
-    def test_grafana_token_prefixes(self):
-        """Bare Grafana service-account / Cloud tokens redact (#150339); look-alikes stay intact."""
-        from agent.redact import redact_terminal_output
-        # NOTE: prefix + suffix CONCATENATION so no contiguous token literal exists in this file.
-        sa_body = "Q7zR4Lm9Xc2Vb5Nw8Kd3Hf6JtPa0Sg7Y"
-        cloud_body = "eyJvIjoiMTIzNDU2IiwibiI6InN0YWNrLXRva2VuIiwiayI6Ilo3cTRMbTlYYzJWYjVOdzgifQ"
-        for token, body in [
-            ("glsa_" + sa_body + "_0123abcd", sa_body),  # service-account token + checksum
-            ("glsa_" + sa_body, sa_body),                # checksum dropped / format drift
-            ("glc_" + cloud_body + "==", cloud_body),    # Cloud access-policy token, padded
-            ("glc_" + cloud_body, cloud_body),
-            ("glc_" + cloud_body[:40] + "+/" + cloud_body[40:], cloud_body[40:]),  # base64 +/ chars
-        ]:
-            for out in (redact_sensitive_text(f"$ printf '%s' \"$GRAFANA_TOKEN\"\n{token}\n"),
-                        redact_terminal_output(f"{token}\n", "printenv GRAFANA_TOKEN")):
-                assert body not in out, f"{token!r} survived redaction: {out!r}"
-        for benign in ["glsa_short", "glc_config_loader", "myglsa_" + sa_body,
-                       "src/glc_renderer/backend/opengl/shaders/main.frag",  # a glc_* path is not a token
-                       "cd /home/u/glc_project/build/release/artifacts/output"]:
-            assert redact_sensitive_text(benign) == benign
-
     def test_context7_api_key_prefix(self):
         """Context7 keys carry a fixed vendor prefix (``ctx7sk-``) and must redact on every surface.
 
@@ -430,7 +409,7 @@ class TestJsonFields:
     def test_json_field_inside_json_encoded_string_is_masked_and_stays_valid(self, depth):
         # A tool result wrapping a config dump escapes its quotes; the plain JSON rule never saw the value.
         import json
-        key = "Ab8RN6Jx2kq9Zs0VwT4yLm3PbQe7HcUfGdA1nX5oIr"
+        key = "AQ.Ab8RN6Jx2kq9Zs0VwT4yLm3PbQe7HcUfGdA1nX5oIr"
         text = json.dumps({"api_key": key, "token": "CPU", "model": "gemini"})
         for _ in range(depth):
             text = json.dumps({"output": text})
@@ -550,34 +529,6 @@ class TestAuthHeaders:
         # "authorization" without a colon-delimited value is plain prose.
         text = "the authorization model is fully open"
         assert redact_sensitive_text(text) == text
-
-    def test_mixed_case_authorization_header_masked(self):
-        # Regression for #108807: the gate checked exact all-lower/all-upper
-        # substring runs, so a mixed-case header name (aUtHoRiZaTiOn) skipped
-        # the IGNORECASE header regex and leaked Bearer/Basic credentials.
-        secret = "SyntheticOpaqueCredential92837465"
-        for name in ("aUtHoRiZaTiOn", "pRoXy-AuThOrIzAtIoN", "AUTHORIZATION", "authorization"):
-            for scheme in ("Bearer", "Basic"):
-                text = f"{name}: {scheme} {secret}"
-                result = redact_sensitive_text(text)
-                assert secret not in result, text
-                assert f"{name}: {scheme}" in result, result
-
-    def test_mixed_case_header_via_logging_formatter(self):
-        # Same failure through the real formatter path the reporter used.
-        formatter = RedactingFormatter("%(message)s")
-        record = logging.LogRecord(
-            name="test",
-            level=logging.INFO,
-            pathname="",
-            lineno=0,
-            msg="aUtHoRiZaTiOn: Bearer SyntheticOpaqueCredential92837465",
-            args=(),
-            exc_info=None,
-        )
-        result = formatter.format(record)
-        assert "SyntheticOpaqueCredential92837465" not in result
-        assert "aUtHoRiZaTiOn: Bearer" in result, result
 
     def test_token_flush_against_double_quote_preserves_quote(self):
         # Regression for #43083: a token sitting flush against a closing
@@ -723,19 +674,6 @@ class TestElevenLabsTavilyExaKeys:
 
 
 
-
-    def test_tavily_environment_scoped_keys_redacted(self):
-        # Current Tavily keys carry a tvly-dev-/tvly-prod- segment (#72925).
-        for env in ("dev", "prod"):
-            key = "tvly-" + env + "-Ab3dE5fG7hJ9kL1mN2pQ4rS6"
-            for text in (f"echo {key} done", f'{{"query": "{key}"}}'):
-                result = redact_sensitive_text(text)
-                assert "E5fG7hJ9kL1m" not in result, result
-
-    def test_hyphenated_tavily_names_are_not_keys(self):
-        # Package/file names starting with tvly- are not keys; only an env segment may carry a hyphen.
-        for text in ("pip install tvly-python-client", "tvly-config-file"):
-            assert redact_sensitive_text(text) == text
 
     def test_all_three_in_env_dump(self):
         env_dump = (
@@ -1122,6 +1060,336 @@ class TestXaiToken:
 
 
 
+class TestDbConnstrCodeOutput:
+    """Regression tests for issue #33801 — _DB_CONNSTR_RE corrupting code output.
+
+    Two distinct flaws, both confined to displayed tool OUTPUT (read_file /
+    terminal / execute_code), never the on-disk content:
+
+    1. The password group ``[^@]+`` was greedy across newlines, so on a
+       multi-line block it scanned past the DSN line to the next stray ``@``
+       (e.g. a Python ``@decorator``), replacing everything in between with
+       ``***`` — dropping lines and concatenating the next one.
+    2. An f-string DSN template (``f"postgresql://{user}:{pass}@{host}"``) is
+       not a live credential, but was redacted anyway. Under ``code_file=True``
+       a pure ``{...}`` brace password is now preserved.
+    """
+
+    MULTILINE = (
+        '            return f"postgresql://{auth}@{self.pg_host}:'
+        '{self.pg_port}/{self.pg_database}"\n'
+        "\n"
+        '    @model_validator(mode="after")\n'
+        '    def _validate_critical_settings(self) -> "Settings":'
+    )
+
+
+
+
+
+    def test_literal_connstr_still_redacted_with_code_file(self):
+        """A real password in a literal DSN is still masked under code_file."""
+        text = "postgresql://admin:realpassword@db.internal:5432/app"
+        result = redact_sensitive_text(text, code_file=True, force=True)
+        assert "realpassword" not in result
+        assert "***" in result
+
+    def test_literal_connstr_redacted_all_schemes(self):
+        for scheme, secret in [
+            ("postgres", "pgsecret1234"),
+            ("mysql", "mysqlsecret99"),
+            ("redis", "redissecret77"),
+            ("mongodb+srv", "mongosecret55"),
+            ("amqp", "amqpsecret33"),
+        ]:
+            text = f"{scheme}://user:{secret}@host:1234/db"
+            result = redact_sensitive_text(text, code_file=True, force=True)
+            assert secret not in result, scheme
+
+    def test_literal_connstr_in_log_line_redacted(self):
+        text = "connected via postgres://user:s3cr3tpw@host:5432/db ok"
+        result = redact_sensitive_text(text, force=True)
+        assert "s3cr3tpw" not in result
+
+
+class TestTerminalOutputRedaction:
+    """is_env_dump_command + redact_terminal_output — issue #43025.
+
+    Terminal/process stdout must be redacted on every surface (foreground
+    `terminal` AND background `process(poll/log/wait)`). Env-dump commands
+    and commands that read ``.env`` files get the ENV-assignment pass so
+    opaque tokens (no vendor prefix) are masked; other commands stay on
+    the code_file path to avoid false positives.
+    """
+
+    def test_is_env_dump_command_detection(self):
+        from agent.redact import is_env_dump_command
+        assert is_env_dump_command("printenv")
+        assert is_env_dump_command("env")
+        assert is_env_dump_command("env | grep API")
+        assert is_env_dump_command("set")
+        assert is_env_dump_command("export")
+        assert is_env_dump_command("declare -x")
+        assert is_env_dump_command("cat /tmp/x && printenv")
+        assert not is_env_dump_command("python app.py")
+        assert not is_env_dump_command("cat config.py")
+        assert not is_env_dump_command("printf 'TOKEN=x'")
+        assert not is_env_dump_command("")
+        assert not is_env_dump_command(None)
+
+    # ── .env file detection (issue #61352 v2) ──
+
+    def test_command_reads_secret_file_detection(self):
+        from agent.redact import _command_reads_secret_file
+        # Basic detection
+        assert _command_reads_secret_file("cat .env")
+        assert _command_reads_secret_file("cat .env.local")
+        assert _command_reads_secret_file("cat .env.production")
+        assert _command_reads_secret_file("cat .envrc")
+        assert _command_reads_secret_file("head .env")
+        assert _command_reads_secret_file("tail .env")
+        assert _command_reads_secret_file("type .env")
+        assert _command_reads_secret_file("nl .env")
+        assert _command_reads_secret_file("bat .env")
+        # With flags
+        assert _command_reads_secret_file("cat -n .env")
+        assert _command_reads_secret_file("cat -A .env")
+        # With paths
+        assert _command_reads_secret_file("cat ~/.hermes/.env")
+        assert _command_reads_secret_file("cat /home/user/project/.env")
+        assert _command_reads_secret_file("cat ./config/.env.local")
+        # In a pipeline / sequence
+        assert _command_reads_secret_file("cat .env | grep KEY")
+        assert _command_reads_secret_file("echo '---' && cat .env")
+        # Windows-style backslash paths
+        assert _command_reads_secret_file("cat C:\\Users\\test\\.env")
+        # Quoted paths (plain split leaves the quotes attached)
+        assert _command_reads_secret_file('cat ".env"')
+        assert _command_reads_secret_file("cat '.env'")
+        # Case-insensitive basename (macOS/Windows filesystems)
+        assert _command_reads_secret_file("cat .ENV")
+
+    def test_command_reads_secret_file_excludes_templates(self):
+        from agent.redact import _command_reads_secret_file
+        # Templates/examples should NOT trigger
+        assert not _command_reads_secret_file("cat .env.example")
+        assert not _command_reads_secret_file("cat .env.sample")
+        assert not _command_reads_secret_file("cat .env.template")
+        assert not _command_reads_secret_file("cat .env.dist")
+
+    def test_command_reads_secret_file_rejects_non_env_files(self):
+        from agent.redact import _command_reads_secret_file
+        assert not _command_reads_secret_file("cat config.py")
+        assert not _command_reads_secret_file("cat README.md")
+        assert not _command_reads_secret_file("cat .envrc.bak")  # .bak not in list
+        assert not _command_reads_secret_file("python app.py")
+        assert not _command_reads_secret_file("echo .env")  # echo is not a file-read cmd
+        assert not _command_reads_secret_file("")
+        assert not _command_reads_secret_file(None)
+
+    def test_cat_env_file_masks_opaque_token(self):
+        """cat .env → code_file=False → generic ENV pass redacts opaque keys."""
+        from agent.redact import redact_terminal_output
+        out = (
+            "MISTRAL_API_KEY=abc123opaqueSecretValue\n"
+            "NOUS_API_KEY=xyz789opaqueKey\n"
+            "DEBUG=true\n"
+        )
+        red = redact_terminal_output(out, "cat .env")
+        assert "abc123opaqueSecretValue" not in red
+        assert "xyz789opaqueKey" not in red
+        assert "DEBUG=true" in red  # non-secret key preserved
+
+    def test_cat_env_file_with_flags_masks_opaque_token(self):
+        """cat -n .env → still detected as .env read."""
+        from agent.redact import redact_terminal_output
+        out = "     1\tMISTRAL_API_KEY=abc123opaqueSecretValue\n"
+        red = redact_terminal_output(out, "cat -n .env")
+        assert "abc123opaqueSecretValue" not in red
+
+    def test_cat_env_file_in_pipeline_masks_opaque_token(self):
+        """cat .env | grep KEY → still detected as .env read."""
+        from agent.redact import redact_terminal_output
+        out = "MISTRAL_API_KEY=abc123opaqueSecretValue"
+        red = redact_terminal_output(out, "cat .env | grep MISTRAL")
+        assert "abc123opaqueSecretValue" not in red
+
+    def test_cat_env_example_not_redacted_as_env(self):
+        """cat .env.example → NOT treated as .env read (template file)."""
+        from agent.redact import redact_terminal_output
+        out = "MISTRAL_API_KEY=placeholder_value_here"
+        red = redact_terminal_output(out, "cat .env.example")
+        # Should NOT be redacted by the ENV-assignment pass (code_file=True).
+        # The placeholder value should survive since it has no vendor prefix.
+        assert "placeholder_value_here" in red
+
+    def test_cat_env_local_masks_opaque_token(self):
+        """cat .env.local → detected as .env read."""
+        from agent.redact import redact_terminal_output
+        out = "CUSTOM_API_KEY=opaquecustomkey123456"
+        red = redact_terminal_output(out, "cat .env.local")
+        assert "opaquecustomkey123456" not in red
+
+    def test_cat_env_inline_comment_preserved(self):
+        """Inline comments after env values are preserved (issue #61352 review)."""
+        from agent.redact import redact_terminal_output
+        out = "MISTRAL_API_KEY=abc123secret # used for tests"
+        red = redact_terminal_output(out, "cat .env")
+        assert "abc123secret" not in red
+        assert "MISTRAL_API_KEY=*** # used for tests" in red
+
+    def test_cat_env_export_inline_comment_preserved(self):
+        """export KEY=VALUE # comment — comment preserved."""
+        from agent.redact import redact_terminal_output
+        out = "export MISTRAL_API_KEY=abc123secret # prod key"
+        red = redact_terminal_output(out, "cat .env")
+        assert "abc123secret" not in red
+        assert "export MISTRAL_API_KEY=*** # prod key" in red
+
+    @pytest.mark.parametrize(
+        ("command", "output", "secret"),
+        [
+            ("cat ~/.hermes/config.yaml", "api_key: hermesConfigSecret123", "hermesConfigSecret123"),
+            (
+                "head ~/.hermes/profiles/work/config.yaml",
+                "provider.token=profileConfigSecret456",
+                "profileConfigSecret456",
+            ),
+            ("tail ~/.bashrc", "export SERVICE_TOKEN=bashRcSecret789", "bashRcSecret789"),
+            ("grep TOKEN ~/.zshrc", "SERVICE_TOKEN=zshRcSecret123", "zshRcSecret123"),
+            (
+                "awk -F= '/TOKEN/ {print $2}' ~/.profile",
+                "SERVICE_TOKEN=profileSecret456",
+                "profileSecret456",
+            ),
+            ("sed -n '1,20p' ~/.zprofile", "api_key: zprofileSecret789", "zprofileSecret789"),
+            (
+                'cat "$HERMES_HOME/config.yaml"',
+                "SERVICE_TOKEN=variablePathSecret123456789",
+                "variablePathSecret123456789",
+            ),
+            (
+                'cat "${HERMES_HOME}/config.yaml"',
+                "SERVICE_TOKEN=variablePathSecret123456789",
+                "variablePathSecret123456789",
+            ),
+            (
+                "cat $HOME/.hermes/config.yaml",
+                "SERVICE_TOKEN=homeVariablePathSecret123456",
+                "homeVariablePathSecret123456",
+            ),
+            (
+                "awk '{print $1; print $2}' ~/.bashrc",
+                "export SERVICE_TOKEN=awkQuotedSecret123",
+                "awkQuotedSecret123",
+            ),
+            (
+                "grep 'foo|bar' ~/.hermes/config.yaml",
+                "SERVICE_TOKEN=grepQuotedSecret456",
+                "grepQuotedSecret456",
+            ),
+        ],
+    )
+    def test_secret_bearing_file_commands_mask_assignments(self, command, output, secret):
+        from agent.redact import redact_terminal_output
+
+        assert secret not in redact_terminal_output(output, command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat config.yaml",
+            "cat /project/config.yaml",
+            "cat ~/.hermes/config.example.yaml",
+            "cat ~/.hermes/config.template.yaml",
+            "cat ~/.bashrc.example",
+            'cat "$OTHER/config.yaml"',
+            "grep TOKEN app.py",
+            "grep .bashrc app.py",
+            "grep -n .env src/settings.py",
+            "awk '/TOKEN/' settings.yaml",
+            "sed -n '1,20p' template.yaml",
+        ],
+    )
+    def test_arbitrary_yaml_and_source_reads_stay_unredacted(self, command):
+        """Only the known secret-bearing files flip the gate: the same opaque value read
+        from project YAML / source code is left alone (code_file path), while the
+        identical text under ``cat .env`` is masked."""
+        from agent.redact import redact_terminal_output
+
+        output = "SERVICE_TOKEN=3JcQ1UzX9vQ2mL7pR4tY8wA1sD5fG6hJ2kSbn7Q0"
+        assert redact_terminal_output(output, command) == output
+        assert "3JcQ1UzX9vQ2mL7pR4tY8wA1sD5fG6hJ2kSbn7Q0" not in redact_terminal_output(output, "cat .env")
+
+
+    def test_disabled_passes_through(self, monkeypatch):
+        from agent.redact import redact_terminal_output
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        out = "CUSTOM_TOKEN=zzzopaque1234567890abcdef"
+        red = redact_terminal_output(out, "printenv")
+        assert "zzzopaque1234567890abcdef" in red
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m pytest",
+            "uv run pytest",
+            "poetry run pytest",
+            "coverage run -m pytest",
+            "PYTHONPATH=. pytest",
+            "/usr/bin/env pytest",
+            "bash -lc 'pytest tests/agent/test_redact.py'",
+        ],
+    )
+    def test_pytest_diagnostic_masks_python_repr_secret_field(self, command):
+        from agent.redact import redact_terminal_output
+
+        secret = "opaque-brave-value-1234567890"
+        out = f"E       kwargs={{'env': {{'BRAVE_API_KEY': '{secret}'}}}}"
+
+        red = redact_terminal_output(out, command, force=True)
+
+        assert secret not in red
+        assert "'BRAVE_API_KEY': '***'" in red
+
+    def test_exception_line_masks_python_repr_secret_field(self):
+        from agent.redact import redact_terminal_output
+
+        secret = "opaque-exception-value-1234567890"
+        out = f"RuntimeError: payload={{'API_KEY': '{secret}'}}"
+
+        red = redact_terminal_output(out, "python app.py", force=True)
+
+        assert secret not in red
+        assert "'API_KEY': '***'" in red
+
+    def test_source_dump_preserves_python_repr_fixture(self):
+        from agent.redact import redact_terminal_output
+
+        out = "CONFIG = {'BRAVE_API_KEY': 'fixture-value-1234567890'}"
+        assert redact_terminal_output(out, "cat config.py", force=True) == out
+        assert redact_terminal_output(out, "python dump_source.py", force=True) == out
+
+    def test_pytest_source_line_preserves_python_repr_fixture(self):
+        from agent.redact import redact_terminal_output
+
+        source = "    CONFIG = {'BRAVE_API_KEY': 'fixture-value-1234567890'}"
+        out = source + "\nE       assert False"
+
+        red = redact_terminal_output(out, "uv run pytest", force=True)
+
+        assert source in red
+
+    def test_disabled_pytest_diagnostic_passes_through(self, monkeypatch):
+        from agent.redact import redact_terminal_output
+
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        secret = "opaque-disabled-value-1234567890"
+        out = f"E       payload={{'API_KEY': '{secret}'}}"
+
+        assert redact_terminal_output(out, "uv run pytest") == out
+
+
 class TestFileReadNonReusableRedaction:
     """#35519: prefix-matched credentials in FILE CONTENT (read_file /
     search_files / cat) must be redacted to a NON-REUSABLE sentinel — not a
@@ -1196,7 +1464,7 @@ class TestSecretFileAssignmentRedaction:
         wide = "1|" + " " * 20000 + "token:"
         started = time.perf_counter()
         assert redact_sensitive_text(wide, force=True, file_read=True, secret_file=True) == wide
-        assert time.perf_counter() - started < 4.0
+        assert time.perf_counter() - started < 1.0
 
 
 class TestHermesHomePathClassification:

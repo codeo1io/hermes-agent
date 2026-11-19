@@ -74,17 +74,12 @@ export async function canonicalGroupRequest<T>(
   }
 
   // The descriptor overload never falls back to the foreground gateway.
-  return host.requestProfile<T>(canonicalGroupProfileRoute(route), method, { ...params, profile: route.profile })
-}
-
-/** The SDK route a room's authority is reached on (its own profile, served by its connection). */
-export function canonicalGroupProfileRoute(route: CanonicalGroupRoute) {
-  return {
+  return host.requestProfile<T>({
     connectionId: route.connectionId,
     profile: route.profile,
     targetProfile: route.profile,
-    mode: route.connectionId === 'local' ? 'local' as const : 'remote' as const
-  }
+    mode: route.connectionId === 'local' ? 'local' : 'remote'
+  }, method, { ...params, profile: route.profile })
 }
 
 /** A resolved RPC alone does not prove this room ended; only its matching tombstone does. */

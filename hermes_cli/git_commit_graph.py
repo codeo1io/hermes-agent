@@ -33,7 +33,6 @@ from hermes_cli._subprocess_compat import (
     windows_detach_flags_without_breakaway,
     windows_detach_popen_kwargs,
 )
-from hermes_cli._startup_fast import project_root_str
 
 logger = logging.getLogger(__name__)
 
@@ -250,8 +249,7 @@ def refresh_in_child(repo_root: str, git_dir: str, log_file: str) -> None:
     side effects a git maintenance child has no business having in a profile mid-update.
     """
     handler = _LogDirOnFailureHandler(log_file, encoding="utf-8", delay=True)
-    from hermes_logging import DisplayNameFormatter
-    handler.setFormatter(DisplayNameFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(handler)
     try:
         refresh_commit_graph(repo_root, Path(git_dir))
@@ -272,7 +270,7 @@ def spawn_commit_graph_refresh(repo_root: Path) -> bool:
     git_dir = common_git_dir(repo_root)
     if git_dir is None or not (git_dir / "objects").is_dir() or not claim_commit_graph_refresh(git_dir):
         return False
-    code_root = Path(project_root_str())
+    code_root = Path(__file__).resolve().parents[1]
     argv = [sys.executable, "-c", _CHILD, str(code_root), str(repo_root), str(git_dir),
             str(get_hermes_home() / "logs" / "agent.log")]
     kwargs: dict = dict(cwd=str(repo_root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

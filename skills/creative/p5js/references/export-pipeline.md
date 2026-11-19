@@ -278,20 +278,13 @@ See `scripts/export-frames.js` for the full implementation. Basic pattern:
 
 ```javascript
 const puppeteer = require('puppeteer');
-const path = require('path');
-// Save this next to scripts/export-frames.js: require() resolves from this file, not the cwd.
-const { chromeArgs, sketchRequestHandler, SKETCH_ORIGIN } = require('./export-frames.js');
 
 async function captureFrames(htmlPath, outputDir, options) {
-  // Chrome's sandbox and web security stay on; chromeArgs() adds --no-sandbox only on hosts that
-  // cannot run it (root, containers, AppArmor userns restriction).
-  const browser = await puppeteer.launch({ headless: true, args: chromeArgs() });
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
   const page = await browser.newPage();
-
-  // Serve the sketch's own folder from SKETCH_ORIGIN instead of file://; other origins keep
-  // the browser's rules, and anything outside the folder gets a 404.
-  await page.setRequestInterception(true);
-  page.on('request', sketchRequestHandler(path.dirname(path.resolve(htmlPath))));
 
   await page.setViewport({
     width: options.width || 1920,
@@ -299,13 +292,13 @@ async function captureFrames(htmlPath, outputDir, options) {
     deviceScaleFactor: 1
   });
 
-  await page.goto(`${SKETCH_ORIGIN}/${encodeURIComponent(path.basename(htmlPath))}`, {
+  await page.goto(`file://${path.resolve(htmlPath)}`, {
     waitUntil: 'networkidle0'
   });
 
   // Wait for sketch to initialize
   await page.waitForSelector('canvas');
-  await new Promise(r => setTimeout(r, 1000));
+  await page.waitForTimeout(1000);
 
   for (let i = 0; i < options.frames; i++) {
     const canvas = await page.$('canvas');
@@ -315,7 +308,7 @@ async function captureFrames(htmlPath, outputDir, options) {
 
     // Advance one frame
     await page.evaluate(() => { redraw(); });
-    await new Promise(r => setTimeout(r, 1000 / options.fps));
+    await page.waitForTimeout(1000 / options.fps);
   }
 
   await browser.close();

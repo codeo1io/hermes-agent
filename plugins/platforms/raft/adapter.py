@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime, timezone, UTC
 import functools
+import hmac
 import json
 import logging
 import os
@@ -41,7 +42,7 @@ if str(_checkout_root) not in sys.path:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, SendResult, merge_pending_message_event
 from gateway.platforms.event import MessageEvent, MessageType
-from gateway.platforms._shared import coerce_port, profile_scoped as _profile_scoped, secrets_match
+from gateway.platforms._shared import coerce_port, profile_scoped as _profile_scoped
 from hermes_cli.process_identity import release_process_group_once_empty, spawn_owned
 
 logger = logging.getLogger(__name__)
@@ -425,7 +426,8 @@ class RaftAdapter(BasePlatformAdapter):
 
     def _authorized(self, request: web.Request) -> bool:
         token = request.headers.get(BRIDGE_TOKEN_HEADER, "")
-        return secrets_match(token, self._bridge_token)
+        # Compare as bytes: compare_digest raises TypeError on a non-ASCII str header.
+        return bool(self._bridge_token and token) and hmac.compare_digest(token.encode(), self._bridge_token.encode())
 
     async def _read_bridge_body(self, request: web.Request, *, text: bool) -> tuple[Any, Optional[web.Response]]:
         """Auth + size-capped body read for wake/activity -> ``(body, None)`` or ``(None, error)``.

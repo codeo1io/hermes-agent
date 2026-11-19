@@ -70,8 +70,6 @@ def _emit_result(result_json: str, *, json_mode: bool, quiet: bool) -> int:
     if json_mode:
         print(json.dumps(payload, indent=2))
     elif not quiet:
-        for warning in payload.get("warnings") or ():  # the cause behind an error, or a partial send
-            print(f"hermes send: warning: {warning}", file=sys.stderr)
         if payload.get("error"):
             print(f"hermes send: {payload['error']}", file=sys.stderr)
         elif payload.get("success"):
@@ -189,8 +187,9 @@ def _load_hermes_env() -> None:
         cfg = load_user_config_effective(config_path)
     except Exception:
         return
-    from hermes_cli.env_loader import bridge_config_scalars
-    bridge_config_scalars(cfg, target)
+    for key, val in cfg.items():
+        if isinstance(val, (str, int, float, bool)) and key not in target:
+            target[key] = str(val)
 
 
 def cmd_send(args: argparse.Namespace) -> None:
@@ -231,7 +230,7 @@ def cmd_send(args: argparse.Namespace) -> None:
         message = f"{subject}\n\n{message.lstrip()}"
 
     # Lazy import keeps `hermes send --help` fast (no tool registry / gateway config stack).
-    from gateway.outbound.send import send_message_tool
+    from tools.send_message_tool import send_message_tool
 
     # Routes to the platform adapter (bot-token path for built-ins, live-adapter path for plugin
     # platforms); takes the standard tool-call dict and returns a JSON string.

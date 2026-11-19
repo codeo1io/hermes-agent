@@ -419,22 +419,6 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
     return "\n".join(lines)
 
 
-# The builds-table job later splices its downloads into the draft, under the same GitHub limit.
-BUILDS_TABLE_ROOM = 10_000
-
-
-def _canary_notes(commits, tag: str, version: str, *, since: str | None, no_changelog: bool) -> str:
-    """The draft body: the changelog, or only its link when the list would not fit GitHub's limit."""
-    from scripts.releases.entrypoint import GITHUB_BODY_LIMIT
-
-    notes = generate_changelog(commits, tag, version, prev_tag=since, no_changelog=no_changelog)
-    if len(notes) <= GITHUB_BODY_LIMIT - BUILDS_TABLE_ROOM:
-        return notes
-    print(f"⚠ The changelog is {len(notes):,} characters, over GitHub's {GITHUB_BODY_LIMIT:,} once the builds "
-          "table is added. The draft links the full changelog instead of listing it.")
-    return generate_changelog(commits, tag, version, prev_tag=since, no_changelog=True)
-
-
 def _resume_canary(tag: str, remote: str, repository: str, *, notes_file: Path | None = None) -> None:
     """Converge a tag-pushed canary through draft, dispatch, and protected head."""
     ref = f"refs/tags/{tag}"
@@ -461,13 +445,9 @@ def _resume_canary(tag: str, remote: str, repository: str, *, notes_file: Path |
             "--verify-tag", "--draft", "--prerelease",
             "--title", f"Hermes Agent canary {tag}",
         ]
-        # GitHub's generated notes cover every pull request since the last published release, unbounded.
-        notes = None if notes_file else generate_changelog(
-            [], tag, tag[1:], repo_url=f"https://github.com/{repository}", no_changelog=True
-        )
-        create.extend(["--notes-file", str(notes_file) if notes_file else "-"])
+        create.extend(["--notes-file", str(notes_file)] if notes_file else ["--generate-notes"])
         created = subprocess.run(
-            create, input=notes, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+            create, cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
             check=False,
         )
         if created.returncode != 0:
@@ -563,7 +543,9 @@ def cmd_canary(args) -> None:
 
     version = tag_name.lstrip("v")
     print(f"Canary: {tag_name} ({len(commits)} commits since {since})")
-    changelog = _canary_notes(commits, tag_name, version, since=since, no_changelog=args.no_changelog)
+    changelog = generate_changelog(
+        commits, tag_name, version, prev_tag=since, first_release=False, no_changelog=args.no_changelog
+    )
 
     if not args.publish:
         print(changelog)

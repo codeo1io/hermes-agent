@@ -156,11 +156,10 @@ def _resolve_openrouter_runtime(
                 and base_url == (env_openrouter_base_url or "").rstrip("/"))
         )
     )
-    # A ``providers:`` entry that owns the resolved URL and declares a credential supplies it: on a bare
-    # ``custom`` route, and on an OpenRouter mirror off openrouter.ai (the built-in key is another account's).
+    # A bare ``custom`` route to a URL a ``providers:`` entry owns, when that entry declares a credential:
+    # the entry's key replaces the implicit env keys (on its built-in's host those are another account's).
     from hermes_cli.runtime_provider_custom import _model_cfg_key_env_for, _owning_entry_credential
-    owned_route = requested_norm == "custom" or (is_openrouter_context and not is_openrouter_url)
-    declared, entry_key = _owning_entry_credential(rp, base_url) if owned_route else (False, "")
+    declared, entry_key = _owning_entry_credential(rp, base_url) if requested_norm == "custom" else (False, "")
     if is_openrouter_context:
         # Same read order as the credential pool and _resolve_api_key_provider_secret
         # (.env, then scope-aware os.environ, raw op:// references yielding to the resolved

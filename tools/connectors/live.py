@@ -86,3 +86,8 @@ def close(operation: ConnectionOperation) -> None:
     with _lock:
         if _open.get(key) is operation:
             del _open[key]
+
+
+def reset_for_tests() -> None:
+    with _lock:
+        _open.clear()

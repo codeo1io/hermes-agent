@@ -9,14 +9,12 @@ import type {
   RelayLinksResponse,
   TelegramOnboardingApplyResponse,
   TelegramOnboardingStartResponse,
-  TelegramOnboardingStatusResponse
-} from '@/types/hermes'
-import type {
+  TelegramOnboardingStatusResponse,
   WebhookCreatePayload,
   WebhookCreateResponse,
   WebhookEnableResponse,
   WebhooksResponse
-} from '@/types/webhooks'
+} from '@/types/hermes'
 
 import { hermesApi, profileScoped } from './client'
 

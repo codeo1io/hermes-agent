@@ -181,9 +181,7 @@ export function registerFsIpc({
       return { ok: false, error: 'identifier is required', agent: false, desktop: false, warnings: [] }
     }
 
-    return probePluginRepo(resolveGitBinary(), identifier, {
-      ref: typeof payload?.ref === 'string' ? payload.ref : undefined
-    })
+    return probePluginRepo(resolveGitBinary(), identifier)
   })
 
   ipcMain.handle('hermes:plugin:installDesktop', async (_event, payload) => {

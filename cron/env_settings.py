@@ -12,11 +12,7 @@ from __future__ import annotations
 
 import os
 
-from agent.secret_scope import (
-    build_profile_secret_scope,
-    current_secret_scope,
-    is_multiplex_active,
-)
+from agent.secret_scope import current_secret_scope, is_multiplex_active, load_env_file
 from hermes_constants import get_hermes_home
 
 
@@ -25,6 +21,6 @@ def cron_env_setting(name: str, default: str = "") -> str:
         return os.getenv(name) or default
     scope = current_secret_scope()
     if scope is None:
-        scope = build_profile_secret_scope(get_hermes_home())
+        scope = load_env_file(get_hermes_home() / ".env")
     value = scope.get(name)
     return default if value is None else str(value)

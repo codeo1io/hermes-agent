@@ -32,6 +32,7 @@ def _make_runner() -> GatewayRunner:
     )
     runner.session_store = _FakeSessionStore()
     runner.adapters = {}
+    runner._queued_events = {}
     return runner
 
 

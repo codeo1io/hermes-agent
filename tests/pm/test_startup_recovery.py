@@ -46,8 +46,7 @@ def test_bootstrap_repairs_before_dependency_activation(tmp_path, monkeypatch, m
     home.mkdir()
     for name in ("hermes_bootstrap.py", "hermes_constants.py"):
         shutil.copy2(repo / name, core / name)
-    for package in ("pm", "hermes_agent"):
-        shutil.copytree(repo / package, core / package, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(repo / "pm", core / "pm", ignore=shutil.ignore_patterns("__pycache__"))
     cli = core / "hermes_cli"
     cli.mkdir()
     # Include the real preimport protocol, including its ownership check. Do

@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from hermes_cli.plugin_host_wire import PluginHostUnavailable, decode, signature_from
-from hermes_cli._startup_fast import project_root_str
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,7 @@ def _extract(plugin_dir: Path, module_name: str) -> dict[str, Any]:
     """Import the plugin in a throwaway host process with no credentials and read its profiles."""
     from hermes_cli.plugin_isolation import HOST_PROCESS_ENV, host_launcher
     from hermes_constants import get_hermes_home
-    repo_root = project_root_str()
+    repo_root = str(Path(__file__).resolve().parents[1])
     # Absolute: the child starts in the home, so a relative HERMES_HOME or plugin dir would resolve twice.
     home = str(get_hermes_home().resolve())
     env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TZ", "SYSTEMROOT") if key in os.environ}

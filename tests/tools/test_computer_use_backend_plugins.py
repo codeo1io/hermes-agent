@@ -64,10 +64,10 @@ def _list_apps(session_id: str = "s1") -> list:
 
 @pytest.fixture(autouse=True)
 def _clean():
-    from tests.computer_use_fakes import reset_backend
-    reset_backend()
+    from tools.computer_use.tool import reset_backend_for_tests
+    reset_backend_for_tests()
     yield
-    reset_backend()
+    reset_backend_for_tests()
     for name in [m for m in sys.modules if m.startswith("_hermes_user_computer_use.")]:
         del sys.modules[name]
 

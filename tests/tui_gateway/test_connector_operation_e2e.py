@@ -127,7 +127,7 @@ def owned_session(monkeypatch, tmp_path):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     reset_session_vars()
-    live._open.clear()
+    live.reset_for_tests()
     with ExitStack() as stack:
         owner, stranger = PipeClient(stack), PipeClient(stack)
         session = {
@@ -143,7 +143,7 @@ def owned_session(monkeypatch, tmp_path):
         }
         monkeypatch.setitem(server._sessions, SID, session)
         yield owner, stranger
-    live._open.clear()
+    live.reset_for_tests()
     reset_session_vars()
 
 

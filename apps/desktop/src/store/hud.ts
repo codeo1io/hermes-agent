@@ -17,7 +17,7 @@ import { atom } from 'nanostores'
 
 import { requestComposerDraftSync } from '@/store/composer'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
-import { ownerLookupSessionRows, rememberedSessionProfile } from '@/store/session'
+import { $sessions, rememberedSessionProfile } from '@/store/session'
 import { isHudWindow } from '@/store/windows'
 
 /** Whether a HUD window is currently up. In the HUD's own renderer this is
@@ -61,10 +61,9 @@ export function openHud(sessionId?: null | string): void {
   // wrong backend — the lookup misses and the HUD falls back to the default
   // profile's last session (#82285). Same ladder the remembered-navigation key
   // uses: the session's stamped owner wins, and a fresh/unstamped/uncached
-  // target inherits the profile the user is looking at. Messaging rows live
-  // outside recents, so resolve across every slice (#126732).
+  // target inherits the profile the user is looking at.
   const profile = normalizeProfileKey(
-    rememberedSessionProfile(ownerLookupSessionRows(), sessionId ?? null, $activeGatewayProfile.get())
+    rememberedSessionProfile($sessions.get(), sessionId ?? null, $activeGatewayProfile.get())
   )
 
   $hudActive.set(true)

@@ -4,7 +4,7 @@
 import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { frontendArgs, isMain, productOutput, withProduct, workspaceTool } from './frontend-common.mjs'
+import { productOutput, withProduct, workspaceTool } from './frontend-common.mjs'
 import { buildInputs, outputIntact, recordProduct, sourceHash } from './freshness.mjs'
 
 // Vite's build manifest (apps/desktop/vite.config.ts names it too): the files a generation emitted.
@@ -72,8 +72,7 @@ export async function buildWebapp({ source, workspace, out }) {
     // The output lives inside the Desktop workspace: protect its siblings, not the directory.
     ...readdirSync(join(resolve(source), app)).filter(name => !['dist', 'dist-webapp', 'build'].includes(name)).map(name => `${app}/${name}`),
     'apps/shared', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/build', 'node_modules',
-    // Compiling in place (a desktop bundle build's checkout) leaves no separate workspace to protect.
-    ...[relative(resolve(source), workspace)].filter(Boolean),
+    relative(resolve(source), workspace),
   ]))
   const inputs = buildInputs(source, 'webapp')
   // The workspace is what compiles; a stale mirror must not publish under a current receipt.
@@ -94,15 +93,4 @@ export async function buildWebapp({ source, workspace, out }) {
     recordProduct({ source, product: 'webapp', out: product, inputs })
   }, { source })
   return { out, index: join(out, 'index.html') }
-}
-
-if (isMain(import.meta.url)) {
-  try {
-    const { source, out } = frontendArgs(process.argv.slice(2))
-    const result = await buildWebapp({ source, workspace: source, out })
-    console.log(`built ${result.index}`)
-  } catch (error) {
-    console.error(error)
-    process.exitCode = 1
-  }
 }

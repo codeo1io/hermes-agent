@@ -15,8 +15,6 @@ import pytest
 from gateway.session_contract import SessionActor, SessionRef
 from tests.waiting import wait_until
 
-pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")  # symbolic profile ids are relative homes
-
 CHILD = """import json, os, sys, time, psutil
 from hermes_cli.process_identity import worker_birth
 me = psutil.Process()

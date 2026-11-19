@@ -82,8 +82,6 @@ export const PAGE_SCOPED_PARAMS = [
   'plugin',
   'ppage',
   'agent',
-  // Backup & Transfer's preselected cloud agent (the portal link names it).
-  'cloudAgent',
   PLUGIN_SETTINGS_PROFILE_PARAM
 ] as const
 

@@ -44,19 +44,10 @@ def _stub_download(monkeypatch, size: int):
     """Make the fallback's SSRF-safe client return ``size`` bytes."""
 
     class _Resp:
-        headers = {}
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return False
+        content = b"x" * size
 
         def raise_for_status(self):
             return None
-
-        async def aiter_bytes(self):
-            yield b"x" * size
 
     class _Client:
         async def __aenter__(self):
@@ -65,7 +56,7 @@ def _stub_download(monkeypatch, size: int):
         async def __aexit__(self, *exc):
             return False
 
-        def stream(self, method, url):
+        async def get(self, url):
             return _Resp()
 
     from tools import url_safety

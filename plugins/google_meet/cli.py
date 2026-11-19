@@ -22,7 +22,6 @@ from typing import Optional
 
 from hermes_cli.browser_runtime import chromium_executable
 from hermes_constants import get_hermes_home
-from utils import atomic_json_write
 
 from plugins.google_meet import process_manager as pm
 from plugins.google_meet.meet_bot import _is_safe_meet_url
@@ -213,8 +212,7 @@ def _cmd_auth() -> int:
             context.new_page().goto("https://accounts.google.com/", wait_until="domcontentloaded")
             with contextlib.suppress(EOFError):
                 input("press Enter after you've signed in ... ")
-            # Session cookies = a full Google sign-in: never let Playwright write it at umask.
-            atomic_json_write(path, context.storage_state(), mode=0o600)
+            context.storage_state(path=str(path))
             browser.close()
     except Exception as e:
         print(f"auth failed: {e}")

@@ -10,8 +10,6 @@ from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
-pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")  # symbolic profile ids are relative homes
-
 
 def _delete_past_the_horizon(authority, sid):
     from hermes_state_mutation_retirement import prune_retired_tombstones

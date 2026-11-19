@@ -30,7 +30,7 @@ import { stableArray, stableRecord } from '@/lib/stable-array'
 import { $backgroundRunningSessionIds } from './composer-status'
 import { $liveWorkRoster, noteEventFed, rosterLiveIds, rosterSaysIdle } from './live-work-roster'
 import { $pausedQueueSessionIds } from './owner-queue-reconcile'
-import { $cronSessions, $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
+import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
 import {
   $attentionSessionIds,
   $draftSessionIds,
@@ -127,25 +127,10 @@ export const $sessionDotStateById = computed(
     $unreadFinishedSessionIds,
     $draftSessionIds,
     $sessions,
-    $messagingSessions,
-    $cronSessions,
     $unreadWriteGuard,
     $pausedQueueSessionIds
   ],
-  (
-    attention,
-    working,
-    stalled,
-    background,
-    delegating,
-    unread,
-    draft,
-    sessions,
-    messaging,
-    cron,
-    unreadWriteGuard,
-    paused
-  ) => {
+  (attention, working, stalled, background, delegating, unread, draft, sessions, unreadWriteGuard, paused) => {
     const next: Record<string, SessionDotState> = {}
 
     const claim = (ids: readonly string[], state: SessionDotState) => {
@@ -170,11 +155,10 @@ export const $sessionDotStateById = computed(
     // restarts. Same tier as the runtime marker — both mean "there is
     // something here you haven't opened". A list page that predates one of
     // our own writes is fenced out by the write guard: keep OUR value until a
-    // page confirms it or the guard expires. Every listed slice carries the
-    // flag: a Telegram row lives only in messaging (#126732).
+    // page confirms it or the guard expires.
     const persistedUnread: string[] = []
 
-    for (const s of [...sessions, ...messaging, ...cron]) {
+    for (const s of sessions) {
       const entry = unreadWriteGuard.get(s.id)
 
       if (entry && Date.now() - entry.at < UNREAD_WRITE_GUARD_MS) {

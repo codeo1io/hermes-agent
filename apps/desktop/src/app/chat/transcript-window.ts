@@ -156,26 +156,12 @@ export function advanceTranscriptWindow(
       }
 
       if (weight <= budget + TRANSCRIPT_WINDOW_SLACK) {
-        // #133569: the cut sits at the store head, so the window IS the whole
-        // store and the store holds nothing older — `windowed` must say false
-        // (see the `TranscriptWindow` interface doc, lines 41-42). Reporting
-        // the stale anchor as windowed keeps "Show earlier" armed while gating
-        // OFF the REST backfill (`expandWindow` runs that branch only when
-        // !windowed), and hands retention an anchor that no longer marks a cut.
-        if (start === 0) {
-          // The anchor stays so the next flush keeps this cut instead of a fresh walk.
-          return {
-            anchorId: prev.anchorId,
-            pages,
-            window: { messages: messages as ChatMessage[], windowed: false }
-          }
-        }
+        const window: TranscriptWindow =
+          start === 0
+            ? { messages: messages as ChatMessage[], windowed: prev.anchorId !== null }
+            : { messages: messages.slice(start), windowed: true }
 
-        return {
-          anchorId: prev.anchorId,
-          pages,
-          window: { messages: messages.slice(start), windowed: true }
-        }
+        return { anchorId: prev.anchorId, pages, window }
       }
     }
   }
@@ -219,9 +205,7 @@ export interface SessionWindowMemo {
  *   through to `advanceTranscriptWindow`'s existing fresh-walk behaviour.
  * - An unwindowed result is the source array itself, so caching it adds no
  *   identity benefit and would make `state.window.messages` a second strong
- *   owner of the complete transcript. Pass-through sessions are not memoized,
- *   except a cut that reached the store head: it keeps its anchor so the next
- *   flush holds the cut, and that store is within one window budget.
+ *   owner of the complete transcript. Pass-through sessions are not memoized.
  *
  * The map is bounded (oldest session evicted) and source arrays are weakly held,
  * so cold-session cleanup can release the full transcript independently.
@@ -242,7 +226,7 @@ export function advanceSessionTranscriptWindow(
 
   const state = advanceTranscriptWindow(memo?.state ?? null, messages, pages)
 
-  if (!state.window.windowed && state.anchorId === null) {
+  if (!state.window.windowed) {
     // The pass-through state already returns `messages` itself. Keeping it in
     // the component-local map would pin the complete source array after the
     // session store intentionally releases a cold transcript.

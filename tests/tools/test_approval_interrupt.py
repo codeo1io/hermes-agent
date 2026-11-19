@@ -25,6 +25,7 @@ def _clear_approval_state():
     mod._gateway_notify_cbs.clear()
     mod._session_approved.clear()
     mod._permanent_approved.clear()
+    mod._pending.clear()
 
 
 class TestApprovalInterrupt:

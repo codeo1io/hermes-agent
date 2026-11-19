@@ -5,17 +5,16 @@ import {
   setSidebarSessionOrderManual,
   unpinSession
 } from '@/store/layout'
-import { ownerLookupSessionRows, sessionMatchesStoredId, sessionPinId } from '@/store/session'
+import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
 import { setSessionColorOverride } from '@/store/session-color'
 
 /** Pins and colours are keyed by the DURABLE (lineage-root) id so they survive
  *  compression's session-id rotation; a row's live id resolves through
- *  the all-slices owner index (recents + cron + messaging — a telegram row
- *  lives only in messaging, #126732), and an id that resolves to
+ *  `$sessions` (the app's own lineage matcher), and an id that resolves to
  *  nothing is passed through as-is (the stores tolerate ids for rows this
  *  window hasn't loaded). */
 function durableSessionPinId(storedSessionId: string): string {
-  const session = ownerLookupSessionRows().find(s => sessionMatchesStoredId(s, storedSessionId))
+  const session = $sessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))
 
   return session ? sessionPinId(session) : storedSessionId
 }
@@ -27,7 +26,7 @@ function durableSessionPinId(storedSessionId: string): string {
  *  before writing; a durable id written verbatim would be dropped by the next
  *  reconcile and, if nothing else survived, flip the manual flag off. */
 function liveSessionId(storedSessionId: string): string {
-  const session = ownerLookupSessionRows().find(s => sessionMatchesStoredId(s, storedSessionId))
+  const session = $sessions.get().find(s => sessionMatchesStoredId(s, storedSessionId))
 
   return session ? session.id : storedSessionId
 }

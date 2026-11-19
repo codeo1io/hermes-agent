@@ -9,6 +9,11 @@ from tools.managed_tool_gateway import build_vendor_gateway_url, read_nous_acces
 logger = logging.getLogger(__name__)
 
 
+def managed_gateway_origin() -> str:
+    """Origin for on-origin managed vendors and media uploads."""
+    return build_vendor_gateway_url("tool")
+
+
 def connector_gateway_origin() -> str:
     """Separate connector deployment; honors CONNECTOR_GATEWAY_URL."""
     return build_vendor_gateway_url("connector")
@@ -21,7 +26,7 @@ def is_managed_nous_gateway_url(
     """True when ``url`` is on one of the first-party gateway origins we build.
 
     Both first-party surfaces count: the media/on-origin-vendor host
-    (``build_vendor_gateway_url("tool")``) and the connectors host
+    (:func:`managed_gateway_origin`) and the connectors host
     (:func:`connector_gateway_origin`). Each is compared as an exact
     ``(scheme, netloc)`` pair — never as a name or a domain suffix — so
     ``evil-connector-gateway.nousresearch.com.attacker.dev`` and an ``http``

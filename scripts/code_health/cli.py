@@ -115,7 +115,7 @@ def run(repo: Path, base: str, head: str | None, as_json: bool = False,
     measurer = Measurer(repo, ruff, known_env=gitio.known_env_names(repo, base))
     base_m = measurer.measure(base, base_paths)
     head_m = measurer.measure(head, head_paths)
-    findings = compare(base_m, head_m, changes, gitio.tree_moves(repo, head))
+    findings = compare(base_m, head_m, changes)
     apply_allows(findings, head_m)
     from scripts.code_health.adoption import adoption_parent, demote_adopted
     # Provenance needs a commit: the CI shape passes no --head (working tree), so

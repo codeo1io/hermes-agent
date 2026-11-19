@@ -12,8 +12,6 @@ import { cn } from '@/lib/utils'
 import { $transcriptLightbox, closeTranscriptLightbox, openTranscriptLightbox } from '@/store/transcript-lightbox'
 
 export interface ZoomableImageProps extends ComponentProps<'img'> {
-  /** Classes for the click target around the image, e.g. a definite height inside a reserved frame. */
-  buttonClassName?: string
   containerClassName?: string
   slot?: string
   /** Full-resolution source for the lightbox and download. When set, the inline
@@ -32,7 +30,6 @@ export interface ImageActionCopy {
 }
 
 export function ZoomableImage({
-  buttonClassName,
   className,
   containerClassName,
   src,
@@ -65,10 +62,7 @@ export function ZoomableImage({
       >
         <button
           aria-label={canOpen ? copy.openImage : undefined}
-          className={cn(
-            'block max-w-full focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2',
-            buttonClassName
-          )}
+          className="block max-w-full focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2"
           disabled={!canOpen}
           onClick={() => canOpen && openTranscriptLightbox(fullSrc)}
           type="button"

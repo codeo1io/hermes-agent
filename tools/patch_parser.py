@@ -196,21 +196,14 @@ def _validate_operations(operations: list[PatchOperation], file_ops: Any) -> lis
     pending_content: dict = {}
     removed_paths: set = set()
 
-    def _read_checked(path: str) -> tuple[Optional[str], Optional[str], bool]:
-        """(content, error, too_large): too_large means the file exists on disk but is past
-        read_file_raw's cap; the patch's own overlay always answers first."""
+    def _read(path: str) -> tuple[Optional[str], Optional[str]]:
         key = _overlay_key(path, file_ops)
         if key in pending_content:
-            return pending_content[key], None, False
+            return pending_content[key], None
         if key in removed_paths:
-            return None, "file not found", False
+            return None, "file not found"
         r = file_ops.read_file_raw(path)
-        if r.error:
-            return None, r.error, bool(getattr(r, "_too_large", False))
-        return r.content, None, False
-
-    def _read(path: str) -> tuple[Optional[str], Optional[str]]:
-        return _read_checked(path)[:2]
+        return (None, r.error) if r.error else (r.content, None)
 
     def _occupied(path: str) -> Optional[str]:
         """Why an Add target or Move destination is not free, or None. Only a read that reports
@@ -275,9 +268,7 @@ def _validate_operations(operations: list[PatchOperation], file_ops: Any) -> lis
             continue
         real_change_count += 1
         if op.operation == OperationType.DELETE:
-            # A file over read_file_raw's cap exists; Delete needs no content, so it stays legal.
-            _content, read_err, too_large = _read_checked(op.file_path)
-            if read_err and not too_large:
+            if _read(op.file_path)[1]:
                 errors.append(f"{op.file_path}: file not found for deletion")
             else:
                 _remove(op.file_path)
@@ -432,12 +423,10 @@ def _apply_add(op: PatchOperation, file_ops: Any) -> ApplyResult:
 def _apply_delete(op: PatchOperation, file_ops: Any) -> ApplyResult:
     """Delete a file, producing a real unified diff of the removed content."""
     read_result = file_ops.read_file_raw(op.file_path)  # re-read guards validate/apply races
-    too_large = getattr(read_result, "_too_large", False)  # exists, just past the read cap: no diff
-    if read_result.error and not too_large:
+    if read_result.error:
         return _fail(f"Cannot delete {op.file_path}: file not found")
     result = file_ops.delete_file(op.file_path)
-    diff = (None if too_large else _unified_diff(op.file_path, read_result.content, None)) \
-        or f"# Deleted: {op.file_path}"
+    diff = _unified_diff(op.file_path, read_result.content, None) or f"# Deleted: {op.file_path}"
     return _fail(result.error) if result.error else ApplyResult(True, diff)
 
 

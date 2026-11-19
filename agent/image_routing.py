@@ -245,11 +245,10 @@ def _should_probe_ollama_vision(provider: str, base_url: str, api_key: str = "")
     if not base_url:
         return False
     try:
-        from agent.model_metadata import detect_local_server_type
-        from agent.process_transport import is_local_server
+        from agent.model_metadata import detect_local_server_type, is_local_endpoint
 
         # Forward the key: an unauthorized probe can never produce a positive verdict.
-        return is_local_server(base_url, provider) and detect_local_server_type(base_url, api_key=api_key) == "ollama"
+        return bool(is_local_endpoint(base_url)) and detect_local_server_type(base_url, api_key=api_key) == "ollama"
     except Exception:
         return False
 

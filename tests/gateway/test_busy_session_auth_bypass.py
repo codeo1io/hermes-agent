@@ -65,7 +65,9 @@ def _make_runner(authorized_users=None):
 
     runner = object.__new__(GatewayRunner)
     runner._running_agents = {}
+    runner._running_agents_ts = {}
     runner._pending_messages = {}
+    runner._busy_ack_ts = {}
     runner._draining = False
     runner.adapters = {}
     runner.config = MagicMock()

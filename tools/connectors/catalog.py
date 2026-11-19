@@ -128,7 +128,7 @@ class HostInstaller:
 
         before = entry()
         if before is not None and not force:
-            return {"name": str(before["name"]), "already_installed": True, **_upstream_of(before)}
+            return {"name": str(before["name"]), "already_installed": True}
         out = io.StringIO()
         verdict = do_install(identifier, force=force, skip_confirm=True,
                              console=Console(file=out, width=200, no_color=True, highlight=False))
@@ -139,12 +139,7 @@ class HostInstaller:
         if after is None or (before is not None and after.get("updated_at") == before.get("updated_at")):
             lines = [line.strip() for line in out.getvalue().splitlines() if line.strip()]
             raise RuntimeError(lines[-1] if lines else "the skill was not installed")
-        return {"name": str(after["name"]), "already_installed": False, **_upstream_of(after)}
-
-
-def _upstream_of(lock_entry: dict[str, Any]) -> dict[str, str]:
-    repo = (lock_entry.get("metadata") or {}).get("upstream_repo") if lock_entry.get("source") == "official" else None
-    return {"upstream_repo": str(repo)} if repo else {}
+        return {"name": str(after["name"]), "already_installed": False}
 
 
 @dataclass
@@ -343,11 +338,7 @@ def _installed_row(target: Target, outcome: dict[str, Any]) -> tuple:
     if target.kind == "skill":
         already = bool(outcome.get("already_installed"))
         detail = "already installed; left as it is (Advanced, force reinstall replaces it)" if already else ""
-        if upstream := outcome.get("upstream_repo"):
-            third_party = f"third-party content from https://github.com/{upstream} (not maintained by Nous Research)"
-            detail = f"{detail}; {third_party}" if detail else third_party
-        return {**extra, "skill": outcome["name"], "tools": [], "already_installed": already,
-                **({"upstream_repo": upstream} if upstream else {})}, detail
+        return {**extra, "skill": outcome["name"], "tools": [], "already_installed": already}, detail
     live = (outcome.get("activation") or {}).get("live_now") or {}
     servers = live.get("mcp_servers") or []
     tools = [name for server in servers if server.get("connected") for name in server.get("tools") or ()]

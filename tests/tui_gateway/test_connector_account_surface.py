@@ -15,9 +15,9 @@ def remote_backend(monkeypatch):
     monkeypatch.setattr("tools.connectors.connectors_available", lambda: True)
     monkeypatch.setattr("tools.connectors.ensure_guest_identity", lambda: None)
     monkeypatch.setattr("tools.connectors.managed.ensure_guest_identity", lambda: None)
-    live._open.clear()
+    live.reset_for_tests()
     yield
-    live._open.clear()
+    live.reset_for_tests()
 
 
 def _dispatch(method, params):

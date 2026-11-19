@@ -163,15 +163,11 @@ class ReasoningParamsMixin:
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:
         """``build_assistant_message``; a held turn's row with visible text comes back typed hidden
-        (``withhold_held_row``) until ``finish_text_response`` publishes it as the final. The row is
-        stamped with the response's reasoning count: the replay price of its (encrypted) reasoning."""
+        (``withhold_held_row``) until ``finish_text_response`` publishes it as the final."""
         from agent.chat_completion_helpers import build_assistant_message
-        from agent.message_metadata import stamp_reasoning_tokens
         from agent.stream_delivery import withhold_held_row
 
-        msg = build_assistant_message(self, assistant_message, finish_reason)
-        stamp_reasoning_tokens(msg, getattr(self, "_last_response_reasoning_tokens", 0))
-        return withhold_held_row(self, msg)
+        return withhold_held_row(self, build_assistant_message(self, assistant_message, finish_reason))
 
     def _reasoning_replay_route(self):
         """Reasoning replay decision for the active route (``message_sanitization.reasoning_replay_route``).

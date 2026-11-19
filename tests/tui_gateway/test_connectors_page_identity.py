@@ -40,9 +40,9 @@ class _Response:
 @pytest.fixture
 def portal(monkeypatch, tmp_path):
     fake = install_portal(monkeypatch, tmp_path)
-    live._open.clear()
+    live.reset_for_tests()
     yield fake
-    live._open.clear()
+    live.reset_for_tests()
 
 
 @pytest.fixture

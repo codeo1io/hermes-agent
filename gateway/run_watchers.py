@@ -13,7 +13,6 @@ import time
 from collections import Counter
 from typing import Any, Dict, Optional
 
-from gateway.run_auto_resume import GatewayAutoResumeMixin
 from gateway.session_stall import (
     format_session_stall_notification,
     resolve_session_idle_seconds_from_activity,
@@ -35,9 +34,8 @@ async def _interruptible_sleep(runner, seconds: int) -> None:
         await asyncio.sleep(1)
 
 
-class GatewaySessionWatchersMixin(GatewayAutoResumeMixin):
-    """Session housekeeping / stall / catalog-refresh watcher loops for GatewayRunner (and, through
-    ``GatewayAutoResumeMixin``, the ``delegation.auto_resume`` scheduler)."""
+class GatewaySessionWatchersMixin:
+    """Session housekeeping / stall / catalog-refresh watcher loops for GatewayRunner."""
 
     async def _session_housekeeping_watcher(self, interval: int = 300):
         """Reclaim resources without ending durable conversations."""
@@ -107,8 +105,7 @@ class GatewaySessionWatchersMixin(GatewayAutoResumeMixin):
             for session_key, event in list(pending.items()):
                 if session_key and session_key not in candidates and event is not None:
                     candidates[session_key] = (adapter, event)
-        for session_key, state in list((self.__dict__.get("_sessions") or {}).items()):
-            overflow = state.conversation.queued_events
+        for session_key, overflow in list((getattr(self, "_queued_events", None) or {}).items()):
             if not session_key or session_key in candidates or not overflow:
                 continue
             source = getattr(overflow[0], "source", None)
@@ -170,8 +167,7 @@ class GatewaySessionWatchersMixin(GatewayAutoResumeMixin):
         # See #76354.
         still_pending = (
             (getattr(adapter, "_pending_messages", None) or {}).get(session_key) is not None
-            or bool((_queued_state := self._peek_session_state(session_key))
-                    and _queued_state.conversation.queued_events)
+            or bool((getattr(self, "_queued_events", None) or {}).get(session_key))
         )
         fresh_idle = resolve_session_idle_seconds_from_activity(
             self._session_activity_for_stall(session_key), now=time.time()

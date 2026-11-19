@@ -4,9 +4,9 @@ TUI / gateway, not just CLI stdout.
 When a session is compressed >= 2 times, ``compress_context`` warns that
 accuracy may degrade. That warning used to go through ``_vprint`` (stdout
 only), so the Ink TUI / Telegram / Discord never saw it — unlike the two
-other compression warnings in the same module, which reach ``status_callback``
-(and store ``_compression_warning`` for late-bound gateway replay). This pins
-the warning onto the gateway-aware channel, as a warning.
+other compression warnings in the same module, which route through
+``_emit_status`` (and store ``_compression_warning`` for late-bound
+gateway replay). This pins the warning onto the gateway-aware channel.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def _build_agent_with_db(db: SessionDB, session_id: str, compression_count: int)
     return agent
 
 
-def test_repeated_compression_warning_reaches_status_callback_as_warning(tmp_path: Path) -> None:
+def test_repeated_compression_warning_routed_through_emit_status(tmp_path: Path) -> None:
     db = SessionDB(db_path=tmp_path / "state.db")
     sid = "PARENT_36908"
     db.create_session(sid, source="cli")
@@ -57,19 +57,16 @@ def test_repeated_compression_warning_reaches_status_callback_as_warning(tmp_pat
     # compression_count == 2 → the "compressed N times" warning should fire.
     agent = _build_agent_with_db(db, sid, compression_count=2)
 
-    from agent.conversation_compression import compaction_status_kind
-
-    emitted: list[tuple[str, str]] = []
-    agent.status_callback = lambda kind, message=None: emitted.append((kind, message))
+    emitted: list[str] = []
+    agent._emit_status = lambda message: emitted.append(message)
 
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
     agent._compress_context(messages, "sys", approx_tokens=120_000)
 
-    # The warning reached the gateway-aware channel as a warning, never as compaction progress
-    # (it follows the done edge, where a "compacting" kind would open a compaction that never ends).
-    warned = [(k, m) for k, m in emitted if "compressed 2 times" in str(m).lower()]
-    assert [k for k, _ in warned] == ["warn"], emitted
-    assert [compaction_status_kind(k, m) for k, m in warned] == ["warn"]
+    # The warning reached the gateway-aware channel...
+    assert any("compressed 2 times" in m.lower() for m in emitted), (
+        f"repeated-compression warning not emitted via _emit_status: {emitted}"
+    )
     # ...and was stored for late-bound gateway status_callback replay.
     assert "compressed 2 times" in (getattr(agent, "_compression_warning", "") or "").lower()
 
@@ -82,7 +79,7 @@ def test_no_warning_below_threshold(tmp_path: Path) -> None:
     # compression_count == 1 → no repeated-compression warning.
     agent = _build_agent_with_db(db, sid, compression_count=1)
     emitted: list[str] = []
-    agent.status_callback = lambda kind, message=None: emitted.append(str(message))
+    agent._emit_status = lambda message: emitted.append(message)
 
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
     agent._compress_context(messages, "sys", approx_tokens=120_000)

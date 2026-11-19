@@ -5,6 +5,7 @@ counter from worker threads concurrently, and an unserialized pair rewrites a st
 that resurrects the other session's counter.
 """
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -15,11 +16,20 @@ logger = logging.getLogger(__name__)
 _COUNTS_LOCK = threading.Lock()
 
 
+def _read_counts(path: Path) -> dict:
+    """Parsed counters, or {} when the file is missing, unreadable or not a JSON object."""
+    try:
+        counts = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return counts if isinstance(counts, dict) else {}
+
+
 def increment_restart_failure_counts(path: Path, active_session_keys: set) -> None:
     """Increment the counters of sessions active at shutdown; drop the rest (their loop is broken)."""
-    from utils import atomic_json_write, read_json_or_empty
+    from utils import atomic_json_write
     with _COUNTS_LOCK:
-        counts = read_json_or_empty(path)
+        counts = _read_counts(path)
         try:
             atomic_json_write(path, {key: counts.get(key, 0) + 1 for key in active_session_keys}, indent=None)
         except Exception:
@@ -31,9 +41,9 @@ def clear_restart_failure_count(path: Path, session_key: str) -> None:
 
     Blocking (``atomic_json_write`` fsyncs): callers on the event loop run it via ``asyncio.to_thread``.
     """
-    from utils import atomic_json_write, read_json_or_empty
+    from utils import atomic_json_write
     with _COUNTS_LOCK:
-        counts = read_json_or_empty(path)
+        counts = _read_counts(path)
         if session_key not in counts:
             return
         del counts[session_key]

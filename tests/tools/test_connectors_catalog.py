@@ -27,9 +27,9 @@ from tests.waiting import wait_until
 
 @pytest.fixture(autouse=True)
 def _clean_live():
-    live._open.clear()
+    live.reset_for_tests()
     yield
-    live._open.clear()
+    live.reset_for_tests()
 
 
 def _entry(name, *, platforms=(), requires_env=()):

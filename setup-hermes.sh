@@ -136,8 +136,7 @@ else
   mkdir -p "$tmp/tree"
   case "$archive" in
     *.zip) unzip -q "$archive" -d "$tmp/tree" ;;
-    # -o: never adopt the archive's recorded uid (1001) when run as root.
-    *) tar -o -xzf "$archive" -C "$tmp/tree" ;;
+    *) tar -xzf "$archive" -C "$tmp/tree" ;;
   esac
   # flatten a single wrapping dir (uv tarballs ship uv-<triple>/uv).
   # BSD find lacks GNU's -mindepth/-maxdepth flags, so enumerate children in

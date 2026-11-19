@@ -90,12 +90,7 @@ def _usage_summary(response: Any) -> Optional[dict[str, Any]]:
     # tokens first, so the native api_mode/provider shape would read zeros here.
     cu = normalize_usage(raw_usage, api_mode="chat_completions")
     summary = asdict(cu)
-    # Per-response detail fields are dropped like ``raw_usage``: the mirror and the
-    # top level must stay equal (``response["usage"] == post["usage"]`` is ONE
-    # contract), and ``raw_usage``/``cache_write_by_ttl`` are the non-comparable
-    # ones (raw dict vs normalized tuple fields).
     summary.pop("raw_usage", None)
-    summary.pop("cache_write_by_ttl", None)
     summary["prompt_tokens"] = cu.prompt_tokens
     summary["total_tokens"] = cu.total_tokens
     return summary
@@ -297,36 +292,3 @@ async def arun_with_aux_hooks(
         raise
     finish_aux_call_hooks(hooks, response=response)
     return response
-
-
-# An agent whose whole turn loop is auxiliary work (a plugin session fork) sets
-# ``_loop_aux_task = (aux_task, metadata)``: each loop request then reports through
-# pre/post_auxiliary_call instead of the turn-scoped pre/post_api_request.
-
-def begin_loop_aux_attempt(agent: Any, api_kwargs: dict[str, Any], api_request_id: str) -> bool:
-    """Fire ``pre_auxiliary_call`` for the loop request about to go out; False (nothing done) for a
-    normal agent. An attempt still open here failed without a response (provider error, retry):
-    its pair is closed first."""
-    identity = getattr(agent, "_loop_aux_task", None)
-    if not identity:
-        return False
-    end_loop_aux_attempt(agent, error=ConnectionError("attempt ended without a response"))
-    aux_task, metadata = identity
-    agent._loop_aux_hooks = start_aux_call_hooks(
-        aux_task=aux_task, metadata={**metadata, "api_request_id": api_request_id}, client=agent.client,
-        kwargs=api_kwargs, provider=str(agent.provider or ""), model=str(agent.model or ""),
-        api_mode=str(agent.api_mode or ""), streaming=False,
-    )
-    return True
-
-
-def end_loop_aux_attempt(
-    agent: Any, response: Any = None, error: Optional[BaseException] = None, *,
-    normalized: Optional[tuple[Any, Any, Optional[dict[str, Any]]]] = None,
-) -> None:
-    """Close the open :func:`begin_loop_aux_attempt` pair, if any (idempotent)."""
-    hooks = getattr(agent, "_loop_aux_hooks", None)
-    if hooks is None:
-        return
-    agent._loop_aux_hooks = None
-    finish_aux_call_hooks(hooks, response, error, normalized=normalized)

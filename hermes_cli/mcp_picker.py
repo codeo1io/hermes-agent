@@ -73,8 +73,7 @@ def _enable_disable(name: str, *, enable: bool) -> None:
     if not server:
         _say(f"  '{name}' is not installed.", Colors.RED)
         return
-    from tools.mcp_tool_common import write_mcp_server_enabled
-    write_mcp_server_enabled(server, enable)
+    server["enabled"] = enable
     cfg["mcp_servers"] = servers
     save_config(cfg)
     _say(

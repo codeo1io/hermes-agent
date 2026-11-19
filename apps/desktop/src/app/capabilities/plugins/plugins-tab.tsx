@@ -664,11 +664,7 @@ export const PluginsTab = memo(function PluginsTab({
           sha: pkg.agent?.installed_sha ?? pkg.desktop?.packageOrigin?.sha ?? '',
           version: pkg.agent?.version ?? ''
         }))
-      ).map(entry => ({
-        ...entry,
-        id: `installed:${entry.identifier}`,
-        updateAvailable: packages.some(pkg => pkg.key === entry.identifier && pkg.agent?.update_available)
-      })),
+      ).map(entry => ({ ...entry, id: `installed:${entry.identifier}` })),
     [packages]
   )
 

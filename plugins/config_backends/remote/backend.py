@@ -424,8 +424,7 @@ class RemoteBackend:
         home_token = set_hermes_home_override(st.home)
         try:
             # config_only: a read (or a refused write's check) must change no local file (D12).
-            run_migrations(current, {"env_added": [], "config_added": [], "warnings": []}, True, config_only=True,
-                           stop_at_failure=False)
+            run_migrations(current, {"env_added": [], "config_added": [], "warnings": []}, True, config_only=True)
         finally:
             reset_hermes_home_override(home_token)
             _PRIVATE.reset(private_token)

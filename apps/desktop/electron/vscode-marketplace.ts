@@ -18,15 +18,6 @@ import zlib from 'node:zlib'
 const GALLERY_QUERY_URL = 'https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery'
 const VSIX_ASSET_TYPE = 'Microsoft.VisualStudio.Services.VSIXPackage'
 const MAX_VSIX_BYTES = 40 * 1024 * 1024 // 40 MB — themes are tiny; this is paranoia.
-// Cap the *inflated* size of any single zip entry. MAX_VSIX_BYTES bounds the
-// compressed archive, but a small deflated entry can inflate to gigabytes (a
-// decompression bomb) in the Electron main process. Themes are JSON and tiny;
-// 16 MB inflated per entry is already generous.
-const MAX_ENTRY_BYTES = 16 * 1024 * 1024 // 16 MB inflated per entry.
-// The per-entry cap alone still lets a manifest list thousands of themes (or
-// the same entry repeatedly), so also bound the count and the total inflated.
-const MAX_THEMES = 64
-const MAX_TOTAL_EXTRACT_BYTES = 64 * 1024 * 1024
 const MAX_REDIRECTS = 5
 const REQUEST_TIMEOUT_MS = 20_000
 
@@ -256,8 +247,8 @@ function readCentralDirectory(buf) {
   return records
 }
 
-/** Inflate a single entry, bounding the inflated output. */
-function extractEntryBytes(buf, record, maxBytes) {
+/** Inflate a single entry to a string. */
+function extractEntry(buf, record) {
   // The local header's name/extra lengths can differ from the central record,
   // so re-read them here to locate the compressed payload.
   if (buf.readUInt32LE(record.localOffset) !== 0x04034b50) {
@@ -270,23 +261,7 @@ function extractEntryBytes(buf, record, maxBytes) {
   const data = buf.subarray(dataStart, dataStart + record.compressedSize)
 
   // 0 = stored, 8 = deflate. Theme files are one or the other.
-  if (record.method === 0) {
-    // Stored entries are their own uncompressed size; reject an oversized one
-    // before materializing it as a string.
-    if (data.length > maxBytes) {
-      throw new Error('Zip entry exceeds the extraction size limit.')
-    }
-
-    return data
-  }
-
-  if (record.method !== 8) {
-    throw new Error(`Unsupported zip compression method ${record.method}.`)
-  }
-
-  // maxOutputLength makes zlib throw ERR_BUFFER_TOO_LARGE once the inflated
-  // output would exceed the cap, instead of allocating unbounded memory.
-  return zlib.inflateRawSync(data, { maxOutputLength: maxBytes })
+  return record.method === 0 ? data.toString('utf8') : zlib.inflateRawSync(data).toString('utf8')
 }
 
 /** Normalize a package.json theme path to its zip entry name. */
@@ -305,9 +280,7 @@ function extractThemes(vsixBuffer) {
     throw new Error('Package manifest missing from the extension.')
   }
 
-  const pkgBytes = extractEntryBytes(vsixBuffer, pkgRecord, MAX_ENTRY_BYTES)
-  let remaining = MAX_TOTAL_EXTRACT_BYTES - pkgBytes.length
-  const pkg = JSON.parse(pkgBytes.toString('utf8'))
+  const pkg = JSON.parse(extractEntry(vsixBuffer, pkgRecord))
   const contributed = pkg?.contributes?.themes
 
   if (!Array.isArray(contributed) || contributed.length === 0) {
@@ -315,13 +288,8 @@ function extractThemes(vsixBuffer) {
   }
 
   const themes = []
-  let attempts = 0
 
   for (const entry of contributed) {
-    if (attempts >= MAX_THEMES || remaining <= 0) {
-      break
-    }
-
     if (!entry?.path) {
       continue
     }
@@ -332,22 +300,14 @@ function extractThemes(vsixBuffer) {
       continue
     }
 
-    // Count attempts, not successes, and charge a failed entry its full cap:
-    // otherwise one bomb listed many times is re-inflated on every listing.
-    attempts += 1
-    const cap = Math.min(MAX_ENTRY_BYTES, remaining)
-
     try {
-      const bytes = extractEntryBytes(vsixBuffer, record, cap)
-      remaining -= bytes.length
       themes.push({
         label: entry.label || entry.id || pkg.displayName || pkg.name || 'VS Code Theme',
         uiTheme: entry.uiTheme,
-        contents: bytes.toString('utf8')
+        contents: extractEntry(vsixBuffer, record)
       })
     } catch {
       // Skip an entry we can't inflate rather than failing the whole install.
-      remaining -= cap
     }
   }
 

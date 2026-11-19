@@ -16,7 +16,6 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 from _hermes_home import get_hermes_home
-from _secure_storage import write_private_json
 
 
 def get_token_path() -> Path:
@@ -76,7 +75,9 @@ def refresh_token(token_data: dict) -> dict:
         tz=UTC,
     ).isoformat()
 
-    write_private_json(get_token_path(), _normalize_authorized_user_payload(token_data))
+    get_token_path().write_text(
+        json.dumps(_normalize_authorized_user_payload(token_data), indent=2), encoding="utf-8"
+    )
     return token_data
 
 

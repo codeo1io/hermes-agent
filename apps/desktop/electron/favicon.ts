@@ -21,9 +21,6 @@
  * so the ladder can be tested without a network.
  */
 
-import type { LinkMetadataPolicy } from './link-title-guard'
-import { isSafeLinkMetadataTarget } from './link-title-guard'
-
 export interface IconCandidate {
   url: string
   /** Rough pixel edge, or a synthetic rank for scalable/unsized marks. */
@@ -50,6 +47,42 @@ const SCORE_GUESS = 48
 
 /** Past this the file is a download, not an icon. */
 const SCORE_CEILING = 512
+
+/**
+ * A host worth asking for an icon.
+ *
+ * Loopback and RFC1918 addresses serve MCP endpoints, not brands, and an
+ * icon service can't see them anyway. Refusing them here is also what keeps
+ * a private hostname from being handed to that service.
+ */
+export function isPublicHttpUrl(raw: string): boolean {
+  let url: URL
+
+  try {
+    url = new URL(raw)
+  } catch {
+    return false
+  }
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false
+  }
+
+  const host = url.hostname.toLowerCase()
+
+  return !(
+    host === 'localhost' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    !host.includes('.') ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  )
+}
 
 const absolute = (href: string, base: string): string => {
   try {
@@ -268,15 +301,8 @@ export const toDataUrl = (mime: string, bytes: Uint8Array): string =>
  * network trip, the icon survives a site going down, and one cached string
  * covers every surface showing that connector.
  */
-export async function resolveFavicon(
-  pageUrl: string,
-  io: FaviconIo,
-  // The same DNS-backed destination policy as link titles. Loopback, LAN,
-  // link-local and metadata hosts serve MCP endpoints, not brands, and
-  // refusing them here also keeps a private hostname away from any network I/O.
-  isAllowed: LinkMetadataPolicy = isSafeLinkMetadataTarget
-): Promise<string> {
-  if (!(await isAllowed(pageUrl))) {
+export async function resolveFavicon(pageUrl: string, io: FaviconIo): Promise<string> {
+  if (!isPublicHttpUrl(pageUrl)) {
     return ''
   }
 
@@ -288,8 +314,7 @@ export async function resolveFavicon(
 
     const manifestUrl = manifestUrlFromHtml(html, pageUrl)
 
-    // The page chooses these URLs, so each one is admitted on its own.
-    if (manifestUrl && (await isAllowed(manifestUrl))) {
+    if (manifestUrl) {
       const manifest = await io.fetchText(manifestUrl).catch(() => '')
 
       if (manifest) {
@@ -305,10 +330,6 @@ export async function resolveFavicon(
   // connector's host to someone else — so a site that won't show us its icon
   // simply keeps its monogram.
   for (const candidate of rankCandidates(candidates)) {
-    if (!(await isAllowed(candidate.url))) {
-      continue
-    }
-
     const image = await io.fetchImage(candidate.url).catch(() => null)
 
     if (!image) {

@@ -2,7 +2,7 @@
 
 from typing import NoReturn
 
-from hermes_cli._old_updater import stop_historical_updater
+from hermes_cli._old_updater import in_historical_update, stop_for_relaunch
 
 
 def ensure(feature: str, *, prompt: bool = True) -> NoReturn:
@@ -17,4 +17,10 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300,
     # Only an actual updater call stack may transfer control to the updater;
     # argv can still say "serve" or "gateway" when /update runs in-process.
     # Historical updaters also passed constraints/dry_run; accepted and ignored.
-    stop_historical_updater("tools.lazy_deps.install_specs", ImportError)
+    if in_historical_update():
+        # never returns: hands off to the takeover child and exits
+        stop_for_relaunch()
+    raise ImportError(
+        "tools.lazy_deps.install_specs is retired; runtime dependency "
+        "installation is unavailable."
+    )

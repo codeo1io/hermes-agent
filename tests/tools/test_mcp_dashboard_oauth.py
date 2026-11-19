@@ -13,6 +13,7 @@ def _flow(flow_id: str = "flow-retry", server_name: str = "asana"):
     return DashboardOAuthFlow(
         flow_id=flow_id,
         server_name=server_name,
+        profile=None,
         hermes_home="/tmp/hermes-test",
         redirect_uri=f"https://agent.example/mcp/oauth/callback/{flow_id}",
     )
@@ -24,6 +25,7 @@ def test_dashboard_flow_exposes_authorization_url_and_accepts_callback():
     flow = DashboardOAuthFlow(
         flow_id="flow-1",
         server_name="reports",
+        profile=None,
         hermes_home="/tmp/hermes-test",
         redirect_uri="https://agent.example/mcp/oauth/callback/flow-1",
     )
@@ -49,6 +51,7 @@ def test_dashboard_flow_preserves_rfc9207_iss():
     flow = DashboardOAuthFlow(
         flow_id="flow-iss",
         server_name="cloudflare",
+        profile=None,
         hermes_home="/tmp/hermes-test",
         redirect_uri="https://agent.example/mcp/oauth/callback/flow-iss",
     )
@@ -64,6 +67,7 @@ def test_dashboard_flow_accepts_only_one_concurrent_callback():
     flow = DashboardOAuthFlow(
         flow_id="flow-race",
         server_name="reports",
+        profile=None,
         hermes_home="/tmp/hermes-test",
         redirect_uri="https://agent.example/mcp/oauth/callback/flow-race",
     )
@@ -106,6 +110,7 @@ def test_mcp_oauth_helpers_use_dashboard_flow_without_loopback_port():
     flow = DashboardOAuthFlow(
         flow_id="flow-4",
         server_name="reports",
+        profile=None,
         hermes_home="/tmp/hermes-test",
         redirect_uri="https://agent.example/mcp/oauth/callback/flow-4",
     )
@@ -201,7 +206,7 @@ def test_preregistered_pinned_redirect_port_keeps_loopback_listener_under_dashbo
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    flow = DashboardOAuthFlow(flow_id="flow-5", server_name="asana", hermes_home=str(tmp_path),
+    flow = DashboardOAuthFlow(flow_id="flow-5", server_name="asana", profile=None, hermes_home=str(tmp_path),
                               redirect_uri="https://agent.example/mcp/oauth/callback/flow-5")
     cfg = {"client_id": "pre-registered", "client_secret": "s", "redirect_host": "localhost", "redirect_port": port}
     with dashboard_oauth_flow(flow), force_interactive_oauth():

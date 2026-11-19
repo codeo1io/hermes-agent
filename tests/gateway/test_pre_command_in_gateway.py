@@ -427,10 +427,9 @@ def test_commands_refused_during_a_turn_fire_nothing(tmp_path):
     assert [(r['command'], r['args_raw']) for r in fired] == [('goal', 'status'), ('history', '')], fired
 
 
-def test_commands_the_cli_does_not_run_on_the_gateway_fire_nothing(monkeypatch, capsys):
-    """A registry command with no classic CLI handler runs nothing in the CLI, so no
-    ``command.observe`` goes out; a command the CLI runs (``/reload``, ``/handoff`` through the
-    owner's handoff verbs, #143608) is reported before it runs."""
+def test_commands_the_cli_refuses_on_the_gateway_fire_nothing(monkeypatch, capsys):
+    """A named refusal (``/handoff``) and a registry command with no classic CLI handler run nothing in
+    the CLI, so no ``command.observe`` goes out; a command the CLI runs is still reported."""
     from cli import HermesCLI
     from hermes_cli.commands import COMMAND_REGISTRY
 
@@ -440,22 +439,22 @@ def test_commands_the_cli_does_not_run_on_the_gateway_fire_nothing(monkeypatch, 
 
         def call(self, method, **params):
             self.calls.append((method, params.get('name')))
-            return {'state': 'failed'} if method == 'handoff.state' else {}
+            return {}
 
         def call_tagged(self, method, **params):
             return self.call(method, **params), self.epoch
     connection = Connection()
     monkeypatch.setattr('hermes_cli.gateway_side.connection_for', lambda _cli: connection)
     monkeypatch.setattr('hermes_cli.plugins.fire_pre_command_hook', lambda **_k: pytest.fail('fired locally'))
-    unhandled = next(cmd.name for cmd in COMMAND_REGISTRY if HermesCLI._slash_handler(cmd.name) is None)
+    unhandled = next(cmd.name for cmd in COMMAND_REGISTRY
+                     if HermesCLI._slash_handler(cmd.name) is None and cmd.name != 'handoff')
     c = HermesCLI.__new__(HermesCLI)
-    c.config, c.session_id, c._agent_running = {}, 's1', False
+    c.config, c.session_id = {}, 's1'
+    c.process_command('/handoff telegram')
     c.process_command('/' + unhandled)
     assert [call for call in connection.calls if call[0] == 'command.observe'] == []
     c.process_command('/reload')
     assert ('command.observe', 'reload') in connection.calls
-    c.process_command('/handoff telegram')
-    assert ('command.observe', 'handoff') in connection.calls
 
 
 def _authority(state):

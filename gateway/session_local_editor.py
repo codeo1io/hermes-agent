@@ -39,7 +39,8 @@ def request_editor_edit(proposal):
     from tools.approval_context import get_current_session_key
     from tools.approval_gateway_wait import _await_gateway_decision
     route = get_current_session_key()
-    notify = approval._gateway_notify_cb(route)
+    with approval._lock:
+        notify = approval._gateway_notify_cbs.get(route)
     if notify is None:
         return False
     # Each diff is a one-use consent, never a command-pattern or session grant.

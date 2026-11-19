@@ -73,13 +73,11 @@ NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
 
 
 def _get_bundled_dir() -> Path:  # HERMES_BUNDLED_SKILLS env first, then repo-relative
-    from hermes_cli._startup_fast import project_root_str
-    return get_bundled_skills_dir(Path(project_root_str()) / "skills")
+    return get_bundled_skills_dir(Path(__file__).parent.parent / "skills")
 
 
 def _get_optional_dir() -> Path:
-    from hermes_cli._startup_fast import project_root_str
-    return get_optional_skills_dir(Path(project_root_str()) / "optional-skills")
+    return get_optional_skills_dir(Path(__file__).parent.parent / "optional-skills")
 
 
 def _rel_skills_posix(path: Path) -> str:

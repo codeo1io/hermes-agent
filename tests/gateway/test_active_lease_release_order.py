@@ -33,6 +33,8 @@ class _ReleaseStuckOnTheRegistry:
 def _runner(cfg):
     runner = run_mod.GatewayRunner.__new__(run_mod.GatewayRunner)
     runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
     runner.config = cfg
     return runner
 

@@ -66,13 +66,10 @@ def _resp(status, json_data=None, text_data=None):
     return r
 
 
-def _session_with(responses, health=None, *, token="standalone-test-token-0123456789abcdef"):
-    """Build a mocked aiohttp.ClientSession: GET /auth-proof answers the challenge with *token* (the bridge the
-    adapter spawned), GET /health answers *health* (default an empty 200), POSTs return *responses* in order; every
-    POST and the /health GET are recorded as (url, json_payload) — the proof handshake is not part of the recorded
-    delivery sequence."""
-    from plugins.platforms.whatsapp.adapter import _bridge_auth_proof
-
+def _session_with(responses, health=None):
+    """Build a mocked aiohttp.ClientSession: GET /health answers *health* (default an
+    empty 200), POSTs return *responses* in order; every GET/POST is recorded as
+    (url, json_payload)."""
     calls = []
     idx = [0]
 
@@ -86,14 +83,9 @@ def _session_with(responses, health=None, *, token="standalone-test-token-012345
         return ctx
 
     def _get(url, **kwargs):
-        if url.endswith("/auth-proof"):
-            challenge = (kwargs.get("headers") or {})["X-Hermes-Bridge-Challenge"]
-            resp = _resp(200, {"authProof": _bridge_auth_proof(token, challenge)})
-        else:
-            calls.append((url, kwargs.get("json")))
-            resp = health or _resp(200)
+        calls.append((url, kwargs.get("json")))
         ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=resp)
+        ctx.__aenter__ = AsyncMock(return_value=health or _resp(200))
         ctx.__aexit__ = AsyncMock(return_value=False)
         return ctx
 
@@ -104,13 +96,6 @@ def _session_with(responses, health=None, *, token="standalone-test-token-012345
     session_ctx.__aenter__ = AsyncMock(return_value=session)
     session_ctx.__aexit__ = AsyncMock(return_value=False)
     return session_ctx, calls
-
-
-@pytest.fixture(autouse=True)
-def _persisted_bridge_token(monkeypatch):
-    """Standalone senders only READ the token the gateway persisted; stand in for that file."""
-    monkeypatch.setattr("plugins.platforms.whatsapp.adapter._read_bridge_token",
-                        lambda session_path: "standalone-test-token-0123456789abcdef")
 
 
 def _pconfig():
@@ -178,7 +163,7 @@ def test_missing_captioned_file_falls_back_to_text():
     assert "error" in res
     assert "not found" in res["error"]
     # ...but the caption text was delivered on its own first.
-    assert [url for url, _ in calls] == ["http://127.0.0.1:3000/health", "http://127.0.0.1:3000/send"]
+    assert [url for url, _ in calls] == ["http://localhost:3000/health", "http://localhost:3000/send"]
     assert calls[1][1]["message"] == "floor plan"
 
 
@@ -193,7 +178,7 @@ def test_standalone_send_uses_persisted_secondary_bridge_port(tmp_path, monkeypa
     with patch("aiohttp.ClientSession", return_value=session_ctx):
         result = asyncio.run(_standalone_send(SimpleNamespace(token="", extra={}), "12345", "hello"))
     assert result["success"] is True
-    assert [url for url, _ in calls] == ["http://127.0.0.1:3042/health", "http://127.0.0.1:3042/send"]
+    assert [url for url, _ in calls] == ["http://localhost:3042/health", "http://localhost:3042/send"]
 
 
 @pytest.mark.parametrize(
@@ -235,9 +220,9 @@ def test_secondary_standalone_sends_use_active_profile_port_for_text_media_and_m
             reset_hermes_home_override(override)
         assert result.get("success") is True, result
         assert [url for url, _ in calls] == [
-            f"http://127.0.0.1:{port}/health",
-            f"http://127.0.0.1:{port}/send",
-            f"http://127.0.0.1:{port}/send-media",
+            f"http://localhost:{port}/health",
+            f"http://localhost:{port}/send",
+            f"http://localhost:{port}/send-media",
         ]
         assert calls[1][1]["mentions"] == ["12345@s.whatsapp.net"]
         assert calls[2][1]["filePath"] == str(media)
@@ -270,4 +255,4 @@ def test_standalone_send_posts_only_through_this_profiles_bridge(tmp_path, repor
         assert posted == []
     else:
         assert result.get("success") is True, result
-        assert posted == ["http://127.0.0.1:3000/send", "http://127.0.0.1:3000/send-media"]
+        assert posted == ["http://localhost:3000/send", "http://localhost:3000/send-media"]

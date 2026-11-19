@@ -464,7 +464,7 @@ class CronManageParams(Params):
 
 
 class CronJobRow(_Open):
-    """``cron/job_args.py::_format_job``."""
+    """``tools/cronjob_job_args.py::_format_job``."""
 
     job_id: str
     name: str = ""

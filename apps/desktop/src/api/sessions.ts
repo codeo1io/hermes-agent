@@ -57,17 +57,6 @@ function sessionWriteProfile(profile?: null | string): string | undefined {
   return String(profile ?? '').trim() || getApiRequestProfile() || undefined
 }
 
-/** Request scope for a list read that names ONE profile: the named profile
- *  rides the request too, so a Bot Mode read of a bot other than the ambient
- *  profile never pairs `?profile=<ambient>` with the bot's selector (the
- *  gateway's grant check refuses the pair: 403 profile_scope_mismatch). */
-function listProfileScoped(profile: string): { profile?: string } {
-  const { priority: _priority, ...ambient } = profileScoped()
-  const named = String(profile || '').trim()
-
-  return named && named !== 'all' && named !== ambient.profile ? { ...ambient, profile: named } : ambient
-}
-
 function sessionScopeQuery(scope?: ProfileScope): string {
   const profile = sessionScoped(scope).profile
 
@@ -162,7 +151,7 @@ export async function listAllProfileSessions(
     : ''
 
   const result = await hermesApi<PaginatedSessions>({
-    ...listProfileScoped(profile),
+    ...profileScoped(),
     path:
       `/api/profiles/sessions?limit=${limit}&offset=${Math.max(0, offset)}&min_messages=${Math.max(0, minMessages)}` +
       `&archived=${archived}&order=${order}&profile=${encodeURIComponent(profile)}${sourceParam}${excludeParam}`,
@@ -347,7 +336,7 @@ export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<
 
   try {
     result = await hermesApi<SidebarSessionsResponse>({
-      ...listProfileScoped(req.recentsProfile),
+      ...profileScoped(),
       path: `/api/profiles/sessions/sidebar?${params.toString()}`,
       timeoutMs: SESSION_LIST_REQUEST_TIMEOUT_MS
     })

@@ -59,7 +59,9 @@ def _make_runner():
 
     runner = object.__new__(GatewayRunner)
     runner._running_agents = {}
+    runner._running_agents_ts = {}
     runner._pending_messages = {}
+    runner._busy_ack_ts = {}
     runner._draining = False
     runner._busy_text_mode = "interrupt"
     runner.adapters = {}
@@ -119,6 +121,7 @@ class TestBusySessionAck:
 
         runner, _sentinel = _make_runner()
         runner._busy_input_mode = "queue"
+        runner._queued_events = {}
         adapter = _make_adapter()
 
         source = SessionSource(
@@ -135,7 +138,7 @@ class TestBusySessionAck:
             "seconds_since_activity": 0.0,
         }
         runner._running_agents[sk] = agent
-        runner._session_state(sk).turn.started_ts = time.time()
+        runner._running_agents_ts[sk] = time.time()
 
         events = [
             MessageEvent(
@@ -152,7 +155,7 @@ class TestBusySessionAck:
             assert result is None
 
         assert adapter._pending_messages[sk].text == "first"
-        assert [event.text for event in runner._session_state(sk).conversation.queued_events] == [
+        assert [event.text for event in runner._queued_events[sk]] == [
             "second",
             "third",
         ]
@@ -179,7 +182,7 @@ class TestBusySessionAck:
             "seconds_since_activity": 1.0,
         }
         runner._running_agents[sk] = agent
-        runner._session_state(sk).turn.started_ts = time.time() - 600  # 10 min ago
+        runner._running_agents_ts[sk] = time.time() - 600  # 10 min ago
         runner.adapters[event.source.platform] = adapter
 
         result = await runner._handle_active_session_busy_message(event, sk)
@@ -343,6 +346,7 @@ class TestBusySessionAck:
         'first\\nsecond' and destroying message boundaries."""
         runner, _sentinel = _make_runner()
         runner._busy_input_mode = "interrupt"
+        runner._queued_events = {}
         adapter = _make_adapter()
 
         # Both events must share the SAME platform object so they resolve to
@@ -367,7 +371,7 @@ class TestBusySessionAck:
         runner._running_agents[sk] = agent
 
         await runner._handle_active_session_busy_message(first, sk)
-        runner._session_state(sk).turn.busy_ack_ts = 0.0  # avoid the 30s ack-debounce early return
+        runner._busy_ack_ts = {}  # avoid the 30s ack-debounce early return
         await runner._handle_active_session_busy_message(second, sk)
 
         # First lands in the head slot; second goes to the FIFO overflow —
@@ -375,7 +379,7 @@ class TestBusySessionAck:
         head = adapter._pending_messages.get(sk)
         assert head is first
         assert head.text == "first message"  # not "first message\nsecond message"
-        overflow = runner._session_state(sk).conversation.queued_events
+        overflow = runner._queued_events.get(sk, [])
         assert [e.text for e in overflow] == ["second message"]
 
 
@@ -413,7 +417,7 @@ class TestBusySessionAck:
             "seconds_since_activity": 0.5,
         }
         runner._running_agents[sk] = agent
-        runner._session_state(sk).turn.started_ts = time.time() - 600
+        runner._running_agents_ts[sk] = time.time() - 600
         runner.adapters[event.source.platform] = adapter
 
         await runner._handle_active_session_busy_message(event, sk)
@@ -451,7 +455,7 @@ class TestBusySessionOnboardingHint:
             "last_activity_desc": "api", "seconds_since_activity": 0.1,
         }
         runner._running_agents[sk] = agent
-        runner._session_state(sk).turn.started_ts = time.time() - 5
+        runner._running_agents_ts[sk] = time.time() - 5
         runner.adapters[event.source.platform] = adapter
 
         await runner._handle_active_session_busy_message(event, sk)

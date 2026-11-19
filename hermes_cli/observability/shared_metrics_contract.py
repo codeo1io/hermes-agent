@@ -189,9 +189,9 @@ SIZE_BUCKETS = frozenset({
 
 
 def _bundled_memory_providers() -> frozenset[str]:
-    from hermes_cli.plugins import get_bundled_plugins_dir
+    from pathlib import Path
 
-    root = get_bundled_plugins_dir() / "memory"
+    root = Path(__file__).resolve().parents[2] / "plugins" / "memory"
     try:
         return frozenset(p.name for p in root.iterdir() if (p / "__init__.py").is_file())
     except OSError:

@@ -122,8 +122,9 @@ class TestMatrixVoiceMessageDetection:
         self.adapter._message_handler = AsyncMock()
         # Mock _mxc_to_http to return a fake HTTP URL
         self.adapter._mxc_to_http = lambda url: f"https://matrix.example.org/_matrix/media/v3/download/{url[6:]}"
+        # Mock client for authenticated download — download_media returns bytes directly
         self.adapter._client = MagicMock()
-        self._download = AsyncMock(return_value=b"fake audio data")
+        self.adapter._client.download_media = AsyncMock(return_value=b"fake audio data")
         # State store for DM detection
         self.adapter._client.state_store = _make_state_store()
 
@@ -141,8 +142,7 @@ class TestMatrixVoiceMessageDetection:
 
         self.adapter.handle_message = capture
 
-        with patch("plugins.platforms.matrix.adapter.download_mxc_capped", self._download):
-            await self.adapter._on_room_message(event)
+        await self.adapter._on_room_message(event)
 
         assert captured_event is not None
         assert captured_event.media_urls is not None
@@ -150,7 +150,8 @@ class TestMatrixVoiceMessageDetection:
         # Should be a local path, not an HTTP URL
         assert not captured_event.media_urls[0].startswith("http"), \
             f"media_urls should contain local path, got {captured_event.media_urls[0]}"
-        self._download.assert_awaited_once()
+        # download_media is called with a ContentURI wrapping the mxc URL
+        self.adapter._client.download_media.assert_awaited_once()
         assert captured_event.media_types == ["audio/ogg"]
 
 
@@ -169,9 +170,11 @@ class TestMatrixVoiceCacheFallback:
 
     @pytest.mark.asyncio
     async def test_voice_cache_failure_falls_back_to_http_url(self):
-        """If caching fails (download raises), voice message should still be delivered with HTTP URL."""
+        """If caching fails (download returns None), voice message should still be delivered with HTTP URL."""
         event = _make_audio_event(is_voice=True)
-        download = AsyncMock(side_effect=RuntimeError("homeserver unavailable"))
+
+        # download_media returns None on failure
+        self.adapter._client.download_media = AsyncMock(return_value=None)
 
         captured_event = None
 
@@ -181,8 +184,7 @@ class TestMatrixVoiceCacheFallback:
 
         self.adapter.handle_message = capture
 
-        with patch("plugins.platforms.matrix.adapter.download_mxc_capped", download):
-            await self.adapter._on_room_message(event)
+        await self.adapter._on_room_message(event)
 
         assert captured_event is not None
         assert captured_event.media_urls is not None

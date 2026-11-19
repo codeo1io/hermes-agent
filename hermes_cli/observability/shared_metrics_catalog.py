@@ -133,9 +133,7 @@ def custom_provider_aliases() -> frozenset[str]:
 @functools.cache
 def bundled_platform_names() -> frozenset[str]:
     """Messaging platforms Hermes ships as ``plugins/platforms/<name>`` (the dir is the registered name)."""
-    from hermes_cli.plugins import get_bundled_plugins_dir
-
-    root = get_bundled_plugins_dir() / "platforms"
+    root = _REPO_ROOT / "plugins" / "platforms"
     try:
         return frozenset(p.name.lower() for p in root.iterdir() if (p / "plugin.yaml").is_file())
     except OSError:

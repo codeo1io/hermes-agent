@@ -7,7 +7,7 @@ import { createClientSessionState } from '@/lib/chat-runtime'
 import { $sidebarShowArchived } from '@/store/layout'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery } from '@/store/power'
-import { $activeSessionId, $connection, $selectedStoredSessionId, setCurrentModelSource } from '@/store/session'
+import { $activeSessionId, $connection, $selectedStoredSessionId } from '@/store/session'
 import {
   $sessionStates,
   $workingSessionIds,
@@ -32,8 +32,7 @@ function render(
   activeGatewayProfile: string,
   activeConnectionId: string,
   refreshSessions: () => Promise<void>,
-  gatewayRequest = requestGateway,
-  refreshCurrentModel = noop
+  gatewayRequest = requestGateway
 ) {
   return renderHook(
     ({ connectionId, profile }: { connectionId: string; profile: string }) => {
@@ -47,7 +46,7 @@ function render(
         gatewayState: 'open',
         refreshActiveTranscript: noop,
         refreshCronJobs: noop,
-        refreshCurrentModel,
+        refreshCurrentModel: noop,
         refreshHermesConfig: noop,
         refreshMessagingSessions: noop,
         refreshSessions,
@@ -57,19 +56,6 @@ function render(
     { initialProps: { connectionId: activeConnectionId, profile: activeGatewayProfile } }
   )
 }
-
-describe('useBackgroundSync on an open draft', () => {
-  it('repaints the model once a refused pick hands new chats back to the default', () => {
-    setCurrentModelSource('manual')
-    const refreshCurrentModel = vi.fn()
-    render('default', 'local', async () => undefined, requestGateway, refreshCurrentModel)
-    const before = refreshCurrentModel.mock.calls.length
-    act(() => setCurrentModelSource('default'))
-    expect(refreshCurrentModel).toHaveBeenCalledTimes(before + 1)
-    cleanup()
-    setCurrentModelSource('')
-  })
-})
 
 describe('useBackgroundSync profile-scoped session refresh', () => {
   beforeEach(() => {

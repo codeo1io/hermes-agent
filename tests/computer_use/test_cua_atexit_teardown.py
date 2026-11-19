@@ -26,10 +26,11 @@ class TestAtexitTeardown:
 
 
     def test_shutdown_stops_every_session_backend(self):
-        """Every session-scoped cached backend is stopped and the cache drained."""
+        """Session-scoped caches are all drained, not only the legacy slot."""
         first = MagicMock()
         second = MagicMock()
-        with patch.object(cu_tool, "_backends", {"one": first, "two": second}), \
+        with patch.object(cu_tool, "_backend", None), \
+             patch.object(cu_tool, "_backends", {"one": first, "two": second}), \
              patch.object(cu_tool, "_backend_call_locks", {}):
             cu_tool._shutdown_backend_atexit()
             first.stop.assert_called_once()
@@ -45,8 +46,7 @@ class TestAtexitTeardown:
         """
         atexit.unregister(cu_tool._shutdown_backend_atexit)
         try:
-            fake = MagicMock()
-            with patch.object(cu_tool, "_backends", {"": fake}), patch.object(cu_tool, "_backend_call_locks", {}):
+            with patch.object(cu_tool, "_backend", MagicMock()) as fake:
                 # Re-register and fire the full atexit chain the way the
                 # interpreter would, then confirm our hook ran.
                 atexit.register(cu_tool._shutdown_backend_atexit)

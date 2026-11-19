@@ -60,7 +60,6 @@ PR 开启时自动进行审查，并直接在 PR 上发布审查评论。
 ```bash
 hermes webhook subscribe github-pr-review \
   --events "pull_request" \
-  --signature github \
   --prompt "Review this pull request:
 Repository: {repository.full_name}
 PR #{pull_request.number}: {pull_request.title}
@@ -190,14 +189,10 @@ If healthy, keep it brief. If degraded or failed, provide detailed diagnostics."
 你的 CI/CD 流水线触发方式：
 
 ```bash
-BODY='{"service":"api","environment":"prod","version":"2.1.0","deployer":"ci","health_url":"https://api.example.com/health"}'
-TS=$(date +%s)
-SIG=$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac 'your-secret' | cut -d' ' -f2)
 curl -X POST http://your-server:8644/webhooks/deploy-verify \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Timestamp: $TS" \
-  -H "X-Webhook-Signature-V2: $SIG" \
-  -d "$BODY"
+  -H "X-Hub-Signature-256: sha256=$(echo -n '{"service":"api","environment":"prod","version":"2.1.0","deployer":"ci","health_url":"https://api.example.com/health"}' | openssl dgst -sha256 -hmac 'your-secret' | cut -d' ' -f2)" \
+  -d '{"service":"api","environment":"prod","version":"2.1.0","deployer":"ci","health_url":"https://api.example.com/health"}'
 ```
 
 ### 告警分类
@@ -360,7 +355,6 @@ hermes cron create "0 8 * * *" \
 ```bash
 hermes webhook subscribe github-issues \
   --events "issues" \
-  --signature github \
   --prompt "New GitHub issue received:
 Repository: {repository.full_name}
 Issue #{issue.number}: {issue.title}
@@ -423,7 +417,6 @@ platforms:
 ```bash
 hermes webhook subscribe auto-port \
   --events "pull_request" \
-  --signature github \
   --prompt "PR merged in the source repository:
 Repository: {repository.full_name}
 PR #{pull_request.number}: {pull_request.title}

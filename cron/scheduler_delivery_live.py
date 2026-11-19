@@ -29,7 +29,6 @@ from cron.scheduler_delivery import (  # re-export for the tests' patch targets
     _seed_cron_channel_session,
     _seed_cron_thread_session,
 )
-from gateway.inbound_reply_context import record_cron_delivery, recording_cron_delivery
 
 logger = logging.getLogger("cron.scheduler")  # same channel as scheduler_delivery (tests listen here)
 
@@ -178,24 +177,23 @@ def _live_send_text(
     router = DeliveryRouter(t.config, t.target_adapters)
     route_target = DeliveryTarget(
         platform=t.platform, chat_id=str(t.chat_id), thread_id=route_thread_id, is_explicit=True)
-    # Thread routing goes via the target (the router's Telegram DM-topic detection needs thread keys
-    # absent from metadata). Send through the already-authorized transport: re-resolving from
-    # target_adapters loses the SharedRouteAdapters satellite grant and drops the send (#115656).
+    # Thread routing goes via the target, not a bare metadata "thread_id": the router only applies
+    # its Telegram DM-topic detection when thread_id/message_thread_id are absent from metadata.
+    # Send through the already-authorized transport: re-resolving from the plain target_adapters
+    # dict cannot re-derive the SharedRouteAdapters satellite grant (the satellite owned
+    # platforms.<p> block is disabled), yields None, and drops the delivery (#115656).
     # cancel() cannot tell "never started" from "in flight": a run_coroutine_threadsafe future stays
     # PENDING until the coroutine finishes, so cancel() returns True mid-send AND kills it. The send
     # records its own start under a lock; a timeout abandons it only if it never began.
     dispatch_lock = threading.Lock()
     dispatch = {"started": False, "abandoned": False}
-    import contextvars as _cv, functools as _ft  # chunk ids tagged at send end, in THIS profile
-    record_ids = _ft.partial(_cv.copy_context().run, record_cron_delivery, t.platform_name, t.chat_id, text_to_send)
 
     async def _send_once():
         with dispatch_lock:
             if dispatch["abandoned"]:
                 return None
             dispatch["started"] = True
-        return await recording_cron_delivery(router._deliver_to_platform(
-            route_target, text_to_send, route_metadata, transport=t.transport), record_ids)
+        return await router._deliver_to_platform(route_target, text_to_send, route_metadata, transport=t.transport)
 
     future = safe_schedule_threadsafe(_send_once(), t.loop)
     if future is None:
@@ -231,10 +229,8 @@ def _live_send_text(
         return True, False, None
     except Exception as ex:
         # Real send error (not a slow confirmation): fall through to standalone. The router raises
-        # a failed SendResult's error string, so this is where send_path_degraded arrives. The
-        # adapter's retryable verdict rides DeliverySendError.send_retryable (None if it didn't).
+        # a failed SendResult's error string, so this is where send_path_degraded arrives.
         t.live_error = str(ex)
-        t.live_retryable = getattr(ex, "send_retryable", None)
         target_errors.append(f"live adapter send failed: {ex}")
         raise
 
@@ -258,10 +254,6 @@ def _live_send_text(
             err, shape = getattr(send_result, "error", None), type(send_result).__name__
         msg = f"live adapter send to {t.where} returned unconfirmed result ({shape}, error={err})"
         t.live_error = str(err) if err else None
-        if isinstance(send_result, dict):
-            t.live_retryable = send_result.get("retryable")
-        else:
-            t.live_retryable = getattr(send_result, "retryable", None)
         sd._warn_live_lane_failure(job, msg, t.is_relay)
         target_errors.append(msg)
         return False, False, None
@@ -312,7 +304,7 @@ def _live_send_media(
                 routed_media_metadata["scope_id"] = logical_home.scope_id
     _media_errors = sd._send_media_via_adapter(
         t.runtime_adapter, t.chat_id, media_files, routed_media_metadata or None, t.loop, t.job,
-        platform=t.platform, force_document=t.force_document,
+        platform=t.platform,
     )
     if (topic_name and len(media_files) == sum("thread not found" in e.lower() for e in _media_errors)
             and sd._resolve_named_dm_topic(t, topic_name, routed_media_metadata, delivery_errors,
@@ -320,7 +312,7 @@ def _live_send_media(
         # The named topic vanished (a media-only job never runs the router's text refresh): recreate once.
         _media_errors = sd._send_media_via_adapter(
             t.runtime_adapter, t.chat_id, media_files, routed_media_metadata, t.loop, t.job,
-            platform=t.platform, force_document=t.force_document)
+            platform=t.platform)
     if t.job.pop("_media_ack_lost", False) and t.where not in unverified_targets:
         unverified_targets.append(t.where)
     # Surface per-file failures into run status: text delivered but attachment lost is not ok.
@@ -445,11 +437,107 @@ def _deliver_via_live_adapter(
     return delivered
 
 
+def _standalone_send(
+    t: sd._TargetDelivery, content: str, media_files: list) -> tuple[Any, Optional[str]]:
+    """Run the standalone sender for one target: ``(result, None)`` or ``(None, error)`` (already
+    logged — WARNING for a shutdown race, ERROR with traceback otherwise)."""
+    from tools.send_message_tool import _send_to_platform
+    job = t.job
+    shutdown_msg = f"delivery to {t.where} skipped — interpreter is shutting down"
+
+    send_timeout = sd._get_standalone_send_timeout()
+
+    async def _send():
+        # The bound lives inside the coroutine: the running-loop fallback below closes ``coro``
+        # unstarted, and a wait_for wrapper created out here would be left never awaited.
+        # notify: the live lane's metadata["notify"] (cron.delivery.notify), so a brief rings either way.
+        return await asyncio.wait_for(_send_to_platform(
+            t.platform, t.pconfig, t.chat_id, content, thread_id=t.thread_id,
+            media_files=media_files, notify=t.notify_delivery), timeout=send_timeout)
+
+    def _warned(msg: str) -> tuple[None, str]:
+        logger.warning("Job '%s': %s", job["id"], msg)
+        return None, msg
+
+    def _failed(e) -> tuple[None, str]:
+        msg = f"delivery to {t.where} failed: {e}"
+        logger.error("Job '%s': %s", job["id"], msg, exc_info=True)
+        return None, msg
+
+    # Interpreter finalizing (SIGTERM/restart/OOM): asyncio.run and a fresh ThreadPoolExecutor both
+    # raise "cannot schedule new futures after interpreter shutdown" — warn, not ERROR traceback.
+    if sd._sched._interpreter_shutting_down():
+        return _warned(shutdown_msg)
+    # The live lane failed closed on an empty payload; standalone senders don't (Telegram returns
+    # success=True for empty content WITHOUT an API call) — a phantom delivery would result.
+    if not content.strip() and not media_files:
+        return _warned(f"standalone send skipped (empty text and no media) for {t.where}")
+    coro = _send()
+    try:
+        return asyncio.run(coro), None
+    except TimeoutError:
+        # The send may still complete on the gateway loop (the dispatch shield keeps an in-flight
+        # send un-cancelled); the run is released instead of waiting on it unbounded (#115469).
+        msg = (f"standalone send to {t.where} timed out after {send_timeout}s "
+               "(the send may still be in flight)")
+        logger.error("Job '%s': %s", job["id"], msg)
+        return None, msg
+    except RuntimeError as run_err:
+        # asyncio.run() refuses inside a running loop; close the unstarted coro, retry in a thread.
+        coro.close()
+        if sd._sched._interpreter_shutting_down(run_err):
+            return _warned(shutdown_msg)
+        # The fallback can itself raise (SMTP, result timeout); catch it or remaining targets skip.
+        try:
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                # A fresh thread does NOT inherit the profile ContextVars (home override + secret
+                # scope); run in the active context or the sender reads the default bot token.
+                return pool.submit(contextvars.copy_context().run, asyncio.run, _send()).result(
+                    timeout=30), None
+            finally:
+                pool.shutdown(wait=False)
+        except Exception as e:  # health: allow BLE001 -- best-effort fallback lane: _failed logs the full traceback (exc_info=True) and the remaining targets must still get their turn
+            if sd._sched._interpreter_shutting_down(e):
+                return _warned(shutdown_msg)
+            return _failed(e)
+    except Exception as e:  # health: allow BLE001 -- last-resort delivery boundary: _failed logs the full traceback (exc_info=True); a send failure must surface as a delivery error, never crash the tick
+        return _failed(e)
+
+
+def _queue_for_live_reconnect(t: sd._TargetDelivery, content: str, media_files: list, delivery_errors: list) -> None:
+    """Hand a payload the live lane rejected as reconnect-only (``send_path_degraded``) and the
+    standalone lane then failed to send to the delivery ledger, as a failed reconnect-only row
+    owned by the adapter that rejected it: the post-reconnect sweep redelivers it (#125363). Only
+    reached after standalone failed, so nothing was sent and a replay cannot duplicate. The ledger
+    carries text only; dropped attachments are reported."""
+    try:
+        from gateway.delivery_ledger import (
+            compute_obligation_id, is_reconnect_only, ledger_enabled, mark_failed, record_obligation)
+        if not is_reconnect_only(t.live_error) or not ledger_enabled():
+            return
+        session_key = f"cron:{t.platform_name}:{t.chat_id}" + (f":{t.thread_id}" if t.thread_id else "")
+        obligation_id = compute_obligation_id(session_key, f"job:{t.job.get('id', '?')}", content)
+        record_obligation(
+            obligation_id=obligation_id, session_key=session_key, platform=t.platform_name,
+            chat_id=str(t.chat_id), thread_id=t.thread_id, content=content,
+            adapter_profile=getattr(getattr(t.transport, "adapter", None), "_owner_profile", None))
+        mark_failed(obligation_id, str(t.live_error))
+    except Exception:
+        logger.warning("Job '%s': could not queue %s for post-reconnect redelivery",
+                       t.job.get("id"), t.where, exc_info=True)
+        return
+    note = f"queued text for {t.where} for redelivery once the live adapter reconnects"
+    if media_files:
+        note += f" ({len(media_files)} attachment(s) not queued)"
+    logger.warning("Job '%s': %s", t.job.get("id"), note)
+    delivery_errors.append(note)
+
+
 def _deliver_standalone(
     t: sd._TargetDelivery, content: str, media_files: list, target_errors: list, delivery_errors: list,
-) -> Optional[bool]:
-    """Standalone fallback for a target the live lane did not deliver; True once the text was sent,
-    in full or in part (a split send that failed after a chunk landed)."""
+) -> None:
+    """Standalone fallback for a target the live lane did not deliver."""
     job = t.job
     if t.is_relay:
         # Relay owns the destination and credential; a native retry could duplicate — fail closed.
@@ -458,37 +546,17 @@ def _deliver_standalone(
         delivery_errors.extend(target_errors)
         return
     result, err = sd._standalone_send(t, content, media_files)
-    partial = False
     if err is None and result and result.get("error"):
         # Not inside an except block — the error comes from the result dict, no traceback.
         err = f"delivery error: {result['error']} (target {t.where})"
         logger.error("Job '%s': %s", job["id"], err)
-        # A sender's failure dict may follow a delivered (or partly delivered) payload: only the
-        # contract's NONE (``gateway.platforms._shared.delivery_state``) makes a replay safe.
-        from gateway.platforms._shared import NONE, PARTIAL, delivery_state
-        state = delivery_state(result)
-        t.standalone_in_flight = t.standalone_in_flight or state != NONE
-        partial = state == PARTIAL
     if err is not None:
         target_errors.append(err)
         delivery_errors.extend(target_errors)
-        # A partial split send: replies to the chunks that landed are framed as a past report too.
-        record_cron_delivery(t.platform_name, t.chat_id, content.strip(), result or {})
-        if t.standalone_in_flight:
-            # The payload may be on screen (in full or in part); queueing it would let the
-            # redelivery sweep post it twice. Possible loss over certain duplication: surface the
-            # window loudly instead of queueing.
-            logger.warning(
-                "Job '%s': NOT queueing %s for post-reconnect redelivery — the standalone "
-                "send may have delivered the payload; a replay could duplicate it",
-                job["id"], t.where)
-        else:
-            # A satellite profile's worker has no platform token, so standalone cannot stand in
-            # for a live adapter that is only waiting to reconnect: keep the payload for that adapter.
-            sd._queue_for_live_reconnect(t, content, media_files, delivery_errors)
-        # A partial send's head is on screen at this target, so the run did reach someone; so may
-        # a send whose answer was lost (explicit ``uncertain``, or no result at all: timeout, raise).
-        return partial or (t.standalone_in_flight and (result is None or result.get("delivery") == "uncertain"))
+        # A satellite profile's worker has no platform token, so standalone cannot stand in for a
+        # live adapter that is only waiting to reconnect: keep the payload for that adapter.
+        sd._queue_for_live_reconnect(t, content, media_files, delivery_errors)
+        return
     # Standalone senders report per-file attachment failures in ``warnings`` while returning
     # success; surface them so a vanished attachment doesn't mark the run ok.
     for _w in (result.get("warnings") if isinstance(result, dict) else None) or []:
@@ -496,12 +564,10 @@ def _deliver_standalone(
         logger.error("Job '%s': %s", job["id"], msg)
         delivery_errors.append(msg)
     logger.info("Job '%s': delivered to %s:%s", job["id"], t.platform_name, t.chat_id)
-    record_cron_delivery(t.platform_name, t.chat_id, content.strip(), result)  # replies to ANY chunk framed
     # Thread seeding only happens on the live lane, so no thread_seeded gate applies here.
     sd._maybe_mirror_cron_delivery(
         job, t.platform_name, t.chat_id, t.mirror_text, thread_id=t.thread_id,
         user_id=t.origin_user_id,
         enabled=t.mirror_this_target)
-    return True
 
 

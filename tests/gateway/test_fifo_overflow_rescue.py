@@ -55,6 +55,7 @@ def _text_event(text: str, msg_id: str) -> MessageEvent:
 
 def _runner() -> GatewayRunner:
     runner = GatewayRunner.__new__(GatewayRunner)
+    runner._queued_events = {}
     return runner
 
 

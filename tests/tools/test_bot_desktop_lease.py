@@ -9,8 +9,6 @@ import pytest
 
 from tools.bot_desktop import lease
 from tools.bot_desktop.rfb_filter import RfbClientFilter
-from tests.bot_desktop_lease import reset_lease
-from tests.computer_use_fakes import NoopBackend, reset_backend
 
 _HANDSHAKE = b"RFB 003.008\n" + b"\x01" + b"\x00"
 _KEY = b"\x04\x01\x00\x00\x00\x00\x00\x61"          # KeyEvent 'a' down
@@ -26,11 +24,11 @@ _SETENC = b"\x02\x00\x00\x02" + b"\x00\x00\x00\x07" + b"\xff\xff\xff\x21"  # Set
 def _fresh_lease():
     from tools.computer_use import tool
 
-    reset_backend()
-    reset_lease()
+    tool.reset_backend_for_tests()
+    lease._reset_for_tests()
     yield
-    reset_backend()
-    reset_lease()
+    tool.reset_backend_for_tests()
+    lease._reset_for_tests()
 
 
 def test_rfb_filter_forwards_input_only_from_the_lease_holder_across_arbitrary_chunking():
@@ -90,7 +88,7 @@ def test_takeover_during_an_admitted_action_discards_its_result(monkeypatch):
     their keystrokes captured by an action admitted before they did."""
     from tools.computer_use import tool
 
-    monkeypatch.setattr(tool, "_new_backend", lambda mode: NoopBackend())
+    monkeypatch.setattr(tool, "_new_backend", lambda mode: tool._NoopBackend())
 
     def _dispatch_then_takeover(backend, action, args, **_):
         lease.acquire("human")  # a whole take-over / hand-back cycle inside the driver call:
@@ -108,7 +106,7 @@ def test_takeover_handback_during_approval_does_not_start_the_device_op(monkeypa
     not only after. Do not patch _dispatch — a recording backend must never be called."""
     from tools.computer_use import tool
 
-    class Rec(NoopBackend):
+    class Rec(tool._NoopBackend):
         def __init__(self):
             self.calls = []
 

@@ -17,7 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# session_key -> {"confirm_id", "command", "handler", "created_at", "authority"}
+# session_key -> {"confirm_id", "command", "handler", "created_at"}
 _pending: dict[str, dict[str, Any]] = {}
 _lock = threading.RLock()
 
@@ -27,15 +27,11 @@ DEFAULT_TIMEOUT_SECONDS = 300
 
 
 def register(session_key: str, confirm_id: str, command: str,
-             handler: Callable[[str], Awaitable[Optional[str]]], authority: Optional[dict] = None) -> None:
-    """Register a pending confirm, superseding any prior one for the session. *authority* says who
-    may answer it (``gateway.approval_actor.slash_confirm_refusal``); default: the current turn's."""
-    if authority is None:
-        from tools.approval_context import prompt_authority
-        authority = prompt_authority()
+             handler: Callable[[str], Awaitable[Optional[str]]]) -> None:
+    """Register a pending confirm, superseding any prior one for the session."""
     with _lock:
         _pending[session_key] = {"confirm_id": confirm_id, "command": command,
-                                 "handler": handler, "created_at": time.time(), "authority": authority}
+                                 "handler": handler, "created_at": time.time()}
 
 
 def get_pending(session_key: str) -> Optional[dict[str, Any]]:

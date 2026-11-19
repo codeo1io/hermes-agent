@@ -902,22 +902,19 @@ export const sessionCommands: SlashCommand[] = [
           }
         }
 
-        // The /topup CTA belongs to a Nous route only (an older backend sends no flag).
-        const cta = () => r?.nous_route !== false && sys(t('slashCmd.session.usage.cta'))
-
         if (!r?.calls) {
           if (!showedBalance) {
             sys(t('slashCmd.session.usage.noCalls'))
           }
 
-          cta()
+          sys(t('slashCmd.session.usage.cta'))
 
           return
         }
 
         ctx.transcript.panel(t('slashCmd.session.usage.usageTitle'), usageTotalsSections(r))
 
-        cta()
+        sys(t('slashCmd.session.usage.cta'))
       })
     }
   }

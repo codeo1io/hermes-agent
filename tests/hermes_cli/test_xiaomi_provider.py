@@ -75,7 +75,6 @@ class TestXiaomiCredentials:
         from agent import secret_scope as ss
         from hermes_cli import config as config_module
         from hermes_cli import env_loader
-        from hermes_constants import hermes_home_key
 
         home = tmp_path / "hermes"
         home.mkdir()
@@ -86,7 +85,7 @@ class TestXiaomiCredentials:
         monkeypatch.delenv("XIAOMI_BASE_URL", raising=False)
         monkeypatch.setitem(
             env_loader._SECRET_SOURCE_VALUES_BY_HOME,
-            hermes_home_key(home),
+            str(home.resolve()),
             {"XIAOMI_API_KEY": "sk-bws-xiaomi-12345678"},
         )
 

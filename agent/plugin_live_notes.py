@@ -41,9 +41,7 @@ def pop_plugin_notices(agent: Any) -> str:
         notes = _queued(agent)
         if notes:
             setattr(agent, _QUEUED, {})
-    from agent.redact_secret_sources import redact_secret_source_values
-
-    return redact_secret_source_values("\n\n".join(notes.values()))
+    return "\n\n".join(notes.values())
 
 
 def attach_to_tool_message(agent: Any, message: dict) -> None:

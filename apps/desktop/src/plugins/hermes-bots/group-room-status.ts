@@ -36,14 +36,10 @@ export interface MemberOutcome {
   detail?: string
 }
 
-/** A running member, in absolute times (epoch seconds) so it does not change as the clock ticks: the
- *  chip that shows it reads the clock (`busyAt`), the room's derivations never do. */
-export interface BusyMember { kind: 'working'; startedAt?: number; lastSignAt?: number; tool?: string }
-
 export type MemberStatus =
   | { kind: 'idle' }
   | { kind: 'queued' }
-  | BusyMember
+  | { kind: 'stalled' | 'working'; elapsedS?: number; quietS?: number; tool?: string }
   | ({ kind: MemberOutcomeKind } & Omit<MemberOutcome, 'kind'>)
 
 /** A running member with no frame for this long reads as stalled. */
@@ -122,18 +118,23 @@ export function memberOutcomes(events: readonly RoomLogEvent[]): Map<string, Mem
   return outcomes
 }
 
-/** One status per member: a live task (running outranks queued) beats the last outcome. Clock-free. */
+/** One status per member: a live task (running outranks queued) beats the last outcome. */
 export function memberStatus(
   memberId: string,
   activity: readonly RoomMemberActivity[] | undefined,
-  outcomes: Map<string, MemberOutcome>
+  outcomes: Map<string, MemberOutcome>,
+  nowS: number
 ): MemberStatus {
   const rows = (activity ?? []).filter(row => row.member_id === memberId)
   const running = rows.find(row => row.status !== 'queued')
 
   if (running) {
-    return { kind: 'working', startedAt: running.started_at, lastSignAt: running.progress_at ?? running.started_at,
-      tool: running.tool || undefined }
+    const elapsedS = typeof running.started_at === 'number' ? Math.max(0, nowS - running.started_at) : undefined
+    const lastSign = running.progress_at ?? running.started_at
+    const quietS = typeof lastSign === 'number' ? Math.max(0, nowS - lastSign) : undefined
+    const kind = quietS !== undefined && quietS >= STALL_AFTER_S ? 'stalled' : 'working'
+
+    return { kind, elapsedS, quietS, tool: running.tool || undefined }
   }
 
   if (rows.length) {
@@ -145,15 +146,7 @@ export function memberStatus(
   return outcome ? { ...outcome } : { kind: 'idle' }
 }
 
-export const isBusyStatus = (status: MemberStatus): status is BusyMember => status.kind === 'working'
-
-/** A busy member as its chip shows it at `nowS`: stalled after `STALL_AFTER_S` with no sign of life. */
-export function busyAt(status: BusyMember, nowS: number): { kind: 'stalled' | 'working'; elapsedS?: number; quietS?: number; tool?: string } {
-  const elapsedS = typeof status.startedAt === 'number' ? Math.max(0, nowS - status.startedAt) : undefined
-  const quietS = typeof status.lastSignAt === 'number' ? Math.max(0, nowS - status.lastSignAt) : undefined
-
-  return { kind: quietS !== undefined && quietS >= STALL_AFTER_S ? 'stalled' : 'working', elapsedS, quietS, tool: status.tool }
-}
+export const isBusyStatus = (status: MemberStatus) => status.kind === 'working' || status.kind === 'stalled'
 
 /** `45s`, `1m20s`, `1h05m`. */
 export function formatElapsed(seconds: number): string {

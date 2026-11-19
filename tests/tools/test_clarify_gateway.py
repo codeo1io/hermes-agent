@@ -21,6 +21,7 @@ def _clear_clarify_state():
     with cm._lock:
         cm._entries.clear()
         cm._session_index.clear()
+        cm._notify_cbs.clear()
 
 
 class TestClarifyPrimitive:
@@ -308,7 +309,7 @@ class TestMultiSelectTextFallback:
     """Multi-select clarifies via the gateway text fallback.
 
     The adapter's numbered-list fallback asks the user to reply with
-    comma/space-separated numbers; _coerce_text_response_detailed must map those to a
+    comma/space-separated numbers; _coerce_text_response must map those to a
     JSON array of choice labels (which _parse_multi_select_response on the
     tool side decodes into a list).
     """
@@ -336,11 +337,11 @@ class TestMultiSelectTextFallback:
         import json
         from tools import clarify_gateway as cm
         entry = self._register_multi()
-        coerced, _ = cm._coerce_text_response_detailed(entry, "1, 1, 2")
+        coerced = cm._coerce_text_response(entry, "1, 1, 2")
         assert json.loads(coerced) == ["A", "B"]
 
     def test_resolve_text_response_end_to_end(self):
-        """attempt_text_response delivers the JSON array to the waiter."""
+        """resolve_text_response_for_session delivers the JSON array to the waiter."""
         import json
         from tools import clarify_gateway as cm
         self._register_multi(cid="m3")
@@ -352,7 +353,7 @@ class TestMultiSelectTextFallback:
         t = threading.Thread(target=waiter)
         t.start()
         time.sleep(0.05)
-        assert cm.attempt_text_response("m3", "1,2") == cm.TEXT_RESOLVED
+        assert cm.resolve_text_response_for_session("sk", "1,2") is True
         t.join(timeout=5)
         assert json.loads(result_box["r"]) == ["A", "B"]
 
@@ -360,12 +361,12 @@ class TestMultiSelectTextFallback:
         """Single-select coercion unchanged: '2' maps to the choice label string."""
         from tools import clarify_gateway as cm
         entry = cm.register("s3", "sk", "Q?", ["A", "B", "C"])
-        assert cm._coerce_text_response_detailed(entry, "2") == ("B", None)
+        assert cm._coerce_text_response(entry, "2") == "B"
 
     def test_single_select_regression_label(self):
         from tools import clarify_gateway as cm
         entry = cm.register("s4", "sk", "Q?", ["A", "B"])
-        assert cm._coerce_text_response_detailed(entry, "b") == ("B", None)
+        assert cm._coerce_text_response(entry, "b") == "B"
 
 
 class TestNativeRejectClassification:
@@ -389,7 +390,7 @@ class TestNativeRejectClassification:
         value, reason = cm._coerce_text_response_detailed(entry, "99")
         assert value is None
         assert reason == "invalid_selection"
-        assert cm.attempt_text_response("ms-oor", "99") == (
+        assert cm.attempt_text_response_for_session("sk-ms", "99") == (
             cm.TEXT_REJECTED_SELECTION
         )
         pending = cm.get_pending_for_session("sk-ms", include_choice_prompts=True)
@@ -405,7 +406,7 @@ class TestNativeRejectClassification:
         value, reason = cm._coerce_text_response_detailed(entry, "1,99")
         assert value is None
         assert reason == "invalid_selection"
-        assert cm.attempt_text_response("ms-bad", "nope,nope") == (
+        assert cm.attempt_text_response_for_session("sk-ms2", "nope,nope") == (
             cm.TEXT_REJECTED_SELECTION
         )
         pending = cm.get_pending_for_session("sk-ms2", include_choice_prompts=True)
@@ -423,8 +424,8 @@ class TestNativeRejectClassification:
         )
         assert value is None
         assert reason == "prose"
-        assert cm.attempt_text_response(
-            "ms-prose", "just checking the visual UI, no need to pass any data",
+        assert cm.attempt_text_response_for_session(
+            "sk-ms3", "just checking the visual UI, no need to pass any data",
         ) == cm.TEXT_REJECTED_PROSE
 
     def test_single_select_out_of_range_is_invalid_selection(self):
@@ -434,7 +435,7 @@ class TestNativeRejectClassification:
         value, reason = cm._coerce_text_response_detailed(entry, "9")
         assert value is None
         assert reason == "invalid_selection"
-        assert cm.attempt_text_response("ss-oor", "9") == (
+        assert cm.attempt_text_response_for_session("sk-ss", "9") == (
             cm.TEXT_REJECTED_SELECTION
         )
 

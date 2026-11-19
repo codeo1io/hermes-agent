@@ -14,8 +14,6 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 from tools.bot_desktop import browser, lease, runtime as desktop
 from tools.computer_use import tool as cu
 from tools.computer_use_tool import registry
-from tests.bot_desktop_lease import reset_lease
-from tests.computer_use_fakes import NoopBackend, reset_backend
 
 
 @contextmanager
@@ -60,7 +58,7 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(browser, "executable", lambda: None)
     created = []
 
-    class Backend(NoopBackend):
+    class Backend(cu._NoopBackend):
         def __init__(self, mode):
             super().__init__()
             self.stopped = False
@@ -78,11 +76,11 @@ def runtime(tmp_path, monkeypatch):
             assert not self.stopped, "teardown ran during dispatch"
             return [{"name": str(created.index(self))}]
 
-    reset_backend()
+    cu.reset_backend_for_tests()
     monkeypatch.setattr(cu, "_new_backend", Backend)
     yield homes, created
-    reset_backend()
-    reset_lease()
+    cu.reset_backend_for_tests()
+    lease._reset_for_tests()
 
 
 @pytest.mark.parametrize("pause_at", ["after_lookup", "before_acquire"])
