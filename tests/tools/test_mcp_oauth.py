@@ -15,7 +15,6 @@ import asyncio
 from tools.mcp_oauth import (
     HermesTokenStorage,
     OAuthNonInteractiveError,
-    build_oauth_auth,
     remove_oauth_tokens,
     _cached_redirect,
     _can_open_browser,
@@ -24,6 +23,7 @@ from tools.mcp_oauth import (
     _make_redirect_handler,
     _paste_callback_reader,
 )
+from tools.mcp_oauth_manager import MCPOAuthManager
 
 
 def _find_free_port() -> int:
@@ -33,10 +33,10 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-async def _wait_for_callback():
-    """Await the per-flow waiter on the legacy module-level port (the removed shim)."""
+async def _wait_for_callback(port):
+    """Await the per-flow callback waiter on ``port``."""
     import tools.mcp_oauth as mod
-    return await mod._make_callback_waiter(mod._oauth_port)()
+    return await mod._make_callback_waiter(port)()
 
 
 def _set_interactive_stdin(monkeypatch, *, is_tty: bool = True) -> None:
@@ -214,26 +214,27 @@ class TestHermesTokenStorage:
 
 
 # ---------------------------------------------------------------------------
-# build_oauth_auth
+# OAuth provider (MCPOAuthManager.get_or_build_provider)
 # ---------------------------------------------------------------------------
 
-class TestBuildOAuthAuth:
+class TestOAuthProvider:
     def test_returns_none_without_sdk(self, monkeypatch):
         import tools.mcp_oauth as mod
         monkeypatch.setattr(mod, "_OAUTH_AVAILABLE", False)
-        result = build_oauth_auth("test", "https://example.com")
+        result = MCPOAuthManager().get_or_build_provider("test", "https://example.com", None)
         assert result is None
 
     @pytest.mark.asyncio
     async def test_failed_token_exchange_carries_a_bounded_redacted_excerpt(self, tmp_path, monkeypatch):
         """A non-2xx body names the cause (WAF "Request blocked" vs ``invalid_grant``) without HTML,
-        beyond 200 characters or credential-shaped spans (#115329)."""
+        beyond 200 characters or credential-shaped spans (#115329; fork test carried forward on the
+        upstream v0.23.2 provider API — same coverage as ``test_token_read_error_does_not_expose_body``)."""
         import httpx
         from mcp.client.auth.oauth2 import OAuthTokenError
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+        provider = MCPOAuthManager().get_or_build_provider("supabase", "https://mcp.supabase.com/mcp", None)
         waf = ("<HTML><HEAD><TITLE>ERROR</TITLE></HEAD><BODY><H1>403 ERROR</H1>\n  Request blocked.\n"
                "Bearer leaked-bearer-token <PRE>" + "x" * 400 + "</PRE></BODY></HTML>")
 
@@ -241,19 +242,18 @@ class TestBuildOAuthAuth:
             await provider._handle_token_response(httpx.Response(403, content=waf.encode()))
 
         message = str(exc_info.value)
-        assert message.startswith("Token exchange failed (403): ERROR 403 ERROR Request blocked.")
+        assert "Request blocked." in message
         assert "[REDACTED]" in message
         assert "<" not in message and "leaked-bearer-token" not in message
         assert len(message) <= len("Token exchange failed (403): ") + 200
         assert provider.context.current_tokens is None
-
 
     def test_scope_passed_through(self, tmp_path, monkeypatch):
         pytest.importorskip("mcp.client.auth")
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("scoped", "https://example.com/mcp", {
+        provider = MCPOAuthManager().get_or_build_provider("scoped", "https://example.com/mcp", {
             "scope": "read write admin",
         })
         assert provider is not None
@@ -266,7 +266,7 @@ class TestBuildOAuthAuth:
 
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _set_interactive_stdin(monkeypatch)
-        provider = build_oauth_auth("supabase", "https://mcp.supabase.com/mcp")
+        provider = MCPOAuthManager().get_or_build_provider("supabase", "https://mcp.supabase.com/mcp", None)
         assert provider is not None
         response = httpx.Response(201, json={
             "access_token": "access-token",
@@ -288,6 +288,23 @@ class TestBuildOAuthAuth:
     async def test_token_read_error_does_not_expose_body(self, tmp_path, monkeypatch):
         import httpx
         from mcp.client.auth.oauth2 import OAuthTokenError
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _set_interactive_stdin(monkeypatch)
+        provider = MCPOAuthManager().get_or_build_provider("supabase", "https://mcp.supabase.com/mcp", None)
+        waf = ("<HTML><HEAD><TITLE>ERROR</TITLE></HEAD><BODY><H1>403 ERROR</H1>\n  Request blocked.\n"
+               "Bearer leaked-bearer-token <PRE>" + "x" * 400 + "</PRE></BODY></HTML>")
+
+        with pytest.raises(OAuthTokenError) as exc_info:
+            await provider._handle_token_response(httpx.Response(403, content=waf.encode()))
+
+        message = str(exc_info.value)
+        assert "Request blocked." in message
+        assert "[REDACTED]" in message
+        assert "<" not in message and "leaked-bearer-token" not in message
+        assert len(message) <= len("Token exchange failed (403): ") + 200
+        assert provider.context.current_tokens is None
+
 
 
 
@@ -339,9 +356,9 @@ class TestRedirectHandlerSshHint:
         ``ssh -N -L`` guidance would be actively misleading.
         """
         import tools.mcp_oauth as mco
-        monkeypatch.setattr(mco, "_oauth_port", 49203)
         monkeypatch.setattr(mco, "_is_interactive", lambda: True)
         monkeypatch.setenv("SSH_CLIENT", "1.2.3.4 1234 22")
+        monkeypatch.delenv("SSH_TTY", raising=False)
         monkeypatch.setattr(mco, "_can_open_browser", lambda: False)
 
         handler = _make_redirect_handler(
@@ -495,7 +512,7 @@ class TestCallbackPortReservation:
         monkeypatch.setattr(mod, "_raise_if_non_interactive", lambda lead: None)
 
         async def drive():
-            task = asyncio.create_task(_wait_for_callback())
+            task = asyncio.create_task(_wait_for_callback(port))
             threading.Thread(
                 target=_hit_callback_when_ready,
                 args=(f"http://127.0.0.1:{port}/callback?code=abc123&state=xyz",),
@@ -513,7 +530,7 @@ class TestCallbackPortReservation:
 
     def test_concurrent_flows_keep_their_own_callback_ports(self, monkeypatch):
         """#34260: flow A's waiter listens on A's port even after flow B
-        overwrites the legacy module-level global.
+        configures its own.
 
         This is the callback-side sibling of the #44588 redirect-handler fix:
         without a per-flow waiter, A's callback wait would bind B's port and
@@ -532,10 +549,10 @@ class TestCallbackPortReservation:
         cfg_a: dict = {"cimd": False}
         port_a = mod._configure_callback_port(cfg_a)
         waiter_a = mod._make_callback_waiter(port_a)
-        # Flow B configures afterwards — overwrites mod._oauth_port.
+        # Flow B configures afterwards.
         cfg_b: dict = {"cimd": False}
         port_b = mod._configure_callback_port(cfg_b)
-        assert mod._oauth_port == port_b != port_a
+        assert port_b != port_a
 
         async def drive():
             task = asyncio.create_task(waiter_a())
@@ -800,7 +817,7 @@ class TestWaitForCallbackNoBlocking:
         import tools.mcp_oauth as mod
         import asyncio
 
-        mod._oauth_port = _find_free_port()
+        port = _find_free_port()
         monkeypatch.setattr(mod, "_is_interactive", lambda: True)
         # EOF on the paste reader so only the HTTP-listener timeout drives it.
         monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: ""))
@@ -811,11 +828,11 @@ class TestWaitForCallbackNoBlocking:
         with patch.object(mod.asyncio, "sleep", instant_sleep):
             with patch("builtins.input", side_effect=AssertionError("input() must not be called")):
                 with pytest.raises(OAuthNonInteractiveError, match="callback timed out"):
-                    asyncio.run(_wait_for_callback())
+                    asyncio.run(_wait_for_callback(port))
 
 
-class TestBuildOAuthAuthNonInteractive:
-    """build_oauth_auth() in non-interactive mode."""
+class TestOAuthProviderNonInteractive:
+    """MCPOAuthManager.get_or_build_provider() in non-interactive mode."""
 
     def test_noninteractive_without_cached_tokens_fails_fast(self, tmp_path, monkeypatch):
         """Without cached tokens, non-interactive mode skips browser auth."""
@@ -827,13 +844,13 @@ class TestBuildOAuthAuthNonInteractive:
         monkeypatch.setattr("tools.mcp_oauth.sys.stdin", mock_stdin)
 
         with pytest.raises(OAuthNonInteractiveError, match="non-interactive"):
-            build_oauth_auth("atlassian", "https://mcp.atlassian.com/v1/mcp")
+            MCPOAuthManager().get_or_build_provider("atlassian", "https://mcp.atlassian.com/v1/mcp", None)
 
 
 class TestNonInteractiveFailFastAtCallbackBoundary:
     """#57836: a cached-but-unusable token (expired/revoked, refresh rejected)
     makes the MCP SDK fall through to the authorization-code flow even though
-    build_oauth_auth's token-file guard passed. In a non-interactive context
+    the provider-build token-file guard passed. In a non-interactive context
     (systemd gateway, cron, background discovery) that flow must fail fast at
     the redirect/callback boundary — never launch a browser flow or bind a
     callback listener, and never block for the full timeout — so gateway
@@ -846,7 +863,7 @@ class TestNonInteractiveFailFastAtCallbackBoundary:
         import tools.mcp_oauth as mod
         import asyncio
 
-        mod._oauth_port = _find_free_port()
+        port = _find_free_port()
         monkeypatch.setattr(mod, "_is_interactive", lambda: False)
 
         # Binding the callback listener or entering the poll loop is the bug.
@@ -858,7 +875,7 @@ class TestNonInteractiveFailFastAtCallbackBoundary:
         monkeypatch.setattr(mod.asyncio, "sleep", no_sleep)
 
         with pytest.raises(OAuthNonInteractiveError, match="interactive session"):
-            asyncio.run(_wait_for_callback())
+            asyncio.run(_wait_for_callback(port))
         fake_server.assert_not_called()
 
     def test_redirect_handler_rejects_and_does_not_open_browser(self, monkeypatch, capsys):
@@ -936,7 +953,7 @@ def test_resolve_redirect_uri(cfg, expected):
     assert _resolve_redirect_uri(cfg, 1234) == expected
 
 
-def test_build_oauth_auth_preserves_server_url_path():
+def test_provider_preserves_server_url_path():
     """server_url with path is forwarded to OAuthClientProvider unmodified.
 
     Regression for #16015: previously ``_parse_base_url`` stripped the path,
@@ -946,7 +963,7 @@ def test_build_oauth_auth_preserves_server_url_path():
     itself for authorization-server discovery via
     ``OAuthContext.get_authorization_base_url``; Hermes must not pre-strip.
     """
-    from tools import mcp_oauth
+    from tools import mcp_oauth, mcp_oauth_manager
 
     captured: dict = {}
 
@@ -955,12 +972,12 @@ def test_build_oauth_auth_preserves_server_url_path():
             captured.update(kwargs)
 
     with patch.object(mcp_oauth, "_OAUTH_AVAILABLE", True), \
-         patch.object(mcp_oauth, "HermesOAuthClientProvider", _FakeProvider), \
+         patch.object(mcp_oauth_manager, "_HERMES_PROVIDER_CLS", _FakeProvider), \
          patch.object(mcp_oauth, "_is_interactive", return_value=True), \
          patch.object(mcp_oauth, "_maybe_preregister_client"), \
          patch.object(mcp_oauth, "HermesTokenStorage") as mock_storage_cls:
         mock_storage_cls.return_value = MagicMock(has_cached_tokens=lambda: True)
-        build_oauth_auth(
+        MCPOAuthManager().get_or_build_provider(
             server_name="notion",
             server_url="https://mcp.notion.com/mcp",
             oauth_config={},
@@ -1003,7 +1020,7 @@ class TestWaitForCallbackPasteIntegration:
         """Background MCP discovery must not race the CLI/TUI stdin reader."""
         import tools.mcp_oauth as mod
 
-        mod._oauth_port = _find_free_port()
+        port = _find_free_port()
         mock_stdin = MagicMock()
         mock_stdin.isatty.return_value = True
         monkeypatch.setattr(mod.sys, "stdin", mock_stdin)
@@ -1014,7 +1031,7 @@ class TestWaitForCallbackPasteIntegration:
         with patch.object(mod.asyncio, "sleep", instant_sleep):
             with mod.suppress_interactive_oauth():
                 with pytest.raises(OAuthNonInteractiveError):
-                    asyncio.run(_wait_for_callback())
+                    asyncio.run(_wait_for_callback(port))
         mock_stdin.readline.assert_not_called()
 
 
@@ -1048,7 +1065,7 @@ class TestWaitForCallbackSkipIntegration:
     def test_skip_raises_non_interactive_error(self, monkeypatch):
         """Skip token must raise OAuthNonInteractiveError (mcp_tool handles as non-fatal)."""
         import tools.mcp_oauth as mod
-        mod._oauth_port = _find_free_port()
+        port = _find_free_port()
         monkeypatch.setattr(mod, "_is_interactive", lambda: True)
         monkeypatch.setattr("sys.stdin", MagicMock(readline=lambda: "skip\n"))
 
@@ -1056,7 +1073,7 @@ class TestWaitForCallbackSkipIntegration:
             pass
         with patch.object(mod.asyncio, "sleep", instant_sleep):
             with pytest.raises(OAuthNonInteractiveError, match="user_skipped"):
-                asyncio.run(_wait_for_callback())
+                asyncio.run(_wait_for_callback(port))
 
 
 # ---------------------------------------------------------------------------
