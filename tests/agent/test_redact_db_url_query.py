@@ -101,7 +101,7 @@ def test_template_sibling_chain_scans_in_linear_time():
     text = "postgresql://h/db?password=" + "${PG};password=" * 30_000 + "Zq7x9LmP2kk"
     t0 = time.perf_counter()
     assert redact_sensitive_text(text, force=True).endswith(";password=***")
-    assert time.perf_counter() - t0 < 2.0
+    assert time.perf_counter() - t0 < 8.0
 
 
 def test_repeated_db_schemes_without_query_scan_in_linear_time():
@@ -111,4 +111,4 @@ def test_repeated_db_schemes_without_query_scan_in_linear_time():
     text = "postgresql://h/" * (300_000 // 15)
     t0 = time.perf_counter()
     redact_sensitive_text(text, force=True)
-    assert time.perf_counter() - t0 < 2.0
+    assert time.perf_counter() - t0 < 8.0

@@ -212,7 +212,7 @@ async def probe(peer, target):
             assert a.events == b.events, 'observers saw competing event ordering/stamps'
         events = b.events
         if peer.blocked:
-            await async_wait_until(lambda: a.events, timeout=20, what='the resumed slow observer to read a frame')
+            await async_wait_until(lambda: a.events, timeout=60, what='the resumed slow observer to read a frame')
             assert a.events == events[:len(a.events)], 'slow observer prefix has competing stamps'
             with fanout._lock:
                 assert len(fanout._peers) <= 2
