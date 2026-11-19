@@ -16,6 +16,13 @@ _MARKER = "[CRON_EVIDENCE]"
 # Exact gateway final-response wrapper observed on a SHA-valid canonical execution.
 # Only this bounded, literal prefix is permitted; arbitrary prose remains invalid.
 _KNOWN_GATEWAY_PREAMBLE = "All work verified and checkpointed. Final response:"
+# Exact, observed production wrapper from execution 0e4484a820dd4e77a58d146ef3241fb9.
+# Do not accept arbitrary prose as a wrapper: identity and SHA checks are necessary
+# but not a substitute for an explicit leading evidence marker.
+_KNOWN_INCIDENT_PREAMBLE = (
+    "All gates closed: merge ✅, post-merge main CI **SUCCESS** at "
+    "`0639f3c847` ✅, deploy ✅, E2E verification ✅, receipts ✅, worktrees cleaned ✅."
+)
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _ALLOWED_KINDS = frozenset({"code_change", "runtime_repair", "validated_recovery"})
@@ -59,6 +66,38 @@ def _validate_artifacts(
             raise ValueError("artifact predates this execution")
 
 
+def _canonical_pair(path: Path) -> str | None:
+    """Machine-authored marker carrier published by the completion-stamp tool.
+
+    Bound to the exact execution by filename and written atomically at
+    receipt-mint time, so its position guarantee is structural rather than
+    model-authored: the stamp tool (nrm-executor-completion-stamp.py, deployed
+    2026-10-31) emits ``<execution_id>.response.md`` with the marker+digest as
+    lines 1-2. Returns the digest when the canonical file carries the pair.
+    """
+    try:
+        raw = _safe_file(path, path.parent, _MAX_RECEIPT_BYTES)
+    except (OSError, ValueError):
+        return None
+    # Byte-exact verification against the stamp tool's carrier format. The
+    # stamp tool writes exactly b"[CRON_EVIDENCE]\nsha256:<64 hex>\n" with LF
+    # line endings only. A text-level parse (decode + splitlines + strip)
+    # normalizes CRLF/CR and recognizes Unicode line separators, admitting
+    # carriers the stamp tool could never emit; those must fail closed.
+    prefix = b"[CRON_EVIDENCE]\nsha256:"
+    if not raw.startswith(prefix) or not raw.endswith(b"\n"):
+        return None
+    digest_line = raw[len(prefix):-1]
+    if len(digest_line) != 64 or any(
+        chr(b) not in "0123456789abcdef" for b in digest_line
+    ):
+        return None
+    try:
+        return digest_line.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+
 def validate_completion_evidence(
     job: dict, response: str, execution_id: str, *, claimed_at_epoch: float | None = None,
 ) -> str | None:
@@ -79,16 +118,27 @@ def validate_completion_evidence(
         if not root.is_absolute() or root == Path("/"):
             raise ValueError("completion evidence root must be an absolute directory")
         lines = (response or "").splitlines()
-        if lines and lines[0] == _KNOWN_GATEWAY_PREAMBLE:
+        if lines and lines[0] in (_KNOWN_GATEWAY_PREAMBLE, _KNOWN_INCIDENT_PREAMBLE):
             lines = lines[1:]
             if lines and lines[0] == "":
                 lines = lines[1:]
-        if len(lines) < 2 or lines[0].strip() != _MARKER:
+        claimed = None
+        if len(lines) >= 2 and lines[0] == _MARKER:
+            prefix = "sha256:"
+            if lines[1].startswith(prefix):
+                candidate = lines[1][len(prefix):].strip()
+                if len(candidate) == 64 and all(
+                    ch in "0123456789abcdef" for ch in candidate
+                ):
+                    claimed = candidate
+        if claimed is None:
+            # Structural carrier: the completion-stamp tool publishes a
+            # machine-authored <execution_id>.response.md bound to this exact
+            # execution. Prose shape in the model's response cannot break it,
+            # and it cannot be minted for any other execution.
+            claimed = _canonical_pair(root / f"{execution_id}.response.md")
+        if claimed is None:
             raise ValueError("missing explicit completion evidence marker")
-        prefix = "sha256:"
-        if not lines[1].startswith(prefix):
-            raise ValueError("missing receipt digest")
-        claimed = lines[1][len(prefix):].strip()
         if len(claimed) != 64 or any(ch not in "0123456789abcdef" for ch in claimed):
             raise ValueError("invalid receipt digest")
         receipt_path = root / f"{execution_id}.json"

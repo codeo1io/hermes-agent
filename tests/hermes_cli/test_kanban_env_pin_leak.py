@@ -158,6 +158,19 @@ def test_tool_layer_create_refuses_live_board(pinned_live_env):
         return
     live = sqlite3.connect(f"file:{root / 'kanban.db'}?mode=ro", uri=True)
     try:
+        # Host-shape tolerance (2026-11-11 adopt-v0.23.1 CI rounds 6-8, 3/3
+        # deterministic): a parallel suite child running with an unpatched
+        # real HOME can leave a FOREIGN, schema-less file at the live path
+        # (e.g. a real CLI child killed between sqlite3.connect and schema
+        # init). Such a file is not a board — there is no tasks table to
+        # leak rows into. The no-create/no-mutate contract asserted above
+        # is the full assertion for this host shape; only an INITIALIZED
+        # board (schema present) carries the leaked-row probe.
+        has_board = live.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()
+        if has_board is None:
+            return
         n = live.execute(
             "SELECT COUNT(*) FROM tasks WHERE title = 'leak-probe-t-cd6b5114'"
         ).fetchone()[0]

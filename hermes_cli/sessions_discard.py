@@ -16,7 +16,7 @@ async def _resume(client, name):
     from hermes_cli.gateway_client import GatewayClientError
     for key in ("session_id", "title"):
         try:
-            return await client.rpc("session.resume", **{key: name})
+            return await client.rpc("session.resume", **{key: name, "omit_messages": True})
         except GatewayClientError as exc:
             if str(exc) != "not_found":
                 raise

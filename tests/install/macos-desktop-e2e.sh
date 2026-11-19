@@ -94,6 +94,10 @@ ok()   { printf '  OK %s\n' "$*"; }
 # 0 so the chart shows `known [n]`; any mismatch re-fails unchanged.
 fail() {
   printf 'E2E ASSERTION FAILED: %s\n' "$*" >&2
+  # The checked update hands this exact line to the known-failure classifier
+  # (upstream v0.22.6). Redundant with the in-fail classification below; kept
+  # so FAILURE_FILE consumers see the assertion even when classification is off.
+  [ -z "${FAILURE_FILE:-}" ] || printf 'E2E ASSERTION FAILED: %s\n' "$*" > "$FAILURE_FILE"
   if [ -n "${HERMES_E2E_KNOWN_FAILURES:-}" ] && command -v node >/dev/null 2>&1 && [ -f "$STATE" ]; then
     local old_sha phase
     old_sha="$(sed -n 's/^OLD_SHA=//p' "$STATE" 2>/dev/null || true)"

@@ -56,12 +56,54 @@ def test_exact_gateway_final_response_preamble_preserves_valid_receipt(tmp_path)
         assert validate_completion_evidence(job, prefix + separator + response, "exec-abc") is None
 
 
-def test_unrecognized_or_extended_preamble_remains_fail_closed(tmp_path):
+def test_exact_incident_summary_before_marker_preserves_valid_receipt(tmp_path):
+    # Production incident 0e4484a8: allow only the literal observed summary.
+    job, _, _, _, response = _case(tmp_path)
+    lead = (
+        "All gates closed: merge ✅, post-merge main CI **SUCCESS** at "
+        "`0639f3c847` ✅, deploy ✅, E2E verification ✅, receipts ✅, worktrees cleaned ✅.\n\n"
+    )
+    assert validate_completion_evidence(job, lead + response, "exec-abc") is None
+
+
+def test_arbitrary_summary_or_whitespace_before_marker_fails_closed(tmp_path):
+    job, _, _, _, response = _case(tmp_path)
+    for lead in (
+        "Short status line.\n",
+        "All gates closed: merge, post-merge CI, deploy, E2E verification, receipts.\n\n",
+        "\n",
+        "  ",
+        "All work verified and checkpointed. Final response:\nUnrecognized summary.\n",
+    ):
+        assert "marker" in validate_completion_evidence(job, lead + response, "exec-abc")
+
+
+def test_second_prose_line_before_marker_remains_fail_closed(tmp_path):
+    # Review feedback (issuecomment-6563745902): tolerance must not accept arbitrary
+    # multi-line prose. Two prose lines before the marker = buried marker = rejected.
+    job, _, _, _, response = _case(tmp_path)
+    for lead in (
+        "First summary line.\nSecond summary line.\n\n",
+        "Line one.\nLine two.\nLine three.\n" + response,
+    ):
+        assert "marker" in validate_completion_evidence(job, lead + response, "exec-abc")
+
+
+def test_prose_after_gateway_preamble_line_remains_fail_closed(tmp_path):
+    # An exact gateway wrapper cannot be combined with arbitrary model prose.
     job, _, _, _, response = _case(tmp_path)
     prefix = "All work verified and checkpointed. Final response:"
-    for text in ("Done.\n" + response, prefix + " extra\n" + response,
-                 prefix + "\n\n\n" + response):
-        assert "marker" in validate_completion_evidence(job, text, "exec-abc")
+    assert "marker" in validate_completion_evidence(
+        job, prefix + "\nSummary line.\n" + response, "exec-abc")
+    assert "marker" in validate_completion_evidence(
+        job, prefix + "\nLine one.\nLine two.\n" + response, "exec-abc")
+
+
+def test_marker_buried_deep_in_response_still_fails(tmp_path):
+    # Tolerance is bounded: a marker buried under unbounded prose is not a preamble.
+    job, _, _, _, response = _case(tmp_path)
+    noise = "".join(f"line {i} of report\n" for i in range(12))
+    assert "marker" in validate_completion_evidence(job, noise + response, "exec-abc")
 
 
 def test_bounded_preamble_does_not_waive_receipt_digest(tmp_path):
@@ -147,4 +189,95 @@ def test_scheduler_accepts_identity_bound_receipt(tmp_path, monkeypatch):
     job, _, _, _, response = _case(tmp_path)
     assert _apply_agent_failure_marker(
         job, True, None, response, execution_id="exec-abc"
+    ) == (True, None, False)
+
+
+def test_canonical_response_file_carries_pair_structurally(tmp_path):
+    """The completion-stamp tool's machine-authored <execution_id>.response.md
+    satisfies marker carriage when the model's response prose precedes the pair
+    (position-flexible carrier; bound to this exact execution by filename)."""
+    job, _, _, _, _ = _case(tmp_path)
+    receipt_digest = hashlib.sha256(
+        (tmp_path / "receipts" / "exec-abc.json").read_bytes()
+    ).hexdigest()
+    (tmp_path / "receipts" / "exec-abc.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + receipt_digest + "\n"
+    )
+    prose = "Repair landed end-to-end: PR merged, CI green, deployed.\n\nmore detail\n"
+    assert validate_completion_evidence(job, prose, "exec-abc") is None
+
+
+def test_canonical_carrier_rejects_indented_marker_or_digest(tmp_path):
+    """The stamp tool emits exact first/second lines, never whitespace-padded ones."""
+    job, _, path, _, _ = _case(tmp_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    carrier = path.with_suffix(".response.md")
+    for body in (
+        " [CRON_EVIDENCE]\nsha256:" + digest + "\n",
+        "[CRON_EVIDENCE]\n sha256:" + digest + "\n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + " \n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + "\nInjected third line\n",
+    ):
+        carrier.write_text(body)
+        assert "marker" in validate_completion_evidence(
+            job, "Planning only; no explicit marker", "exec-abc"
+        )
+
+
+def test_canonical_carrier_rejects_noncanonical_line_endings(tmp_path):
+    """The stamp tool emits LF-only bytes; splitlines() normalization must not
+    admit CRLF/CR/vertical-tab/Unicode-separator carriers it could never write."""
+    job, _, path, _, _ = _case(tmp_path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    carrier = path.with_suffix(".response.md")
+    for body in (
+        "[CRON_EVIDENCE]\r\nsha256:" + digest + "\r\n",
+        "[CRON_EVIDENCE]\nsha256:" + digest + "\r\n",
+        "[CRON_EVIDENCE]\vsha256:" + digest + "\v",
+        "[CRON_EVIDENCE]sha256:" + digest + "",
+        "[CRON_EVIDENCE]\nsha256:" + digest,
+    ):
+        carrier.write_bytes(body.encode("utf-8"))
+        assert validate_completion_evidence(
+            job, "Planning only; no explicit marker", "exec-abc"
+        ) is not None
+
+
+def test_canonical_file_wrong_digest_fails_closed(tmp_path):
+    job, _, _, _, _ = _case(tmp_path)
+    (tmp_path / "receipts" / "exec-abc.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + "0" * 64 + "\n"
+    )
+    result = validate_completion_evidence(job, "no pair here", "exec-abc")
+    assert result is not None and "digest mismatch" in result
+
+
+def test_canonical_file_of_other_execution_cannot_vouch(tmp_path):
+    """A canonical file named for a different execution must not satisfy this
+    execution's marker carriage."""
+    job, _, _, _, _ = _case(tmp_path)
+    receipt_digest = hashlib.sha256(
+        (tmp_path / "receipts" / "exec-abc.json").read_bytes()
+    ).hexdigest()
+    (tmp_path / "receipts" / "other-exec.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + receipt_digest + "\n"
+    )
+    assert "marker" in validate_completion_evidence(job, "prose only", "exec-abc")
+
+
+def test_scheduler_accepts_canonical_carrier(tmp_path, monkeypatch):
+    from cron.scheduler import _apply_agent_failure_marker
+    monkeypatch.setattr(
+        "cron.scheduler.get_execution",
+        lambda _id: {"claimed_at": (datetime.now(UTC) - timedelta(seconds=10)).isoformat()},
+    )
+    job, _, _, _, _ = _case(tmp_path)
+    receipt_digest = hashlib.sha256(
+        (tmp_path / "receipts" / "exec-abc.json").read_bytes()
+    ).hexdigest()
+    (tmp_path / "receipts" / "exec-abc.response.md").write_text(
+        "[CRON_EVIDENCE]\nsha256:" + receipt_digest + "\n"
+    )
+    assert _apply_agent_failure_marker(
+        job, True, None, "Summary prose without the pair.", execution_id="exec-abc"
     ) == (True, None, False)

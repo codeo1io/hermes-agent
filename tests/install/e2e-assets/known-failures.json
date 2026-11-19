@@ -103,5 +103,18 @@
     "signatures": ["RuntimeError: desktop packaged renderer is missing or incomplete", "in verify_products"],
     "explanation": "The June tree's desktop packaging emits its renderer without the app.asar.unpacked/dist/index.html product the current read-only source contract requires (source_driver.py verify_products), so every +desktop leg that installs v2026.6.5 fails read-only verification with the same deterministic signature before any update runs. On windows the same failure surfaces through Test-HermesRuns' read-only install assertion with a post-install-gui / post-install-script-desktop wrapper (fix-queue item 339, run 39368643437). The installed tree cannot repair its own historical packaging; the class resolves when a release with the current layout is the OLD sample.",
     "evidence": "https://github.com/codeo1io/hermes-agent/actions/runs/39368643437/job/118451351176"
+
+  },
+  {
+    "id": "macos-june-setup-update-self-lock",
+    "title": "June Hermes-Setup.dmg updater is refused by the v2026.7.30 update lock",
+    "platforms": ["macos"],
+    "commits": ["cc4cab2f592e60a197e796506de9168f74baf3ea"],
+    "cases": [["desktop-installer@latest", "hermes-desktop-app-update"], ["desktop-installer@latest", "open-app-update"]],
+    "errors": ["^E2E ASSERTION FAILED: app-driven update exited 1; transcript above$"],
+    "log": "bootstrap",
+    "signatures": ["bootstrap\\.log: ✗ Another Hermes update is already running \\(PID [0-9]+, started [^\\r\\n]* stage=update", "hermes_bootstrap_lib::update: update stage stage=update state=Failed [^\\r\\n]*Hermes is still running\\. Close all Hermes windows and try the update again\\."],
+    "explanation": "The published June Hermes-Setup.dmg updater writes the update marker with its own PID, then runs the v2026.7.30 checkout's hermes update. That release recognises its orchestrator only through HERMES_UPDATE_HANDOFF_PID, which the June binary predates, so the pre-pull CLI refuses with Another Hermes update is already running. The update target cannot change that loaded code; hermes update from a terminal or re-running the installer recovers.",
+    "evidence": "https://github.com/NousResearch/hermes-agent/actions/runs/41435547785/job/125244635706"
   }
 ]

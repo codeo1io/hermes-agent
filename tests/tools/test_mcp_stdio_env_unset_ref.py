@@ -1,6 +1,7 @@
 """Stdio MCP launch env: an env entry rendered from one unset ``${VAR}`` counts as absent."""
 
 import json
+import os
 import subprocess
 import sys
 from unittest.mock import patch
@@ -12,16 +13,37 @@ PARENT = {"PATH": "/usr/bin:/bin", "TERM": "parent-term", "XDG_CONFIG_HOME": "/p
           "EMPTY": "", "ACTUAL_LITERAL": "${STILL_UNSET}"}
 
 
+def _parent_env(tmp_path) -> dict:
+    """PARENT plus the ``HERMES_HOME`` the spawner contract already mandates.
+
+    ``_build_safe_env`` pins ``HERMES_HOME`` into every stdio child (issue #18594:
+    "the subprocess spawner should pass HERMES_HOME explicitly"), resolving it with
+    ``get_hermes_home()``. With the parent env wiped clean — the very contract under
+    test — that resolver walks the home ladder past the empty env rung to the
+    platform-default home and probes ``<real home>/.hermes/active_profile``
+    (``_warn_profile_fallback_once``). On a host whose account home doubles as a
+    real Hermes root (CI runners on this fork's guarded machines included), the
+    fork's passwd-anchored home-IO tripwire (tests/conftest.py) correctly refuses
+    that probe and the test fails as a hermeticity violation. Pin the rung to the
+    isolated test home — conftest's sandbox when it installed one, else the pytest
+    sandbox — so the parent-env-is-clean contract still runs with every MCP var
+    absent while the ladder answers hermetically (same shape as the ACP fix in
+    248902defc8).
+    """
+    home = os.environ.get("HERMES_HOME", "").strip()
+    return {**PARENT, "HERMES_HOME": home or str(tmp_path)}
+
+
 def _rendered():
     from tools.mcp_tool_config import _interpolate_env_vars
     # Load renders once; connect renders again under the owner's scope.
     return _interpolate_env_vars(_interpolate_env_vars({"command": sys.executable, "env": USER_ENV}))
 
 
-def test_unset_whole_ref_counts_as_absent_and_set_values_pass_verbatim():
+def test_unset_whole_ref_counts_as_absent_and_set_values_pass_verbatim(tmp_path):
     from tools.mcp_tool_config import _build_safe_env
 
-    with patch.dict("os.environ", PARENT, clear=True):
+    with patch.dict("os.environ", _parent_env(tmp_path), clear=True):
         result = _build_safe_env(_rendered()["env"])
 
     assert not {"OPT_DIR", "OPT_ENV", "EMPTY"} & set(result)
@@ -33,15 +55,15 @@ def test_unset_whole_ref_counts_as_absent_and_set_values_pass_verbatim():
     # Unset at load, set (even to its own placeholder text) by connect: the re-render passes it.
     from tools.mcp_tool_config import _interpolate_env_vars
     loaded = _interpolate_env_vars({"FORWARD": "${LATE}"})
-    with patch.dict("os.environ", {**PARENT, "LATE": "${LATE}"}, clear=True):
+    with patch.dict("os.environ", {**_parent_env(tmp_path), "LATE": "${LATE}"}, clear=True):
         assert _build_safe_env(_interpolate_env_vars(loaded))["FORWARD"] == "${LATE}"
 
 
-def test_child_spawned_through_the_sdk_merge_sees_the_documented_env():
+def test_child_spawned_through_the_sdk_merge_sees_the_documented_env(tmp_path):
     from mcp.client.stdio import get_default_environment
     from tools.mcp_tool_transport import _stdio_launch
 
-    with patch.dict("os.environ", PARENT, clear=True):
+    with patch.dict("os.environ", _parent_env(tmp_path), clear=True):
         command, env, _ = _stdio_launch(_rendered())
         child_env = get_default_environment() | env  # what mcp.client.stdio.stdio_client spawns with
     probe = "import json, os; print(json.dumps(dict(os.environ)))"

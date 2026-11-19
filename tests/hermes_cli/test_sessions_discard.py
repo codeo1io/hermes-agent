@@ -50,8 +50,8 @@ async def test_sessions_discard_yes_resolves_every_unknown_admission_with_its_fe
         assert await asyncio.to_thread(run, "--yes") == 0
 
     assert calls == [
-        ("session.resume", {"session_id": "my script session"}),
-        ("session.resume", {"title": "my script session"}),
+        ("session.resume", {"session_id": "my script session", "omit_messages": True}),
+        ("session.resume", {"title": "my script session", "omit_messages": True}),
         ("prompt.resolve_unknown", {"session_id": "local-abc", "admission_id": lost[0], "execution_generation": 4}),
         ("prompt.resolve_unknown", {"session_id": "local-abc", "admission_id": lost[1], "execution_generation": 5}),
     ]

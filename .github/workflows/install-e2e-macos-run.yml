@@ -66,7 +66,7 @@ on:
         type: string
         default: ''
       bundle-arch:
-        description: 'Architecture of the bundled pair: arm64 (macos-15) or x64 (macos-15-intel).'
+        description: 'Architecture of the bundled pair. Only arm64 (macos-15) runs: there is no Intel macOS leg.'
         required: false
         type: string
         default: arm64
@@ -134,7 +134,7 @@ jobs:
 
       - name: Install locked chat driver dependencies
         shell: bash
-        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+        run: just js-install-tests
 
       - name: Start screen recording
         uses: ./.github/actions/e2e-screen-record
@@ -178,6 +178,7 @@ jobs:
         # A classified install-phase known failure means nothing landed; skip
         # the update phase (the receipt cell already tells the story).
         if: steps.receipt.outputs.classified != '1'
+        id: update
         run: |
           set -euo pipefail
           tests/install/macos-desktop-e2e.sh --phase update \
@@ -213,6 +214,17 @@ jobs:
         with:
           name: install-e2e-known-${{ steps.known.outputs.id }}--${{ inputs.leg-id }}
           path: ${{ steps.known.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # Only the classifier's receipt (tests/install/KNOWN_FAILURES.md) turns
+      # a failed update into a non-red known-failure cell in the report.
+      - name: Upload known-failure receipt
+        if: steps.update.outputs.known_failure != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: install-e2e-known-${{ steps.update.outputs.known_failure }}--${{ inputs.leg-id }}
+          path: ${{ runner.temp }}/e2e-logs/known-failure.json
           if-no-files-found: error
           retention-days: 14
 
@@ -256,11 +268,24 @@ jobs:
   bundled-e2e:
     name: packaged bundle (open-app-update)
     if: inputs.install-method == 'packaged-app' && inputs.update-method == 'open-app-update'
-    runs-on: ${{ inputs.bundle-arch == 'x64' && 'macos-15-intel' || 'macos-15' }}
+    # Not macos-15: v0.22.0 gives Squirrel.Mac 120 s to unpack and verify an update, and macos-15 takes 112-149 s.
+    runs-on: macos-15  # fork CI policy: GitHub-hosted (upstream: blacksmith-12vcpu-macos-15)
     timeout-minutes: ${{ inputs.timeout-minutes }}
 
     steps:
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+      # The runner is Apple Silicon and no Intel macOS bundle ships, so an x64
+      # pair would only reach app launch (or Rosetta) before failing.
+      - name: Reject an unsupported bundle architecture
+        shell: bash
+        env:
+          BUNDLE_ARCH: ${{ inputs.bundle-arch }}
+        run: |
+          if [ "$BUNDLE_ARCH" != arm64 ]; then
+            echo "::error::unsupported macOS bundle architecture '$BUNDLE_ARCH': only arm64 bundles are built and tested"
+            exit 1
+          fi
+
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a  # v7.0.1 (fork policy; upstream: useblacksmith/checkout)
         with:
           ref: ${{ inputs.commit || github.sha }}
 
@@ -275,7 +300,7 @@ jobs:
 
       - name: Install locked chat driver dependencies
         shell: bash
-        run: npm ci --workspace tests-js --include-workspace-root --omit=dev --ignore-scripts --no-audit --no-fund
+        run: just js-install-tests
 
       - name: Start screen recording
         uses: ./.github/actions/e2e-screen-record
