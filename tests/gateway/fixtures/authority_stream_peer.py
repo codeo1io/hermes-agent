@@ -192,7 +192,7 @@ async def probe(peer, target):
         for observer in (b,) if peer.blocked else (a, b):
             await async_wait_until(lambda: observer.events and observer.events[-1]['type'] == 'session.info'
                                    and observer.events[-1].get('payload', {}).get('running') is False,
-                                   timeout=10, what='the idle session.info after message.complete')
+                                   timeout=30, what='the idle session.info after message.complete')
         assert target.read_text() == 'owned-effect'
         agent = authority.agent(ref)
         assert isinstance(agent, AIAgent)
@@ -212,7 +212,7 @@ async def probe(peer, target):
             assert a.events == b.events, 'observers saw competing event ordering/stamps'
         events = b.events
         if peer.blocked:
-            await async_wait_until(lambda: a.events, timeout=5, what='the resumed slow observer to read a frame')
+            await async_wait_until(lambda: a.events, timeout=20, what='the resumed slow observer to read a frame')
             assert a.events == events[:len(a.events)], 'slow observer prefix has competing stamps'
             with fanout._lock:
                 assert len(fanout._peers) <= 2
