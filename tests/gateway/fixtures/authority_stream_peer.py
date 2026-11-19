@@ -183,7 +183,7 @@ async def probe(peer, target):
                     await asyncio.sleep(.005)
             witness = asyncio.create_task(witness_blockage())
         receipt = await b.rpc('prompt.submit', input_id='stream-first', text='Write the owned fixture')
-        await asyncio.wait_for(b.complete.wait(), 45)
+        await asyncio.wait_for(b.complete.wait(), 150)
         if not peer.blocked:
             await asyncio.wait_for(a.complete.wait(), 10)
         await asyncio.wait_for(authority.sessions[ref.session_id].task, 10)

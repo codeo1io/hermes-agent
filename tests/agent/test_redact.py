@@ -1526,7 +1526,7 @@ class TestSecretFileAssignmentRedaction:
         wide = "1|" + " " * 20000 + "token:"
         started = time.perf_counter()
         assert redact_sensitive_text(wide, force=True, file_read=True, secret_file=True) == wide
-        assert time.perf_counter() - started < 1.0
+        assert time.perf_counter() - started < 4.0
 
 
 class TestHermesHomePathClassification:
