@@ -45,7 +45,12 @@ class ModelPeer(BaseHTTPRequestHandler):
         else:
             if self.server.blocked:
                 # Incompressible data and healthy-reader pacing fill ONLY the stalled peer.
-                deltas += [{'content': f'CHUNK_{i:04d}_' + os.urandom(2048).hex()} for i in range(330)]
+                # 96 incompressible chunks (~190KB): far above every plausible socket
+                # buffer, so the boundary/backpressure discrimination holds, while the
+                # reduced drip keeps the whole blocked run inside the call-site
+                # subprocess timeout=200 even on a loaded hosted runner (330 chunks
+                # exceeded it there; 2026-11-20 main-lane red).
+                deltas += [{'content': f'CHUNK_{i:04d}_' + os.urandom(2048).hex()} for i in range(96)]
             deltas += [{'content': 'STREAM_'}, {'content': 'FINISHED'}]
         for delta in deltas + [{}]:
             frame = {'id': 'local-stream', 'object': 'chat.completion.chunk', 'created': 1,
@@ -212,7 +217,10 @@ async def probe(peer, target):
             assert a.events == b.events, 'observers saw competing event ordering/stamps'
         events = b.events
         if peer.blocked:
-            await async_wait_until(lambda: a.events, timeout=180, what='the resumed slow observer to read a frame')
+            # 120s: must stay inside the call-site subprocess timeout=200 (180
+            # collided with it on a loaded runner); the observer's first frame
+            # arrives well before this when the drip is bounded.
+            await async_wait_until(lambda: a.events, timeout=120, what='the resumed slow observer to read a frame')
             assert a.events == events[:len(a.events)], 'slow observer prefix has competing stamps'
             with fanout._lock:
                 assert len(fanout._peers) <= 2
