@@ -13,11 +13,11 @@
 
 ## Open items
 
-### Reassess test coverage using tracked source paths
+### Add test coverage for 20 untested module(s)
 - id: `rm-002` | track: reliability | priority: 100.0 | status: candidate
-- signals: reliability.no_tests:.github/scripts/run-workspace-checks.mjs
-- acceptance: Recompute the untested-module cohort from git-tracked source on a clean checkout, excluding ignored worktrees and generated outputs; verify each candidate genuinely lacks coverage before adding tests. Never count scratch copies as independent untested modules.
-- evidence: clean tracked-source inventory, reproducible test mapping and targeted test output
+- signals: reliability.no_tests:acp_adapter/__main__.py, reliability.no_tests:acp_adapter/elicitation.py, reliability.no_tests:acp_adapter/gateway_reply.py, reliability.no_tests:agent/agent_init_fallback.py, reliability.no_tests:agent/agent_init_ollama.py (+15 more)
+- acceptance: Every module in ['acp_adapter/__main__.py', 'acp_adapter/elicitation.py', 'acp_adapter/gateway_reply.py', 'agent/agent_init_fallback.py', 'agent/agent_init_ollama.py', 'agent/agent_init_params.py', 'agent/api_request_hooks.py', 'agent/auxiliary_async_rebuild.py', 'agent/auxiliary_call_outcome.py', 'agent/auxiliary_codex_response.py', 'agent/auxiliary_custom_credentials.py', 'agent/auxiliary_fallback_recovery.py', 'agent/auxiliary_health.py', 'agent/auxiliary_local_runtime.py', 'agent/auxiliary_openai_url.py', 'agent/auxiliary_plugin_oauth.py', 'agent/auxiliary_profile_gates.py', 'agent/auxiliary_rate_limit_backoff.py', 'agent/bedrock_service_tiers.py', 'agent/cache_bounds.py'] has a corresponding test file with at least one passing test
+- evidence: full suite green (python -m pytest -q) at HEAD; conductor validation digest validation:v1:<sha> recorded in the shipping PR
 
 ### Restore main's required CI checks to green
 - id: `rm-078` | track: reliability | priority: 100.0 | status: candidate
@@ -34,11 +34,11 @@
 - acceptance: (1) the engines contract is re-pointed at pm's node provisioning (or install.sh regains gates for every engines arm) and tests-js/engines-satisfiable.test.ts passes from a clean checkout without network; (2) the JS & TS lane installs libx11-dev/libxi-dev (or otherwise compiles/skips the x11 monitor) and is green on a main push run
 - evidence: campaign-recorded in hermes-agent ROADMAP.md
 
-### Refactor verified tracked complexity hotspots
+### Refactor 20 high-complexity function(s)
 - id: `rm-001` | track: reliability | priority: 90.0 | status: candidate
-- signals: reliability.complexity_hot:agent/auxiliary_client.py::L1
-- acceptance: Recompute branch complexity from tracked source files only, exclude ignored web_dist bundles, then characterize and refactor a verified hotspot without changing behavior.
-- evidence: clean tracked-source complexity report, characterization tests and focused validation
+- signals: reliability.complexity_hot:apps/desktop/electron/main.ts::L1390, reliability.complexity_hot:apps/desktop/electron/main.ts::L1390, reliability.complexity_hot:apps/desktop/electron/main.ts::L1443, reliability.complexity_hot:apps/desktop/electron/main.ts::L1457, reliability.complexity_hot:apps/desktop/electron/main.ts::L1479 (+15 more)
+- acceptance: Each flagged function is decomposed below the branch threshold with behavior locked by characterization tests
+- evidence: ast-based branch-count check passes at HEAD (full suite green; conductor validation digest validation:v1:<sha> recorded in the shipping PR)
 
 ### Guard the roadmap render to tracked signals
 - id: `rm-081` | track: reliability | priority: 90.0 | status: candidate
@@ -77,7 +77,6 @@
 
 ## Closed items
 
-- `rm-006` Port skills.auto_load from upstream — superseded
 - `rm-007` Parameterize the native vision embed budget — superseded
 - `rm-008` Refresh video generation model families — superseded
 - `rm-009` Auto-install catalog-listed memory providers named in config — superseded
@@ -97,5 +96,6 @@
 - `rm-024` Remove the dead as_exclusive_end parameter from _parse_iso_bound — superseded
 - `rm-025` Document deliver:api_server in the cron user docs — superseded
 - `rm-027` Triage the pristine-baseline full-suite failure and flake ledger — superseded
+- `rm-088` Refresh stale top-level documentation — done
 
 <!-- managed by hermes-roadmap render; do not edit by hand -->
