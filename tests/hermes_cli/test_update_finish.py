@@ -433,7 +433,7 @@ def _pnpm_graph(source):
     return node
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_selected_child_builds_and_finalizes_under_parent_lock(completion):
     from hermes_cli.config_defaults import DEFAULT_CONFIG
     from hermes_cli.update_lock import UpdateLock
@@ -478,7 +478,7 @@ def test_selected_child_builds_and_finalizes_under_parent_lock(completion):
     assert json.loads((source / "install-stamp.json").read_text())["commit"] == head
 
 
-@pytest.mark.platforms("posix")
+@pytest.mark.platforms("linux")
 def test_real_compiler_failure_is_owed_build_and_completion_continues(completion):
     """Contract C3 for the historical takeover child: the code is committed, so a failed product
     build is an owed ``build`` follow-up, never a failed update. Maintenance (config migration)

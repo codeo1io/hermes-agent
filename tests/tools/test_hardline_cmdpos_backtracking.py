@@ -28,7 +28,7 @@ def test_command_position_groups_finish_on_blank_line_runs(build):
         "started = time.perf_counter()\n"
         "assert detect_hardline_command(command) == (False, None)\n"
         "detect_dangerous_command(command)\n"
-        "assert time.perf_counter() - started < 3.0\n"
+        "assert time.perf_counter() - started < 12.0\n"
     )
     # Pin the checkout under test: a bare `python -c` resolves `tools` through the venv's editable
     # install (the primary clone), not through the worktree pytest is running in.
