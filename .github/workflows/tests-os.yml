@@ -219,8 +219,16 @@ jobs:
           # (run_tests_parallel.py: a killed tree is a runaway, not a flake).
           # 900s matches the e2e-windows lane, which carries the same
           # spawn-real-PowerShell-trees constraint.
-          HERMES_TEST_WORKERS: ${{ matrix.marker == 'windows' && '3' || '' }}
-          HERMES_TEST_FILE_TIMEOUT: ${{ matrix.marker == 'windows' && '900' || '' }}
+          # Fork (2026-11-20): the macOS lane needs the same relaxation the Windows
+          # lane already has (see below) — tests/hermes_cli/test_update_finish.py
+          # spawns real bootstrap-build trees; three consecutive main runs were
+          # SIGKILL'd at the flat 300s cap (runs 44581083189/44588822271/44646112797,
+          # job logs: "300s exceeded; process tree SIGKILL'd" mid-file at test 9/16).
+          # rc=124 killed trees are never retried (run_tests_parallel.py), so a slow
+          # box makes main red. 900s matches the Windows lane's spawn-real-trees
+          # precedent in this same env block.
+          HERMES_TEST_WORKERS: ${{ (matrix.marker == 'windows' || matrix.marker == 'macos') && '3' || '' }}
+          HERMES_TEST_FILE_TIMEOUT: ${{ (matrix.marker == 'windows' || matrix.marker == 'macos') && '900' || '' }}
           HERMES_TEST_SLICE: ${{ matrix.slice || '' }}
           # Belt-and-suspenders with tests/conftest.py's env blanking: no
           # test may reach a real provider API.

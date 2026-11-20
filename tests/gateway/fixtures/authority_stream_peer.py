@@ -45,7 +45,14 @@ class ModelPeer(BaseHTTPRequestHandler):
         else:
             if self.server.blocked:
                 # Incompressible data and healthy-reader pacing fill ONLY the stalled peer.
-                deltas += [{'content': f'CHUNK_{i:04d}_' + os.urandom(2048).hex()} for i in range(330)]
+                # 256 incompressible chunks (~527KB): comfortably above the kernel
+                # socket-buffer ceiling (~200-256KB) so the OS blockage is always
+                # witnessed, and above the frame bound set in main() so the stalled
+                # observer is actually excluded — while the whole blocked run stays
+                # inside the call-site subprocess timeout=200 (the original 330-chunk
+                # drip plus the pre-fix 60s observer wait exceeded it on loaded
+                # hosted runners; 2026-11-20 main-lane reds).
+                deltas += [{'content': f'CHUNK_{i:04d}_' + os.urandom(2048).hex()} for i in range(256)]
             deltas += [{'content': 'STREAM_'}, {'content': 'FINISHED'}]
         for delta in deltas + [{}]:
             frame = {'id': 'local-stream', 'object': 'chat.completion.chunk', 'created': 1,
@@ -212,7 +219,10 @@ async def probe(peer, target):
             assert a.events == b.events, 'observers saw competing event ordering/stamps'
         events = b.events
         if peer.blocked:
-            await async_wait_until(lambda: a.events, timeout=60, what='the resumed slow observer to read a frame')
+            # 120s: must stay inside the call-site subprocess timeout=200 (180
+            # collided with it on a loaded runner); the observer's first frame
+            # arrives well before this when the drip is bounded.
+            await async_wait_until(lambda: a.events, timeout=120, what='the resumed slow observer to read a frame')
             assert a.events == events[:len(a.events)], 'slow observer prefix has competing stamps'
             with fanout._lock:
                 assert len(fanout._peers) <= 2
@@ -275,9 +285,11 @@ def main():
     if peer.blocked:
         # The stalled observer must hit a mailbox bound while the session replay buffer (4 MB) still
         # holds the whole turn and the terminal frame (the whole reply) still fits the byte cap, so
-        # bound it by frames: the 330 chunks below exceed this.
+        # bound it by frames: the 256 drip chunks (+ the handful of structural
+        # deltas) exceed this, but only by a little — keeping the drip short is
+        # what keeps the whole probe inside the call-site subprocess timeout.
         from tui_gateway.transport import FanoutTransport
-        FanoutTransport._MAX_PENDING_FRAMES = 256
+        FanoutTransport._MAX_PENDING_FRAMES = 128
     peer.acks = queue.Queue()
     peer.command = 'printf owned-effect > ' + shlex.quote(str(target))
     threading.Thread(target=peer.serve_forever, daemon=True).start()
