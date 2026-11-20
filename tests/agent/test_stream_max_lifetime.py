@@ -68,7 +68,13 @@ def drip_wire():
 
 def test_cap_cuts_a_stream_that_never_goes_quiet(drip_wire, monkeypatch, tmp_path):
     _set_cap(monkeypatch, tmp_path, 1.5)
-    monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "1.0")
+    # 5.0s, not 1.0s: on a loaded hosted runner the first drip chunk can
+    # arrive later than 1s after connect, and the stale detector then kills
+    # the attempt as "superseded" before the lifetime cap (1.5s) can fire
+    # (2026-11-20 main-lane red). The cap must be the thing that cuts a
+    # stream that keeps sending; true silence still trips the stale path
+    # long before the implicit 180s.
+    monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "5.0")
     monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
     monkeypatch.setenv("HERMES_STREAM_STALE_GIVEUP", "2")
     agent = run_agent.AIAgent(
