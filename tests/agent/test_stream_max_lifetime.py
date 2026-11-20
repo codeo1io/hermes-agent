@@ -67,13 +67,18 @@ def drip_wire():
 
 
 def test_cap_cuts_a_stream_that_never_goes_quiet(drip_wire, monkeypatch, tmp_path):
-    _set_cap(monkeypatch, tmp_path, 1.5)
-    # 5.0s, not 1.0s: on a loaded hosted runner the first drip chunk can
-    # arrive later than 1s after connect, and the stale detector then kills
-    # the attempt as "superseded" before the lifetime cap (1.5s) can fire
-    # (2026-11-20 main-lane red). The cap must be the thing that cuts a
-    # stream that keeps sending; true silence still trips the stale path
-    # long before the implicit 180s.
+    # Cap 6.0s / stale 5.0s (2026-11-20 main-lane reds, two rounds):
+    # round 1 used cap 1.5 / stale 1.0 and a loaded hosted runner delivered
+    # the first drip chunk later than 1s after connect — the stale detector
+    # killed the attempt ("superseded") before the cap could fire. stale=5.0
+    # fixed that, but exposed the next coupling: resolve_stream_max_lifetime
+    # floors the cap at the stale timeout, so cap 1.5 resolved to 5.0 and the
+    # kill landed just past the test's "< 5.0" wall bound. Now the cap is
+    # explicitly above the stale floor, the kill is unambiguously a cap kill,
+    # and the wall bound (12s) has load headroom. The discrimination is
+    # unchanged: a stream that keeps sending is cut by the cap; true silence
+    # still trips the stale path long before the implicit 180s.
+    _set_cap(monkeypatch, tmp_path, 6.0)
     monkeypatch.setenv("HERMES_STREAM_STALE_TIMEOUT", "5.0")
     monkeypatch.setenv("HERMES_STREAM_RETRIES", "0")
     monkeypatch.setenv("HERMES_STREAM_STALE_GIVEUP", "2")
@@ -91,7 +96,7 @@ def test_cap_cuts_a_stream_that_never_goes_quiet(drip_wire, monkeypatch, tmp_pat
         started = time.time()
         with pytest.raises(StreamLifetimeExceeded, match="agent.stream_max_lifetime"):
             call("hi")
-        assert time.time() - started < 5.0
+        assert time.time() - started < 12.0
     # Cap kills are not stale kills: the breaker (giveup 2) must not refuse a healthy request.
     assert call("short").choices[0].message.content == "."
 
