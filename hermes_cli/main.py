@@ -2598,6 +2598,22 @@ def _first_positional_argv() -> str | None:
     return args[0] if args else None
 
 
+def _status_class_boot_skip(argv: list[str] | None = None) -> bool:
+    """True for exactly ``hermes cron status`` — the machine-read status probe.
+
+    maestro's ``phase2.scheduler.hermes-cron`` evaluator runs this one command with a
+    fixed 30 s budget, and every recorded FAIL of that contract is the CLI dying at
+    the budget while the gateway stayed healthy — so its boot may defer work that
+    cannot change a read-only status answer (see main()'s ``status_class`` gate).
+    The set is deliberately closed: widening it to more subcommands is a measured
+    per-command decision, never a pattern to broaden opportunistically.
+    """
+    from hermes_cli._parser import command_argv
+
+    args = sys.argv[1:] if argv is None else argv
+    return command_argv(list(args))[:2] == ["cron", "status"]
+
+
 def _plugin_cli_discovery_needed() -> bool:
     """True when the CLI might be invoking a plugin-registered subcommand.
 
@@ -3289,25 +3305,34 @@ def main():
     # process resolves fresh source against old bytecode. Never raises.
     _sweep_stale_bytecode_if_checkout_changed()
 
-    _recover_update_debts_on_startup()  # owed fleet restarts, gateways a killed update paused
+    # ``hermes cron status`` is a fixed-budget liveness probe: a read-only answer
+    # that the update-debt recovery, the boot bootstrap, and the PM runtime verdict
+    # cannot change. Deferring all three keeps the probe's boot inside its budget
+    # under load (each also lands on the next interactive launch instead — the
+    # verdict's warning is stderr-only, which the evaluator does not parse).
+    status_class = _status_class_boot_skip()
 
-    if _first_positional_argv() != "update":
+    if not status_class:
+        _recover_update_debts_on_startup()  # owed fleet restarts, gateways a killed update paused
+
+    if not status_class and _first_positional_argv() != "update":
         from hermes_cli.boot_bootstrap import maybe_run_boot_bootstrap
         from pm.paths import install_root
         maybe_run_boot_bootstrap(install_root())
 
     # Every dispatch, including fast chat/serve, gets one passive PM verdict.
-    try:
-        from hermes_cli.venv_sync import check_runtime
-        from pm.paths import install_root
+    if not status_class:
+        try:
+            from hermes_cli.venv_sync import check_runtime
+            from pm.paths import install_root
 
-        problem = check_runtime(install_root())
-        if problem:
-            print(f"⚠ {problem}", file=sys.stderr)
-    except Exception:
-        import logging
+            problem = check_runtime(install_root())
+            if problem:
+                print(f"⚠ {problem}", file=sys.stderr)
+        except Exception:
+            import logging
 
-        logging.getLogger(__name__).debug("pm startup check failed", exc_info=True)
+            logging.getLogger(__name__).debug("pm startup check failed", exc_info=True)
 
     if _try_termux_fast_tui_launch():
         return

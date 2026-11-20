@@ -699,3 +699,81 @@ class TestSlashCronRunSkipped:
         out = capsys.readouterr().out
         assert "Job is paused/disabled; resume it before running." in out
         assert "Triggered" not in out and "next scheduler tick" not in out
+
+
+class TestCronStatusContract:
+    """The evaluator-facing output contract of ``hermes cron status``.
+
+    maestro's ``phase2.scheduler.hermes-cron`` probe PASSes only when the command exits 0
+    with ``Gateway is running`` in stdout and a parseable ``Ticker heartbeat: Ns ago`` of
+    at most 180 s (inside its own 30 s process budget). These tests pin the affirmative
+    strings and the honest degradation when the heartbeat is stale or missing: the
+    affirmative line and the heartbeat line must both disappear — never a false-positive
+    PASS surface.
+    """
+
+    @staticmethod
+    def _run_status(monkeypatch, capsys, *, hb_age, ok_age=42.0, last_error=None, pids=(4242,)):
+        create_job(prompt="Ping", schedule="every 2m")
+        monkeypatch.setattr("hermes_cli.cron._active_cron_provider_name", lambda: "builtin")
+        monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda: list(pids))
+        monkeypatch.setattr("cron.jobs.get_ticker_heartbeat_age", lambda: hb_age)
+        monkeypatch.setattr("cron.jobs.get_ticker_success_age", lambda: ok_age)
+        monkeypatch.setattr("cron.jobs.get_ticker_last_error", lambda: last_error)
+        cron_command(Namespace(cron_command="status"))
+        return capsys.readouterr().out
+
+    def test_fresh_heartbeat_prints_contract_strings(self, tmp_cron_dir, capsys, monkeypatch):
+        import re
+
+        out = self._run_status(monkeypatch, capsys, hb_age=42.0)
+        assert "Gateway is running" in out
+        assert re.search(r"Ticker heartbeat: \d+s ago", out)
+
+    def test_heartbeat_just_inside_evaluator_threshold(self, tmp_cron_dir, capsys, monkeypatch):
+        """179 s still answers affirmatively (the CLI's own fresh window is 200 s, the
+        evaluator's 180 s — non-overlapping margins while the ticker is healthy)."""
+        import re
+
+        out = self._run_status(monkeypatch, capsys, hb_age=179.0)
+        assert "Gateway is running" in out
+        match = re.search(r"Ticker heartbeat: (\d+)s ago", out)
+        assert match and int(match.group(1)) == 179
+
+    def test_stale_heartbeat_degrades_honestly(self, tmp_cron_dir, capsys, monkeypatch):
+        """A stale ticker keeps the honest STALLED warning and exits cleanly — the
+        affirmative line and the parseable heartbeat line are both gone."""
+        out = self._run_status(monkeypatch, capsys, hb_age=900.0)
+        assert "STALLED" in out
+        assert "Ticker heartbeat:" not in out
+        assert "✓ Gateway is running" not in out
+
+    def test_missing_heartbeat_degrades_honestly(self, tmp_cron_dir, capsys, monkeypatch):
+        out = self._run_status(monkeypatch, capsys, hb_age=None)
+        assert "has not reported a heartbeat" in out
+        assert "Ticker heartbeat:" not in out
+        assert "✓ Gateway is running" not in out
+
+    def test_status_end_to_end_canary(self, tmp_path, monkeypatch):
+        """The evaluator's invocation shape end-to-end: a real ``main()`` boot + dispatch
+        in a subprocess with an isolated home must exit 0 with no traceback (the boot's
+        status-class skip is what keeps this cheap — see test_status_class_boot.py)."""
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[2]
+        env = dict(os.environ)
+        env["HERMES_HOME"] = str(tmp_path / "home")
+        env["HERMES_RUNTIME_DIR"] = str(tmp_path / "runtime")
+        env["PYTHONPATH"] = os.pathsep.join([str(repo_root), env.get("PYTHONPATH", "")])
+        env.pop("HERMES_PROFILE", None)
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; from hermes_cli.main import main; sys.exit(main() or 0)",
+             "cron", "status"],
+            cwd=str(repo_root), env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        assert "Traceback" not in proc.stderr
