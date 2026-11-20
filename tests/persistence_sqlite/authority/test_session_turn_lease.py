@@ -795,6 +795,7 @@ def test_sweep_retires_backstop_and_dead_holder_rows(store, monkeypatch: pytest.
     it forever. Ported from the pre-0.23.3 ``hermes_state_compression`` sweep on adoption."""
     ours = _pin_local_pidns(monkeypatch)
     dead = _reaped_pid()
+    store.ready()  # ensure the schema DDL before the raw sqlite seeding below
     now = time.time()
     raw = sqlite3.connect(store.store_path)
     _seed_turn_leases(raw, [
@@ -816,6 +817,7 @@ def test_sweep_keeps_revive_window_foreign_ns_and_unexpired_rows(store, monkeypa
     table). Ported from the pre-0.23.3 sweep on adoption."""
     ours = _pin_local_pidns(monkeypatch)
     dead = _reaped_pid()
+    store.ready()  # ensure the schema DDL before the raw sqlite seeding below
     now = time.time()
     raw = sqlite3.connect(store.store_path)
     _seed_turn_leases(raw, [
