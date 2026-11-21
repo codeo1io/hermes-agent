@@ -148,6 +148,44 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
 
 
+def _entitlement_required_checks(
+    required: set[tuple[str, int | None]],
+    runs: list[dict],
+    statuses: list[dict],
+    sha: str,
+    receipt: dict,
+) -> bool:
+    """Use all exact-head CI results when GitHub hides private branch rules.
+
+    Only invoked after the caller verified the PR is merged and the precise
+    GitHub-plan entitlement error occurred. Never promote an unverified run.
+    """
+    succeeded = [r for r in runs
+                 if r.get("status") == "completed" and r.get("conclusion") == "success"
+                 and r.get("head_sha") == sha]
+    if len(succeeded) < 3 or not any(
+            re.search(r"(test|lint|build|ci|guard)", str(r.get("name") or ""), re.IGNORECASE)
+            for r in succeeded):
+        receipt.update(classification="missing",
+                       detail="Branch-rules API unavailable; substantial exact-head CI proof missing.")
+        return False
+
+    excluded_skips = []
+    for r in runs:
+        name = str(r.get("name") or "")
+        if (r.get("status") == "completed" and r.get("conclusion") == "skipped"
+                and not any(context == name for context, _ in required)):
+            excluded_skips.append(name)
+            continue
+        required.add((name, (r.get("app") or {}).get("id")))
+    for row in statuses:
+        required.add((str(row["context"]), None))
+    receipt["policy_source"] = "merged_pr_exact_head_all_ci_fallback"
+    receipt["branch_rules_available"] = False
+    receipt["non_gating_skipped_checks"] = excluded_skips
+    return True
+
+
 def collect_acceptance(contract: str, published_pr: str | None,
                        assignee: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
@@ -205,34 +243,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("Incomplete check-run pagination")
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
-        if branch_rules_unavailable:
-            # Require substantive, exact-head positive CI and treat ALL
-            # non-skipped checks as gating. A check missing, pending, failed,
-            # cancelled or with a stale SHA can never satisfy completion.
-            # Skipped jobs are non-gating only when GraphQL did not require
-            # that context. This fallback is for a merged PR ONLY.
-            succeeded = [r for r in runs
-                         if r.get("status") == "completed" and r.get("conclusion") == "success"
-                         and r.get("head_sha") == sha]
-            if len(succeeded) < 3 or not any(
-                    re.search(r"(test|lint|build|ci|guard)", str(r.get("name") or ""), re.IGNORECASE)
-                    for r in succeeded):
-                receipt.update(classification="missing",
-                               detail="Branch-rules API unavailable; substantial exact-head CI proof missing.")
-                return receipt
-            excluded_skips = []
-            for r in runs:
-                name = str(r.get("name") or "")
-                if (r.get("status") == "completed" and r.get("conclusion") == "skipped"
-                        and not any(context == name for context, _ in required)):
-                    excluded_skips.append(name)
-                    continue
-                required.add((name, (r.get("app") or {}).get("id")))
-            for row in statuses:
-                required.add((str(row["context"]), None))
-            receipt["policy_source"] = "merged_pr_exact_head_all_ci_fallback"
-            receipt["branch_rules_available"] = False
-            receipt["non_gating_skipped_checks"] = excluded_skips
+        if branch_rules_unavailable and not _entitlement_required_checks(
+                required, runs, statuses, sha, receipt):
+            return receipt
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
             receipt["detail"] = "No verifiable CI checks are available."
