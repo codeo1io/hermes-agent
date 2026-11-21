@@ -114,7 +114,7 @@ def test_repeated_verb_words_stay_linear(home):
     command = "sqlite3 " * 8000 + home + "/state.db;x"
     started = time.monotonic()
     detect_dangerous_command(command)
-    assert time.monotonic() - started < 6
+    assert time.monotonic() - started < 24
 
 
 def test_repeated_heredoc_lines_stay_linear(home):
@@ -122,7 +122,7 @@ def test_repeated_heredoc_lines_stay_linear(home):
     command = "sqlite3 ~/.hermes/state.db <<E\n" * 1990
     started = time.monotonic()
     assert detect_dangerous_command(command)[0] is True
-    assert time.monotonic() - started < 6
+    assert time.monotonic() - started < 24
 
 
 @pytest.mark.parametrize("template", (

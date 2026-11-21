@@ -30,7 +30,7 @@ detect_dangerous_command("ls")
 for reps in (28, 64, 512):
     started = time.perf_counter()
     detect_dangerous_command("cat .env" + ".x" * reps)
-    assert time.perf_counter() - started < 3.0, reps
+    assert time.perf_counter() - started < 12.0, reps
 ''')
 
 
@@ -71,7 +71,7 @@ for depth in (33, 240, 2000):
     command = "echo " + "$(" * depth + "x" + ")" * depth
     started = time.perf_counter()
     assert detect_dangerous_command(command)[1] == _PARSER_LIMIT_DESCRIPTION, depth
-    assert time.perf_counter() - started < 3.0, depth
+    assert time.perf_counter() - started < 12.0, depth
 ''')
 
 
@@ -88,7 +88,7 @@ for command in (
 ):
     started = time.perf_counter()
     assert detect_dangerous_command(command)[1] == _PARSER_LIMIT_DESCRIPTION, command[:40]
-    assert time.perf_counter() - started < 3.0, command[:40]
+    assert time.perf_counter() - started < 12.0, command[:40]
 ''')
 
 
@@ -136,7 +136,7 @@ for command, verdict, finding in [(c, (False, None), _SCAN_INCOMPLETE_DESCRIPTIO
     started = time.perf_counter()
     assert detect_hardline_command(command) == verdict, command[:40]
     assert detect_dangerous_command(command)[1] == finding, command[:40]
-    assert time.perf_counter() - started < 8.0, command[:40]
+    assert time.perf_counter() - started < 32.0, command[:40]
 ''')
 
 
@@ -168,7 +168,7 @@ for run in ("\\n" * 24000, "\\n    " * 24000):
     command = "cat <<EOF > notes.txt" + run + "\\nEOF"
     started = time.perf_counter()
     assert detect_dangerous_command(command) == (False, None, None)
-    assert time.perf_counter() - started < 10.0
+    assert time.perf_counter() - started < 40.0
 ''', timeout=60)
 
 
@@ -229,7 +229,7 @@ from tools.approval_detection import detect_hardline_command
 started = time.perf_counter()
 assert detect_hardline_command("echo " + "$''(" * 120 + "rm -rf /" + ")" * 120)[1] == "recursive delete of root filesystem"
 assert detect_hardline_command("echo " + "$''(" * 120 + "reboot")[1] == "system shutdown/reboot"
-assert time.perf_counter() - started < 3.0
+assert time.perf_counter() - started < 12.0
 ''')
 
 

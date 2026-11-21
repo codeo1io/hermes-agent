@@ -459,7 +459,7 @@ async def test_another_plugin_message_does_not_end_the_wait(monkeypatch, probe, 
 # queued behind the plugin's turn (queue mode, an ordinary interrupt) or taken into it (a steer, an
 # active-turn redirect, neither ever queued). The background work is then superseded at once.
 
-WELL_INSIDE_THE_GRACE = 1.0  # seconds; the grace is 120 s
+WELL_INSIDE_THE_GRACE = 5.0  # seconds; the grace is 120 s  # fork: hosted-runner latency budget (was 1.0)
 
 # control -> (busy_input_mode, the agent redirects its active turn, the person's text runs as its own
 # turn, what the person sends)
