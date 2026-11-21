@@ -40,9 +40,13 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
                                 text=True, encoding="utf-8", errors="replace", timeout=30,
                                 check=True, env=_gh_env(profile_home))
     except subprocess.CalledProcessError as exc:
-        # 401/403/404 = the login cannot see this repository (wrong profile identity
-        # or missing grant), not a transient API failure. Persist only the status
-        # code + endpoint, never gh's stderr (credentials/host details).
+        # GitHub can plan-gate the branch-rules endpoint of a PRIVATE repo
+        # despite valid PR and Check Runs access. Every other 401/403/404
+        # remains a hard authorization failure.
+        if ("/rules/branches/" in endpoint
+                and "Upgrade to GitHub Pro or make this repository public"
+                in (exc.stderr or "")):
+            raise _GateEntitlementError("private repository rules endpoint requires GitHub Pro") from None
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
@@ -56,9 +60,14 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
 
 
 class _GateAuthError(RuntimeError):
-    """gh was refused at HTTP 401/403/404 (or GraphQL returned no repository):
-    this profile's login cannot see the repo — an identity problem to fix, not
-    an infrastructure blip to retry."""
+    """A genuine GitHub authentication / authorization failure."""
+
+
+class _GateEntitlementError(_GateAuthError):
+    """Private-repo branch-rules metadata requires a paid GitHub plan.
+
+    Only this exact entitlement refusal permits the merged-PR CI fallback.
+    """
 
 
 # Every key gh can read a login from, github.com and GitHub Enterprise alike. All of them are
@@ -98,7 +107,11 @@ def _gh_env(profile_home: str | None) -> dict[str, str] | None:
     if not profile_home:
         return None
     from agent.secret_scope import build_profile_secret_scope
-    from tools.environments.local import _is_routed_home, hermes_subprocess_env, served_profile_child_env
+    from tools.environments.local import (
+        _is_routed_home,
+        hermes_subprocess_env,
+        served_profile_child_env,
+    )
     base = hermes_subprocess_env(inherit_credentials=False)
     routed = _is_routed_home(profile_home)
     if routed:
@@ -135,6 +148,44 @@ def _assignee_profile_home(assignee: str | None) -> str | None:
         raise _GateAuthError(f"assignee profile {assignee!r} cannot be resolved") from None
 
 
+def _entitlement_required_checks(
+    required: set[tuple[str, int | None]],
+    runs: list[dict],
+    statuses: list[dict],
+    sha: str,
+    receipt: dict,
+) -> bool:
+    """Use all exact-head CI results when GitHub hides private branch rules.
+
+    Only invoked after the caller verified the PR is merged and the precise
+    GitHub-plan entitlement error occurred. Never promote an unverified run.
+    """
+    succeeded = [r for r in runs
+                 if r.get("status") == "completed" and r.get("conclusion") == "success"
+                 and r.get("head_sha") == sha]
+    if len(succeeded) < 3 or not any(
+            re.search(r"(test|lint|build|ci|guard)", str(r.get("name") or ""), re.IGNORECASE)
+            for r in succeeded):
+        receipt.update(classification="missing",
+                       detail="Branch-rules API unavailable; substantial exact-head CI proof missing.")
+        return False
+
+    excluded_skips = []
+    for r in runs:
+        name = str(r.get("name") or "")
+        if (r.get("status") == "completed" and r.get("conclusion") == "skipped"
+                and not any(context == name for context, _ in required)):
+            excluded_skips.append(name)
+            continue
+        required.add((name, (r.get("app") or {}).get("id")))
+    for row in statuses:
+        required.add((str(row["context"]), None))
+    receipt["policy_source"] = "merged_pr_exact_head_all_ci_fallback"
+    receipt["branch_rules_available"] = False
+    receipt["non_gating_skipped_checks"] = excluded_skips
+    return True
+
+
 def collect_acceptance(contract: str, published_pr: str | None,
                        assignee: str | None = None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
@@ -164,15 +215,25 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
+        branch_rules_unavailable = False
+        try:
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                         paginate=True, profile_home=profile_home)
+        except _GateEntitlementError:
+            # Never accept an OPEN PR via entitlement fallback: GitHub has
+            # applied merge-time checks only for a genuinely MERGED PR.
+            if pr["state"] != "MERGED":
+                receipt.update(classification="auth",
+                               detail="Branch-rules API unavailable; fallback requires a merged PR.")
+                return receipt
+            branch_rules_unavailable = True
+            rules = []
         for page in rules:
             for rule in page:
                 if rule["type"] == "required_status_checks":
                     required.update((r["context"], r.get("integration_id"))
                                     for r in rule["parameters"]["required_status_checks"])
-        receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
-        if not required:
+        if not required and not branch_rules_unavailable:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
             return receipt
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
@@ -182,6 +243,13 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("Incomplete check-run pagination")
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
                                                        paginate=True, profile_home=profile_home) for s in page]
+        if branch_rules_unavailable and not _entitlement_required_checks(
+                required, runs, statuses, sha, receipt):
+            return receipt
+        receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
+        if not required:
+            receipt["detail"] = "No verifiable CI checks are available."
+            return receipt
         outcomes = []
         for context, app_id in sorted(required, key=str):
             matching = [r for r in runs if r["name"] == context and
@@ -205,6 +273,12 @@ def collect_acceptance(contract: str, published_pr: str | None,
         current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
+            return receipt
+        if branch_rules_unavailable and (
+                current.get("merged") is not True or
+                not re.fullmatch(r"[0-9a-f]{40}", str(current.get("merge_commit_sha") or ""))):
+            receipt.update(classification="stale",
+                           detail="Branch-rules fallback requires an actually merged PR and immutable merge SHA.")
             return receipt
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
