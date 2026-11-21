@@ -347,3 +347,109 @@ def test_assigned_card_with_unresolvable_profile_is_auth_not_ambient(tmp_path, m
             "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0])
     assert receipt["classification"] == "auth"
     assert "'ghost'" in receipt["detail"] and "cannot be resolved" in receipt["detail"]
+
+
+@pytest.mark.platforms("posix")
+def test_private_repo_rules_entitlement_fallback_checks_merged_exact_head(monkeypatch):
+    """Only unavailable private-repo RULES metadata can use merged CI truth."""
+    from hermes_cli import kanban_pr_acceptance as acceptance
+
+    sha, merge_sha = "a" * 40, "b" * 40
+    state = {"pr_state": "MERGED", "merged": True, "merge_sha": merge_sha,
+             "conclusions": {"test": "success", "lint": "success", "tree-guards": "success"},
+             "status": "completed", "head": sha,
+             "required": [], "genuine_auth_error": False}
+    url = "https://github.com/acme/repo/pull/7"
+
+    def fake_api(endpoint, **kwargs):
+        if endpoint == "graphql":
+            return {"data": {"repository": {"pullRequest": {
+                "headRefOid": sha, "baseRefName": "main",
+                "state": state["pr_state"],
+                "baseRef": {"branchProtectionRule": {
+                    "requiredStatusChecks": state["required"],
+                }},
+            }}}}
+        if "/rules/branches/" in endpoint:
+            if state["genuine_auth_error"]:
+                raise acceptance._GateAuthError("HTTP 403 on restricted endpoint")
+            raise acceptance._GateEntitlementError("private GitHub branch-rules feature unavailable")
+        if "/check-runs" in endpoint:
+            runs = [
+                {"id": i, "name": name, "app": {"id": 55},
+                 "head_sha": state["head"], "status": state["status"],
+                 "conclusion": conclusion,
+                 "html_url": "https://github.com/acme/repo/actions/runs/42"}
+                for i, (name, conclusion) in enumerate(state["conclusions"].items(), 1)
+            ]
+            runs.append({"id": 20, "name": "conditional-optional", "app": {"id": 55},
+                         "head_sha": sha, "status": "completed", "conclusion": "skipped"})
+            return [{"check_runs": runs, "total_count": len(runs)}]
+        if "/statuses" in endpoint:
+            return [[]]
+        if "/pulls/" in endpoint:
+            return {"head": {"sha": sha}, "base": {"ref": "main"},
+                    "state": "closed" if state["merged"] else "open",
+                    "merged": state["merged"], "merge_commit_sha": state["merge_sha"]}
+        raise AssertionError(f"unexpected GitHub endpoint {endpoint}")
+
+    monkeypatch.setattr(acceptance, "_api", fake_api)
+
+    proof = acceptance.collect_acceptance(url, url)
+    assert proof["ok"] is True, proof
+    assert proof["classification"] == "success"
+    assert proof["policy_source"] == "merged_pr_exact_head_all_ci_fallback"
+    assert {x["context"] for x in proof["required"]} == {"test", "lint", "tree-guards"}
+    assert proof["non_gating_skipped_checks"] == ["conditional-optional"]
+
+    state["conclusions"]["test"] = "failure"
+    assert not acceptance.collect_acceptance(url, url)["ok"]
+    state["conclusions"]["test"] = "success"
+
+    state["status"] = "in_progress"
+    assert not acceptance.collect_acceptance(url, url)["ok"]
+    state["status"] = "completed"
+
+    state["head"] = "c" * 40
+    assert not acceptance.collect_acceptance(url, url)["ok"]
+    state["head"] = sha
+
+    state["pr_state"] = "OPEN"
+    assert not acceptance.collect_acceptance(url, url)["ok"]
+    state["pr_state"] = "MERGED"
+
+    state["merge_sha"] = ""
+    assert not acceptance.collect_acceptance(url, url)["ok"]
+    state["merge_sha"] = merge_sha
+
+    state["merged"] = False
+    assert not acceptance.collect_acceptance(url, url)["ok"]
+    state["merged"] = True
+
+    state["genuine_auth_error"] = True
+    bad_auth = acceptance.collect_acceptance(url, url)
+    assert not bad_auth["ok"] and bad_auth["classification"] == "auth"
+    state["genuine_auth_error"] = False
+
+    state["required"] = [{"context": "conditional-optional", "app": {"databaseId": 55}}]
+    required_skipped = acceptance.collect_acceptance(url, url)
+    assert not required_skipped["ok"]
+    assert required_skipped["classification"] != "success"
+
+
+@pytest.mark.platforms("posix")
+def test_entitlement_detection_is_only_for_branch_rules(monkeypatch):
+    import subprocess
+
+    from hermes_cli import kanban_pr_acceptance as acceptance
+
+    def denied(command, **kwargs):
+        raise subprocess.CalledProcessError(
+            1, command,
+            stderr="gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)")
+    monkeypatch.setattr(acceptance.subprocess, "run", denied)
+    with pytest.raises(acceptance._GateEntitlementError):
+        acceptance._api("repos/acme/repo/rules/branches/main", paginate=True)
+    with pytest.raises(acceptance._GateAuthError) as exc:
+        acceptance._api("repos/acme/repo/commits/abcd/check-runs", paginate=True)
+    assert not isinstance(exc.value, acceptance._GateEntitlementError)
