@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from hermes_state_reconcile import BrowseBudgetExceeded, _apply_additive_schema
+from persistence.sqlite.admin._reconcile import BrowseBudgetExceeded, _apply_additive_schema
 
 
 @pytest.mark.parametrize("expired", [True, False])
@@ -45,10 +45,10 @@ def test_interrupted_begin_is_budget_error_only_after_deadline(monkeypatch, expi
 
     connection = FakeConnection()
     monkeypatch.setattr(
-        "hermes_cli.sqlite_safe_read.connect_tracked", lambda *args, **kwargs: connection
+        "persistence.sqlite.admin._reconcile._connect_tracked_db", lambda *args, **kwargs: connection
     )
     monkeypatch.setattr(
-        "hermes_state_repair._reapply_durability_barriers", lambda conn: None
+        "persistence.sqlite._state.repair._reapply_durability_barriers", lambda conn: None
     )
     exc_type = BrowseBudgetExceeded if expired else sqlite3.OperationalError
     with pytest.raises(exc_type):

@@ -683,7 +683,7 @@ def _ensure_test_isolation(path: Path) -> None:
     parametrized case of ``test_kanban_creator_origin`` / ``test_kanban_provenance``
     leaked ``owner``/``child`` fixture rows into the live ``~/.hermes/kanban.db``).
     This guard instead arms on env/ancestry test signals — see
-    ``hermes_state_guard._in_test_context`` — so it is active from the very
+    ``persistence.sqlite._state.guard`` ``_in_test_context`` — so it is active from the very
     first call, patching or not.
 
     Deny predicate is deliberately narrower than "anywhere under the real
@@ -700,7 +700,7 @@ def _ensure_test_isolation(path: Path) -> None:
     if _KANBAN_GUARD_BYPASS or os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
         return
     try:
-        from hermes_state_guard import _in_test_context, _real_platform_state_root
+        from persistence.sqlite._state.guard import _in_test_context, _real_platform_state_root
     except ImportError:
         return
     if not _in_test_context():
@@ -727,7 +727,7 @@ def _ensure_test_isolation(path: Path) -> None:
     if root is None:
         return
     try:
-        from hermes_state_guard import _path_in_sandbox
+        from persistence.sqlite._state.guard import _path_in_sandbox
 
         if _path_in_sandbox(resolved):
             return  # fixture-registered sandbox root: never production
@@ -1354,7 +1354,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
     _kb._assert_not_delegated_child_mutation(_main_db_file(conn))
     if not _KANBAN_GUARD_BYPASS and not os.environ.get(_KANBAN_GUARD_BYPASS_ENV):
         try:
-            from hermes_state_guard import _in_test_context
+            from persistence.sqlite._state.guard import _in_test_context
 
             if _in_test_context():
                 _ensure_test_isolation(Path(_main_db_file(conn) or "kanban.db"))

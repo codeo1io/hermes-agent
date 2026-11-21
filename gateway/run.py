@@ -4310,12 +4310,10 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     try:
         # Ungated and first: a killed holder's expired lease row is residue, not retention.
         # (Fork semantics, ported from the pre-0.23.3 hermes_state_compression sweep: lease
-        # hygiene is not retention, so it runs even when both retention gates are off; the
-        # early return below only skips the retention half. The coordination repo's grace
+        # hygiene is not retention, so it runs even when both retention gates are off; the old pre-0.23.3
+        # chore had no early return either; upstream never gained one. The coordination repo's grace
         # window matches the old _TURN_LEASE_SWEEP_GRACE_S.)
         store.coordination.sweep_expired_turn_leases()
-        if not (_sess_cfg.get("auto_archive", False) or _sess_cfg.get("auto_prune", False)):
-            return
         if _sess_cfg.get("auto_archive", False):
             run_auto_archive(
                 store, idle_days=float(_sess_cfg.get("auto_archive_days", 3)),

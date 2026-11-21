@@ -30,7 +30,7 @@ def kanban_home(tmp_path, monkeypatch):
     # 8 follow-up): the guard's deny-root pins itself at first use from the
     # process home view. Sandbox paths already captured are recognised, so
     # this must run while ``home`` is still the process-visible root.
-    from hermes_state_guard import pin_sandbox_root
+    from persistence.sqlite._state.guard import pin_sandbox_root
 
     pin_sandbox_root(home)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)

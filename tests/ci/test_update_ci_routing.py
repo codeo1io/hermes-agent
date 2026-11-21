@@ -846,7 +846,10 @@ def test_a_canary_e2e_run_reaches_every_e2e_suite():
     for lane in ("e2e", "e2e_upgrade", "e2e_desktop_update"):
         reached = _consumers_reached(run, lane)
         assert reached and all(reached.values()), f"{lane}: {reached}"
-    assert "e2e-desktop-core" in run
+    # Fork CI topology: the canary's workflow_run carries no conductor head ref, so the
+    # core suite is reached through the standard leg (the conductor variant is for
+    # conductor ephemeral-validation PRs only).
+    assert "e2e-desktop-core-standard" in run
 
 
 def test_windows_install_update_dispatch_alone_sets_strict():

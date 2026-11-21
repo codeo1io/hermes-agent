@@ -13,6 +13,8 @@ import sqlite3
 from contextlib import closing
 
 import pytest
+
+import persistence.sqlite.admin._reconcile as reconcile
 from fastapi import HTTPException
 
 from hermes_cli.web_server_sessions import _open_session_db_at_path

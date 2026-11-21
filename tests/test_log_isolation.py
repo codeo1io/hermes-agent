@@ -33,7 +33,7 @@ def _real_hermes_home() -> Path:
     hermes-managed sandbox (delegate pytest homes under ``~/.hermes/tmp``) is
     not mistaken for the operator's real root."""
     try:
-        from hermes_state_guard import _real_platform_state_root
+        from persistence.sqlite._state.guard import _real_platform_state_root
 
         real = _real_platform_state_root()
     except Exception:

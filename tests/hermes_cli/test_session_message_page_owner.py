@@ -61,9 +61,11 @@ def test_message_pages_identify_the_serving_profile(tmp_path, monkeypatch, servi
         assert [row["content"] for row in older["messages"] + tail["messages"]] == [
             f"message-{index}" for index in range(199)
         ]
-        with SessionDB(db_path=default_home / "state.db") as native_db:
-            rows = native_db.get_messages("same-id", limit=200)
-            assert len(rows) == 1, "the native home's store was read through the custom root"
+        from persistence_assembly import open_persistence as _open_native_store, profile_scope as _native_scope
+
+        with _open_native_store(_native_scope(home=default_home)) as native_store:
+            assert native_store.messages.display_count("same-id") == 1, \
+                "the native home's store was read through the custom root"
 
 
 

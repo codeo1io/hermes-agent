@@ -1716,7 +1716,7 @@ def _capture_real_hermes_root() -> list[Path]:
         # consequently points at that test sandbox, NOT the account's real
         # Hermes state. Protect the authoritative machine root instead, using
         # the same passwd-backed function as the native state tripwire.
-        from hermes_state_guard import _real_platform_state_root
+        from persistence.sqlite._state.guard import _real_platform_state_root
         default_root = _real_platform_state_root() or (Path.home() / ".hermes").resolve()
         roots.append(default_root)
     except Exception:

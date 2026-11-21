@@ -79,7 +79,7 @@ def _pytest_context(monkeypatch):
 
 
 def test_guard_refuses_production_kanban_db(_pytest_context):
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
     from hermes_cli.kanban_db_connect import _ensure_test_isolation
 
     root = _real_platform_state_root()
@@ -89,7 +89,7 @@ def test_guard_refuses_production_kanban_db(_pytest_context):
 
 
 def test_guard_refuses_production_board_dirs_and_profiles(_pytest_context):
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
     from hermes_cli.kanban_db_connect import _ensure_test_isolation
 
     root = _real_platform_state_root()
@@ -103,7 +103,7 @@ def test_guard_refuses_production_board_dirs_and_profiles(_pytest_context):
 def test_guard_allows_sandboxed_db_under_real_root(_pytest_context):
     """pytest tmpdirs parked under ~/.hermes are legitimate sandboxes — only
     the production BOARD paths are denied."""
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
     from hermes_cli.kanban_db_connect import _ensure_test_isolation
 
     root = _real_platform_state_root()
@@ -113,7 +113,7 @@ def test_guard_allows_sandboxed_db_under_real_root(_pytest_context):
 
 
 def test_guard_bypass_env(_pytest_context, monkeypatch):
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
     from hermes_cli.kanban_db_connect import _ensure_test_isolation
 
     root = _real_platform_state_root()
@@ -123,7 +123,7 @@ def test_guard_bypass_env(_pytest_context, monkeypatch):
 
 
 def test_guard_inert_outside_test_context(monkeypatch):
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
     from hermes_cli import kanban_db_connect as kbc
 
     root = _real_platform_state_root()
@@ -137,7 +137,7 @@ def test_guard_inert_outside_test_context(monkeypatch):
     # the process tree genuinely has a pytest ancestor, which would flip the
     # guard back on. Neutralize it: the guard is memoised, so patch the
     # module global _in_test_context consults.
-    monkeypatch.setattr("hermes_state_guard._PYTEST_ANCESTOR", False)
+    monkeypatch.setattr("persistence.sqlite._state.guard._PYTEST_ANCESTOR", False)
     # Not memoised in this process yet: without psutil ancestors there is
     # nothing pytest-shaped above us inside the test runner either, so the
     # guard must stay silent and simply return.
@@ -167,7 +167,7 @@ def test_write_txn_refuses_raw_conn_to_live_board(_pytest_context):
     """
     import sqlite3
 
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
@@ -193,7 +193,7 @@ def test_real_platform_state_root_ignores_redirected_home(monkeypatch, tmp_path)
     """Invariant (wave-8 forensics item 1): the deny-root follows the REAL
     home, not the HOME env a test redirected — so the guard keeps matching
     the production board even while HOME points at a sandbox."""
-    from hermes_state_guard import _real_platform_state_root
+    from persistence.sqlite._state.guard import _real_platform_state_root
 
     real = _real_platform_state_root()
     assert real is not None
