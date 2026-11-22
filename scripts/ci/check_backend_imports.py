@@ -38,6 +38,7 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", "tests"}
 _ALLOWED: dict[str, str] = {
     "hermes_state_loop_guard.py": "the debug loop guard wraps the backend holder's two choke points",
     "tools/session_search_tool.py": "the browse-preview redactor recognises the backend's preview cut by its length",
+    "hermes_cli/kanban_db_connect.py": "the kanban write choke arms on the backend guard's test-context and sandbox classifiers",
 }
 _BACKEND_DIR = "persistence/sqlite"
 _HOME_READERS = frozenset({
