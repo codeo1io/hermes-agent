@@ -270,6 +270,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\windows-e2e.ps1 -Phase stage -InstallMethod $env:INSTALL_METHOD -Route $env:UPDATE_METHOD -InstallRef $env:INSTALL_REF -UpdateRef $env:UPDATE_REF -SetupExeUrl $env:SETUP_EXE_URL
 
       - name: Install ${{ inputs.install-ref }} (${{ inputs.install-method }})
+        id: install
         shell: powershell
         env:
           INSTALL_METHOD: ${{ inputs.install-method }}
@@ -281,6 +282,10 @@ jobs:
 
       - name: Update ${{ inputs.install-ref }} -> ${{ inputs.update-ref }} (${{ inputs.update-method }})
         id: update
+        # A classified install-phase known failure means nothing landed; the
+        # update phase has no install to update. Skip it (the receipt cell
+        # already tells the story).
+        if: steps.install.outputs.known_failure == ''
         shell: powershell
         env:
           INSTALL_METHOD: ${{ inputs.install-method }}
@@ -295,7 +300,7 @@ jobs:
       # install, so stamp truthfulness is asserted here — not in the install
       # phase. Known-failure legs legitimately never reach the new HEAD.
       - name: Verify install stamps describe the updated checkout
-        if: steps.update.outputs.known_failure == ''
+        if: steps.install.outputs.known_failure == '' && steps.update.outputs.known_failure == ''
         shell: powershell
         env:
           INSTALL_METHOD: ${{ inputs.install-method }}
@@ -306,17 +311,17 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File tests\install\windows-e2e.ps1 -Phase verify-stamp -InstallMethod $env:INSTALL_METHOD -Route $env:UPDATE_METHOD -InstallRef $env:INSTALL_REF -SetupExeUrl $env:SETUP_EXE_URL
 
       - name: Stage known-failure receipt
-        if: steps.update.outputs.known_failure != ''
+        if: always() && (steps.install.outputs.known_failure != '' || steps.update.outputs.known_failure != '')
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path gui-e2e-proof -Force | Out-Null
           Copy-Item -LiteralPath (Join-Path $env:HERMES_E2E_WORKROOT 'known-failure.json') -Destination gui-e2e-proof/known-failure.json
 
       - name: Upload known-failure receipt
-        if: steps.update.outputs.known_failure != ''
+        if: always() && (steps.install.outputs.known_failure != '' || steps.update.outputs.known_failure != '')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: install-e2e-known-${{ steps.update.outputs.known_failure }}--${{ inputs.leg-id }}
+          name: install-e2e-known-${{ steps.install.outputs.known_failure || steps.update.outputs.known_failure }}--${{ inputs.leg-id }}
           path: gui-e2e-proof/known-failure.json
           if-no-files-found: error
           retention-days: 14

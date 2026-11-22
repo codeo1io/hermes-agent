@@ -2072,11 +2072,7 @@ def test_cooldown_rollback_failure_surfaces_and_releases_lease(
     def _rollback_write_fails(_self, _session_id, _snapshot) -> None:
         raise sqlite3.OperationalError("forced rollback write failure")
 
-    monkeypatch.setattr(
-        type(db.messages),
-        "restore_compression_cooldown",
-        _rollback_write_fails,
-    )
+    monkeypatch.setattr(type(db.messages), "restore_compression_cooldown", _rollback_write_fails)
 
     with pytest.raises(sqlite3.OperationalError, match="forced rollback write failure"):
         agent._compress_context(
