@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 from datetime import timedelta
-from typing import Mapping, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
 
 from ..conversation.messages import TranscriptRow
 from ..core.identity import JsonValue, SessionId
@@ -333,6 +333,14 @@ class SessionMaintenance(Protocol):
 
     def clear_backend_heartbeat(self, backend_id: str) -> bool:
         """Delete the heartbeat row of ``backend_id``; True when a row was deleted. An empty id returns False without a write."""
+        ...
+
+    def list_backend_heartbeats(self) -> list[dict[str, Any]]:
+        """Every heartbeat row (``backend_id, pid, started_at, last_heartbeat, profile, host``) as a mapping, ordered by ``backend_id`` — the reclaim pass's view of the table."""
+        ...
+
+    def drop_backend_heartbeats(self, observed: Mapping[str, float]) -> list[str]:
+        """Delete each heartbeat row only while its ``last_heartbeat`` has not advanced past the caller's observed snapshot — a live owner that refreshed between the reclaim pass's list and its delete is spared. Returns the ids actually removed, in input order; empty or unknown ids write nothing."""
         ...
 
     def import_sessions(self, sessions: Sequence[Mapping[str, JsonValue]]) -> ImportResult:
