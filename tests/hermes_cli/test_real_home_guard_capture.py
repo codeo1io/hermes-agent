@@ -1,7 +1,7 @@
 """A disposable pytest HOME must never replace the real protected Hermes root."""
 from pathlib import Path
 
-from hermes_state_guard import _real_platform_state_root
+from persistence.sqlite._state.guard import _real_platform_state_root
 from tests import conftest
 
 

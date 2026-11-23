@@ -45,7 +45,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state_guard import _real_platform_state_root
+from persistence.sqlite._state.guard import _real_platform_state_root
 
 _REPO = Path(__file__).resolve().parents[2]
 

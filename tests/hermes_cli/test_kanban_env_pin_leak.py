@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state_guard import _real_platform_state_root
+from persistence.sqlite._state.guard import _real_platform_state_root
 
 # allow_real_home_io on the two live-immutability tests: they stat / read the
 # REAL live board before and after the refused calls to prove zero mutation.

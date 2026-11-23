@@ -93,7 +93,8 @@ def test_default_home_unmarked_tmpdir_is_relocated_before_pytest_uses_it(tmp_pat
     # this disposable child only, simulate that passwd home so the fixture
     # actually exercises default-root protection without touching real state.
     child_code = (
-        "import os, pathlib, tempfile, hermes_state_guard; "
+        "import os, pathlib, tempfile; "
+        "from persistence.sqlite._state import guard as hermes_state_guard; "
         "hermes_state_guard._capture_real_home = lambda: pathlib.Path(os.environ['HOME']); "
         "import tests.conftest; print(tempfile.gettempdir())"
     )

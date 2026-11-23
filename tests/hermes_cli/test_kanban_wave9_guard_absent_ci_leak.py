@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_state_guard import _real_platform_state_root
+from persistence.sqlite._state.guard import _real_platform_state_root
 
 _REPO = Path(__file__).resolve().parents[2]
 _WAVE9_FILES = (
@@ -55,7 +55,7 @@ def wave9_ci_topology(_hermetic_environment, monkeypatch, tmp_path):
     account home preserves the crucial native-root/TMPDIR nesting without
     creating or modifying any production state, including on shared CI runners.
     """
-    import hermes_state_guard
+    from persistence.sqlite._state import guard as hermes_state_guard
 
     fake_home = tmp_path / "wave9-account"
     root = fake_home / ".hermes"
