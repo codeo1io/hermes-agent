@@ -109,7 +109,12 @@ def test_state_db_auto_maintenance_sweeps_turn_leases_before_retention_gates(
 
     cli._run_state_db_auto_maintenance(session_db)
 
-    session_db.sweep_expired_turn_leases.assert_called_once_with()
+    session_db.sweep_expired_turn_leases.assert_called_once()
+    (_args, kwargs) = session_db.sweep_expired_turn_leases.call_args
+    # The same-process registry predicate rides every CLI sweep: a CLI resume that died mid-turn
+    # leaves an expired row the kernel pid proof can never retire (its process is alive).
+    from agent.turn_facade_lease import turn_lease_holder_is_orphaned
+    assert kwargs.get("extra_dead_holder") is turn_lease_holder_is_orphaned
     session_db.maybe_auto_archive.assert_not_called()
     session_db.maybe_auto_prune_and_vacuum.assert_not_called()
 

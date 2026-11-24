@@ -299,6 +299,62 @@ def test_expired_turn_lease_is_reclaimed(tmp_path):
     )
 
 
+def test_sweep_retires_same_process_orphan_via_registry_predicate(tmp_path):
+    """The 2026-11-17/20 incident shape (finding 34ce45cd2093): an expired row whose holder
+    names a LIVE process — a dead or wedged turn THREAD inside it — is retired by the sweep's
+    ``extra_dead_holder`` predicate (the client's same-process live-holder registry), not left
+    to the TTL backstop. Red on the pre-registry base: the row survived the sweep."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("orphaned", source="test")
+    live_pid_holder = f"pid={os.getpid()}{hermes_state_pidns.holder_namespace_token()}:turn=dead-thread"
+    assert db.try_acquire_session_turn_lease("orphaned", live_pid_holder, ttl_seconds=0.05)
+    time.sleep(0.15)
+
+    removed = db.sweep_expired_turn_leases(
+        extra_dead_holder=lambda holder: holder == live_pid_holder)
+
+    assert removed == 1
+    assert db._read_one("SELECT COUNT(*) FROM session_turn_leases")[0] == 0
+
+
+def test_sweep_spares_live_registered_holder_within_grace(tmp_path):
+    """The predicate's guardrail: an expired row the predicate does NOT judge orphaned (the
+    registry still holds a live, renewing lease) survives the within-grace sweep — only the
+    backstop may take it."""
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("alive", source="test")
+    live_pid_holder = f"pid={os.getpid()}{hermes_state_pidns.holder_namespace_token()}:turn=still-running"
+    assert db.try_acquire_session_turn_lease("alive", live_pid_holder, ttl_seconds=0.05)
+    time.sleep(0.15)
+
+    removed = db.sweep_expired_turn_leases(extra_dead_holder=lambda holder: False)
+
+    assert removed == 0
+    assert db._read_one("SELECT COUNT(*) FROM session_turn_leases")[0] == 1  # row survives the sweep
+    assert db.try_acquire_session_turn_lease(
+        "alive", live_pid_holder, ttl_seconds=5)  # ...but steal-on-acquire still reclaims
+
+
+def test_sweep_backstop_takes_unattributable_residue_at_one_hour(tmp_path):
+    """The backstop bound: residue no rule can attribute (recycled pid, foreign pidns,
+    registry-less process) goes when it ages past the sweep grace — 1h since this change, not
+    the 24h the expired-lease incidents rode while the verifier FAILED every scan."""
+
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("residue", source="test")
+    assert db.try_acquire_session_turn_lease("residue", "pid=999999999:turn=unattributable", ttl_seconds=1)
+    row = db._read_one("SELECT expires_at FROM session_turn_leases")
+    expired_2h_ago = row[0] - 7200.0
+
+    removed = db.sweep_expired_turn_leases()
+    # The row is within the REAL 1h grace against wall-clock now (fresh expiry), so the default
+    # sweep spares it; past the grace it goes whatever the holder.
+    assert removed == 0
+    db._execute_write(lambda conn: conn.execute(
+        "UPDATE session_turn_leases SET expires_at = ?", (expired_2h_ago,)))
+    assert db.sweep_expired_turn_leases() == 1
+
+
 def test_acquire_turn_lease_notifies_wait_callback(tmp_path):
     """Waiters get a progress callback while another holder owns the lease."""
     path = tmp_path / "state.db"

@@ -34,7 +34,7 @@ def _patch_store_seam(monkeypatch, calls: list):
     import hermes_state_registry as registry
 
     db = SimpleNamespace(
-        sweep_expired_turn_leases=lambda: calls.append("sweep") or 0,
+        sweep_expired_turn_leases=lambda **kw: calls.append(("sweep", kw.get("extra_dead_holder"))) or 0,
         maybe_auto_archive=lambda **kw: calls.append("archive"),
         maybe_auto_prune_and_vacuum=lambda **kw: calls.append("prune"))
     released = []
@@ -55,7 +55,7 @@ def test_maintenance_sweeps_turn_leases_with_retention_disabled(monkeypatch):
 
     gateway_run._housekeeping_state_db_maintenance()
 
-    assert calls == ["sweep"]
+    assert [c[0] if isinstance(c, tuple) else c for c in calls] == ["sweep"]
     assert released == [db]
 
 
@@ -70,8 +70,24 @@ def test_maintenance_sweeps_before_the_gated_retention_chores(monkeypatch):
 
     gateway_run._housekeeping_state_db_maintenance()
 
-    assert calls == ["sweep", "archive", "prune"]
+    assert [c[0] if isinstance(c, tuple) else c for c in calls] == ["sweep", "archive", "prune"]
     assert released == [db]
+
+
+def test_maintenance_sweep_carries_the_same_process_registry_predicate(monkeypatch):
+    """The ungated sweep passes the lease client's registry predicate: an expired row held by
+    THIS process's dead/wedged turn thread retires within one tick — the kernel pid proof alone
+    kept it for the TTL backstop (finding 34ce45cd2093's 2026-11-17/20 incident shape)."""
+    from agent.turn_facade_lease import turn_lease_holder_is_orphaned
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config", lambda *a, **k: {"sessions": {}})
+    calls: list = []
+    _patch_store_seam(monkeypatch, calls)
+
+    gateway_run._housekeeping_state_db_maintenance()
+
+    assert calls and calls[0][1] is turn_lease_holder_is_orphaned
 
 
 def test_state_db_maintenance_rides_the_housekeeping_tick(monkeypatch):

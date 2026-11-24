@@ -52,9 +52,12 @@ def _run_state_db_auto_maintenance(session_db) -> None:
 
         # Unlatched and unconditional: turn-lease hygiene is not retention config, and lease
         # churn is continuous (unlike the one-time repairs above). Isolated so a failing sweep
-        # cannot skip the archive/prune gates below it.
+        # cannot skip the archive/prune gates below it. The registry predicate retires this
+        # process's own turn-thread orphans within one sweep (a CLI resume that died mid-turn
+        # leaves exactly that shape).
         try:
-            session_db.sweep_expired_turn_leases()
+            from agent.turn_facade_lease import turn_lease_holder_is_orphaned
+            session_db.sweep_expired_turn_leases(extra_dead_holder=turn_lease_holder_is_orphaned)
         except Exception as _exc:
             logger.debug("Turn-lease sweep skipped: %s", _exc, exc_info=True)
 
