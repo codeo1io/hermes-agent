@@ -712,16 +712,43 @@ def _resolve_for_skill_ownership(path) -> Path:
         return path_obj.expanduser().absolute()
 
 
-def is_external_skill_path(path) -> bool:
-    """True when ``path`` lives under an external or trusted project skills dir.
-    Those are externally owned: autonomous lifecycle maintenance treats them as
-    read-only (user-directed tool calls may still edit them)."""
-    candidate = _resolve_for_skill_ownership(path)
+def compute_ownership_roots() -> tuple[Path, ...]:
+    """External + trusted project skills dirs, resolved once for batch scans.
+
+    Exactly the root list :func:`is_external_skill_path` builds per call, so a
+    caller that checks many paths in one scan can resolve the invariants once
+    (``ownership_roots=...``) and get byte-identical verdicts without the
+    per-path config/trust re-resolution — the O(candidates x roots) loop that
+    made the curator's skill scans re-load config thousands of times per
+    invocation (finding f8c3e3602c81). Per-invocation snapshot semantics: the
+    tuple is computed once and never memoized process-globally, because trust
+    and external-dir lists are cwd/config-dependent."""
     roots: list[Path] = list(get_external_skills_dirs())
     try:
         roots.extend(get_project_skills_dirs())
     except Exception:
         pass
+    return tuple(roots)
+
+
+def is_external_skill_path(path, ownership_roots=None) -> bool:
+    """True when ``path`` lives under an external or trusted project skills dir.
+    Those are externally owned: autonomous lifecycle maintenance treats them as
+    read-only (user-directed tool calls may still edit them).
+
+    ``ownership_roots`` is the precomputed root tuple from
+    :func:`compute_ownership_roots` for batch callers; the default ``None`` path
+    resolves roots exactly as before (per-call resolution, unchanged semantics
+    for every non-batch caller)."""
+    candidate = _resolve_for_skill_ownership(path)
+    if ownership_roots is None:
+        roots: list[Path] = list(get_external_skills_dirs())
+        try:
+            roots.extend(get_project_skills_dirs())
+        except Exception:
+            pass
+    else:
+        roots = list(ownership_roots)
     return any(candidate.is_relative_to(_resolve_for_skill_ownership(root)) for root in roots)
 
 

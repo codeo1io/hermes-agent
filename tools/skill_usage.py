@@ -14,7 +14,7 @@ import threading
 from contextlib import contextmanager, suppress
 from datetime import datetime, timezone, UTC
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
 from agent.skill_utils import is_excluded_skill_path, is_external_skill_path
@@ -212,29 +212,76 @@ def _toggle_suppressed_name(skill_name: str, *, add: bool) -> None:
         logger.debug("Failed to write curator suppression list: %s", e, exc_info=True)
 
 
-def _iter_skill_mds(base: Path, *, local_only: bool) -> Iterator[tuple[str, Path]]:
+class _ScanContext(NamedTuple):
+    """Per-invocation scan invariants (finding f8c3e3602c81): ownership roots,
+    hub/bundled name sets, the prune flag, usage records and the name->dir index
+    that per-name ``_find_skill_dir`` lookups would re-walk the whole tree for.
+    Resolved ONCE per invocation so an N-skill scan does O(N) work, not
+    O(N x candidates) re-resolution (the loop that made ``hermes curator status``
+    re-load config thousands of times per run under fleet load). Snapshot
+    semantics: built per invocation, never memoized process-globally — trust and
+    external-dir lists are cwd/config-dependent."""
+
+    ownership_roots: Tuple[Path, ...]
+    hub: frozenset
+    bundled: frozenset
+    prune_builtins: bool
+    usage: Dict[str, Any]
+    local_dirs: Dict[str, Path]
+
+
+def _build_scan_context() -> _ScanContext:
+    """Resolve every scan invariant once. ``local_dirs`` replicates
+    ``_find_skill_dir``'s winner semantics exactly: same sorted
+    ``iter_skill_index_files`` walk, same external-path filter (against the
+    snapshot roots), first match wins."""
+    from agent.skill_utils import compute_ownership_roots, iter_skill_index_files
+
+    roots = compute_ownership_roots()
+    local_dirs: Dict[str, Path] = {}
+    base = _skills_dir()
+    if base.exists():
+        for skill_md in iter_skill_index_files(base, "SKILL.md"):
+            if is_external_skill_path(skill_md, ownership_roots=roots):
+                continue
+            local_dirs.setdefault(read_skill_name(skill_md, fallback=skill_md.parent.name), skill_md.parent)
+    return _ScanContext(
+        ownership_roots=roots,
+        hub=frozenset(_read_hub_installed_names()),
+        bundled=frozenset(_read_bundled_names()),
+        prune_builtins=_prune_builtins_enabled(),
+        usage=load_usage(),
+        local_dirs=local_dirs,
+    )
+
+
+def _iter_skill_mds(base: Path, *, local_only: bool, ownership_roots=None) -> Iterator[tuple[str, Path]]:
     """``(frontmatter name, SKILL.md)`` under *base* minus metadata/VCS/venv/cache dirs; *local_only* also skips
-    external skill dirs mounted below the tree (curation must not touch them)."""
+    external skill dirs mounted below the tree (curation must not touch them). ``ownership_roots`` is the
+    precomputed root tuple from ``agent.skill_utils.compute_ownership_roots`` for batch scans (default resolves
+    per call, exactly as before)."""
     for skill_md in base.rglob("SKILL.md"):
-        if not (is_excluded_skill_path(skill_md) or (local_only and is_external_skill_path(skill_md))):
+        if not (is_excluded_skill_path(skill_md)
+                or (local_only and is_external_skill_path(skill_md, ownership_roots=ownership_roots))):
             yield read_skill_name(skill_md, fallback=skill_md.parent.name), skill_md
 
 
-def _scan_local_skills(keep: Callable[[str, Path, set[str], dict[str, Any]], bool]) -> list[str]:
-    """Sorted local skill names passing *keep(name, skill_md, bundled, usage)*; hub/protected names never reach it."""
+def _scan_local_skills(keep: Callable[..., bool], *, ctx: Optional[_ScanContext] = None) -> list[str]:
+    """Sorted local skill names passing *keep(name, skill_md, bundled, usage, ctx)*; hub/protected names never reach it."""
     if not (base := _skills_dir()).exists():
         return []
-    hub, bundled, usage = _read_hub_installed_names(), _read_bundled_names(), load_usage()
-    return sorted({name for name, skill_md in _iter_skill_mds(base, local_only=True)
-                   if name not in hub and not is_protected_builtin(name) and keep(name, skill_md, bundled, usage)})
+    if ctx is None:
+        ctx = _build_scan_context()
+    return sorted({name for name, skill_md in _iter_skill_mds(base, local_only=True, ownership_roots=ctx.ownership_roots)
+                   if name not in ctx.hub and not is_protected_builtin(name)
+                   and keep(name, skill_md, ctx.bundled, ctx.usage, ctx)})
 
 
 def list_agent_created_skill_names() -> list[str]:
     """Curator-manageable skills: ``created_by: agent`` records plus, with ``curator.prune_builtins``, bundled
     built-ins (which never carry a managed record, so the record gate applies only to local skills). Never hub."""
-    prune_builtins = _prune_builtins_enabled()  # read once, before the walk
     return _scan_local_skills(
-        lambda name, _md, bundled, usage: prune_builtins if name in bundled else _is_curator_managed_record(usage.get(name)))
+        lambda name, _md, bundled, usage, ctx: ctx.prune_builtins if name in bundled else _is_curator_managed_record(usage.get(name)))
 
 
 def list_archived_skill_names() -> list[str]:
@@ -275,9 +322,22 @@ def _external_read_only_message(skill_name: str) -> str:
     return f"skill '{skill_name}' lives in skills.external_dirs; external skills are read-only to the curator"
 
 
-def is_curation_eligible(skill_name: str, skill_path: Optional[Path] = None) -> bool:
+def is_curation_eligible(skill_name: str, skill_path: Optional[Path] = None, *, ctx: Optional[_ScanContext] = None) -> bool:
     """Agent-created: yes. Bundled: only with ``curator.prune_builtins``. Hub / external-dir / protected built-ins:
-    never (external owner)."""
+    never (external owner).
+
+    ``ctx`` is a :func:`_build_scan_context` snapshot for batch callers; the
+    default ``None`` path resolves everything per call, exactly as before."""
+    if ctx is not None:
+        if ((skill_path is not None and is_external_skill_path(skill_path, ownership_roots=ctx.ownership_roots))
+                or is_protected_builtin(skill_name) or skill_name in ctx.hub):
+            return False
+        if skill_name in ctx.bundled:
+            return ctx.prune_builtins
+        local_dir = ctx.local_dirs.get(skill_name)
+        if local_dir is not None:
+            return not is_external_skill_path(local_dir, ownership_roots=ctx.ownership_roots)
+        return _find_external_skill_dir(skill_name) is None
     if ((skill_path is not None and is_external_skill_path(skill_path)) or is_protected_builtin(skill_name)
             or is_hub_installed(skill_name)):
         return False
@@ -306,8 +366,8 @@ def list_unmanaged_skill_names() -> list[str]:
     belong to the user). Invisible to ``curated_report()`` and auto transitions; only ``curator adopt`` hands
     them over — provenance is declared, never inferred from activity."""
     return _scan_local_skills(
-        lambda name, md, bundled, usage: name not in bundled and not _is_curator_managed_record(usage.get(name))
-        and is_curation_eligible(name, md))
+        lambda name, md, bundled, usage, ctx: name not in bundled and not _is_curator_managed_record(usage.get(name))
+        and is_curation_eligible(name, md, ctx=ctx))
 
 
 def unmanaged_report() -> list[dict[str, Any]]:
@@ -707,12 +767,18 @@ def _match_skill_dir(skill_mds: Iterable[Path], skill_name: str) -> Optional[Pat
     return next((p.parent for p in skill_mds if read_skill_name(p, fallback=p.parent.name) == skill_name), None)
 
 
-def _find_skill_dir(skill_name: str) -> Optional[Path]:
-    """Skill dir by frontmatter ``name`` (flat or nested)."""
+def _find_skill_dir(skill_name: str, *, ctx: Optional[_ScanContext] = None) -> Optional[Path]:
+    """Skill dir by frontmatter ``name`` (flat or nested). With a scan ``ctx``, the
+    pre-built name->dir index answers directly (same winner semantics — see
+    ``_build_scan_context``)."""
     from agent.skill_utils import iter_skill_index_files
     base = _skills_dir()
+    if not base.exists():
+        return None
+    if ctx is not None:
+        return ctx.local_dirs.get(skill_name)
     return _match_skill_dir((p for p in iter_skill_index_files(base, "SKILL.md") if not is_external_skill_path(p)),
-                            skill_name) if base.exists() else None
+                            skill_name)
 
 
 def _find_external_skill_dir(skill_name: str) -> Optional[Path]:
@@ -728,19 +794,22 @@ def curated_report() -> list[dict[str, Any]]:
     """One backfilled row per curator-managed skill with ``provenance`` and ``_persisted`` (real record exists; fresh
     backfills get their inactivity clock seeded instead of counting as ancient)."""
     data = load_usage()
-    names = set(list_agent_created_skill_names())
+    ctx = _build_scan_context()
+    names = set(_scan_local_skills(
+        lambda name, _md, bundled, usage, c: c.prune_builtins if name in bundled else _is_curator_managed_record(usage.get(name)),
+        ctx=ctx))
     # Pinned-but-unmanaged skills stay visible or their pin silently vanishes from `curator status`; the local-dir
     # guard keeps stale records for deleted dirs from rendering as ghost rows.
     names.update(name for name, rec in data.items()
-                 if rec.get("pinned") and is_curation_eligible(name) and _find_skill_dir(name) is not None)
+                 if rec.get("pinned") and is_curation_eligible(name, ctx=ctx) and _find_skill_dir(name, ctx=ctx) is not None)
     return [_report_row(n, data.get(n), _persisted=n in data, provenance=provenance(n)) for n in sorted(names)]
 
 
-def is_external_only(skill_name: str) -> bool:
+def is_external_only(skill_name: str, *, ctx: Optional[_ScanContext] = None) -> bool:
     """Present under ``skills.external_dirs`` and NOT in the local store (the local copy wins on
     name clashes, mirroring ``is_agent_created``'s external exclusion). An external-only skill is
     externally authored: it was mounted, not learned."""
-    return (_find_skill_dir(skill_name) is None and _find_external_skill_dir(skill_name) is not None)
+    return (_find_skill_dir(skill_name, ctx=ctx) is None and _find_external_skill_dir(skill_name) is not None)
 
 
 def _external_skill_names() -> set:
@@ -757,17 +826,18 @@ def _external_skill_names() -> set:
     return names
 
 
-def provenance(skill_name: str) -> str:
+def provenance(skill_name: str, *, ctx: Optional[_ScanContext] = None) -> str:
     """'hub' | 'bundled' | 'external' | 'agent'.
 
     'external' covers skills mounted from ``skills.external_dirs`` and absent from the local
     store — externally authored, not learned from the user (#108032). 'agent' keeps covering
     agent-authored AND local hand-made skills — the ones the user may edit/delete from the UI
     (external skills stay foreground-editable in place by design, commit 8c8fc6c1ec; the label
-    split is about origin, not mutability)."""
+    split is about origin, not mutability). A scan ``ctx`` answers the local-dir half from the
+    pre-built index instead of re-walking the tree per name."""
     return ("hub" if is_hub_installed(skill_name)
             else "bundled" if is_bundled(skill_name)
-            else "external" if is_external_only(skill_name)
+            else "external" if is_external_only(skill_name, ctx=ctx)
             else "agent")
 
 
@@ -775,9 +845,10 @@ def usage_report() -> list[dict[str, Any]]:
     """Usage rows for EVERY skill on disk (built-ins and hub included) plus the enabled plugins' skills;
     ``curated_report()`` is the managed subset."""
     data = load_usage()
+    ctx = _build_scan_context()
     names = ({name for name, _md in _iter_skill_mds(base, local_only=False)}
              if (base := _skills_dir()).exists() else set())
-    rows = [_report_row(n, data.get(n), provenance=provenance(n), _persisted=n in data) for n in names]
+    rows = [_report_row(n, data.get(n), provenance=provenance(n, ctx=ctx), _persisted=n in data) for n in names]
     # Plugin skills live in the plugin's own directory and are counted under their qualified name
     # ("meshy:meshy-3d"), so a walk of the skills directory never sees them.
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
