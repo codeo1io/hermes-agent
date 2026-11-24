@@ -299,3 +299,124 @@ def test_periodic_flush_skips_running_sessions(registered_session, monkeypatch):
 
     assert server._flush_dirty_sessions(now=1_000.0) == 0
     assert agent.flush_calls == []
+
+
+@pytest.mark.platforms("posix")
+def test_sigterm_clears_own_backend_heartbeat_row_before_flush_and_chain(
+    tmp_path, monkeypatch
+):
+    """AE4 / R3 (maestro A4, finding 34ce45cd2093): the own ``gateway_heartbeats`` row is
+    deleted at signal RECEIPT — before the bounded flush and before the prior handler — so a
+    supervisor's SIGKILL mid-graceful-shutdown (or a SIGKILL-only crash) cannot leave a stale
+    row behind. The observed failure was a live pid in a minutes-long shutdown whose row went
+    stale while ``atexit`` was still seconds away. Other backends' rows are none of this
+    signal's business; the refresher must be stopped so a late tick cannot re-upsert ours."""
+    import threading
+
+    from hermes_state import SessionDB
+    from tests.waiting import wait_until
+
+    db = SessionDB(tmp_path / "state.db")
+    now = time.time()
+    for backend_id, pid in (("sig-clear-A", 4242), ("sig-clear-other", 4243)):
+        db.register_backend_heartbeat(
+            backend_id=backend_id, pid=pid, started_at=now - 300.0,
+            last_heartbeat=now - 5.0, profile="default", host="test-host")
+
+    seen: dict[str, list] = {}
+
+    def _stub_flush(budget_s=None):
+        seen["at_flush"] = db.list_backend_heartbeats()
+        return 0
+
+    stop_event = threading.Event()
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "sig-clear-A")
+    monkeypatch.setattr(server, "_heartbeat_refresher_stop", stop_event, raising=False)
+    monkeypatch.setattr(server, "_flush_sessions_before_exit", _stub_flush)
+
+    chained: dict[str, object] = {}
+
+    def _prev(signum, frame):
+        chained["at_chain"] = db.list_backend_heartbeats()
+        chained["called"] = True
+
+    prev = {signal.SIGTERM: signal.signal(signal.SIGTERM, _prev)}
+    try:
+        assert server.install_exit_flush_signal_handlers() is True
+        os.kill(os.getpid(), signal.SIGTERM)
+        wait_until(lambda: chained.get("called"), what="prior SIGTERM handler chained")
+    finally:
+        _restore_signal_state(prev)
+
+    # Row gone BEFORE the flush and BEFORE the chain — receipt-time, not exit-time.
+    assert [r["backend_id"] for r in seen["at_flush"]] == ["sig-clear-other"]
+    assert [r["backend_id"] for r in chained["at_chain"]] == ["sig-clear-other"]
+    assert [r["backend_id"] for r in db.list_backend_heartbeats()] == ["sig-clear-other"]
+    assert stop_event.is_set(), "signal receipt must stop the heartbeat refresher"
+    db.close()
+
+
+def test_ignored_sigint_does_not_clear_own_backend_heartbeat_row(tmp_path, monkeypatch):
+    """The SIG_IGN-inherit early return is load-bearing for heartbeats too: an inherited ignore
+    (`cmd &` from a non-interactive shell) means the process keeps running — clearing its own
+    row at that signal would fake the gateway's death while it stays up."""
+    from hermes_state import SessionDB
+
+    db = SessionDB(tmp_path / "state.db")
+    db.register_backend_heartbeat(
+        backend_id="sig-ign-A", pid=4242, started_at=1.0,
+        last_heartbeat=time.time(), profile="default", host="test-host")
+    ran = {"flush": False}
+    monkeypatch.setattr(server, "_get_db", lambda: db)
+    monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "sig-ign-A")
+    monkeypatch.setattr(server, "_heartbeat_refresher_stop", None, raising=False)
+    monkeypatch.setattr(
+        server, "_flush_sessions_before_exit",
+        lambda budget_s=None: ran.__setitem__("flush", True) or 0)
+
+    saved = dict(server._exit_flush_prev_handlers)
+    server._exit_flush_prev_handlers[signal.SIGINT] = signal.SIG_IGN
+    try:
+        server._handle_exit_flush_signal(signal.SIGINT, None)
+    finally:
+        server._exit_flush_prev_handlers.clear()
+        server._exit_flush_prev_handlers.update(saved)
+
+    assert ran["flush"] is False
+    assert [r["backend_id"] for r in db.list_backend_heartbeats()] == ["sig-ign-A"]
+    db.close()
+
+
+def test_heartbeat_clear_failure_does_not_block_flush_or_chain(monkeypatch):
+    """A DB failure inside the receipt-time clear is suppressed: the flush, the turn stop and
+    the prior-handler chain still run — a failed clear must never take the shutdown hostage
+    (the leftover row ages out via the reclaim fence at the next boot instead)."""
+    chain = {"called": False}
+    flushed = {"n": 0}
+
+    def _prev(signum, frame):
+        chain["called"] = True
+
+    def _no_db():
+        raise RuntimeError("state.db gone")
+
+    def _flush(budget_s=None):
+        flushed["n"] += 1
+        return 0
+
+    monkeypatch.setattr(server, "_get_db", _no_db)
+    monkeypatch.setattr(server, "_backend_id_for_this_process", lambda: "sig-clear-A")
+    monkeypatch.setattr(server, "_heartbeat_refresher_stop", None, raising=False)
+    monkeypatch.setattr(server, "_flush_sessions_before_exit", _flush)
+
+    saved = dict(server._exit_flush_prev_handlers)
+    server._exit_flush_prev_handlers[signal.SIGTERM] = _prev
+    try:
+        server._handle_exit_flush_signal(signal.SIGTERM, None)  # must not raise
+    finally:
+        server._exit_flush_prev_handlers.clear()
+        server._exit_flush_prev_handlers.update(saved)
+
+    assert flushed["n"] == 1
+    assert chain["called"] is True
