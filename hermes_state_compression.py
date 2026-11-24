@@ -51,7 +51,11 @@ _CHAIN_STEP_SQL = f"""
 
 
 # Turn-lease rows expired longer than this are swept by the next acquisition of any conversation.
-_TURN_LEASE_SWEEP_GRACE_S = 86400.0
+# 1h, not 24h: the grace is also the longest a still-live suspended holder can go unrefreshed and
+# still revive, and residue that no rule can attribute (recycled pid, foreign pidns, registry-less
+# process) otherwise FAILED the operational verifier for a day (finding 34ce45cd2093). Same-process
+# turn-thread orphans don't wait for this at all — they ride the registry predicate (one tick).
+_TURN_LEASE_SWEEP_GRACE_S = 3600.0
 
 
 def _cooldown_row(exists: bool, cooldown_until, error) -> dict[str, Any]:
@@ -76,17 +80,19 @@ def _claim_lease_row(conn, table: str, key_col: str, key: str, holder: str, now:
     return owner is not None and owner["holder"] == holder, reclaimed_holder
 
 
-def _retire_stale_turn_lease_rows_on_conn(conn, now: float) -> int:
+def _retire_stale_turn_lease_rows_on_conn(conn, now: float, extra_dead_holder=None) -> int:
     """Retire expired ``session_turn_leases`` rows nobody can renew, inside the caller's txn;
     returns rows removed. Shared by the lazy acquire path and the non-lazy maintenance sweep.
 
-    Two rules, one order. TTL backstop: expiry older than ``_TURN_LEASE_SWEEP_GRACE_S`` goes
+    Three rules, one order. TTL backstop: expiry older than ``_TURN_LEASE_SWEEP_GRACE_S`` goes
     whatever the holder — the grace is also the longest a still-live suspended holder can go
     unrefreshed and still revive, so past it nobody may. Holder-aware: within the grace, an
-    expired row goes only when its holder is provably dead (kernel-proof local-pid death via
-    ``_compression_lock_holder_process_is_dead``; recycled pids read alive, foreign/unstamped
-    namespaces and unstructured holders defer to the backstop). A holder killed without
-    releasing leaves an unrenewable row — refresh and release match on holder — that a
+    expired row goes only when its holder is provably dead — kernel-proof local-pid death via
+    ``_compression_lock_holder_process_is_dead`` (recycled pids read alive, foreign/unstamped
+    namespaces and unstructured holders defer to the backstop), or the caller's
+    ``extra_dead_holder`` predicate when the client layer holds stronger in-process truth
+    (the same-process live-holder registry in ``agent/turn_facade_lease``). A holder killed
+    without releasing leaves an unrenewable row — refresh and release match on holder — that a
     quiescent store otherwise keeps forever."""
     from hermes_state import _compression_lock_holder_process_is_dead
     backstop = conn.execute(
@@ -97,7 +103,8 @@ def _retire_stale_turn_lease_rows_on_conn(conn, now: float) -> int:
             "SELECT conversation_id, holder FROM session_turn_leases "
             "WHERE expires_at < ? AND expires_at >= ?",
             (now, now - _TURN_LEASE_SWEEP_GRACE_S))
-        if _compression_lock_holder_process_is_dead(row["holder"])]
+        if _compression_lock_holder_process_is_dead(row["holder"])
+        or (extra_dead_holder is not None and extra_dead_holder(row["holder"]))]
     for conversation_id in doomed:
         conn.execute(
             "DELETE FROM session_turn_leases WHERE conversation_id = ?", (conversation_id,))
@@ -870,17 +877,18 @@ class SessionCompressionMixin:
                 (conversation_id, holder))
         self._execute_write(_do)
 
-    def sweep_expired_turn_leases(self, patience_s: Optional[float] = None) -> int:
+    def sweep_expired_turn_leases(self, patience_s: Optional[float] = None, *, extra_dead_holder=None) -> int:
         """Maintenance sweep of expired turn leases (one write txn): rows past the sweep grace
-        (any holder) plus, within it, rows whose holder is provably dead — see
-        ``_retire_stale_turn_lease_rows_on_conn``. The non-lazy entry point: the gateway's
-        per-profile state.db maintenance (60s tick and startup) and CLI startup call it, so a
-        quiescent store retires dead-holder residue too; acquisitions sweep lazily as well.
-        Returns rows removed."""
+        (any holder) plus, within it, rows whose holder is provably dead — the kernel pid proof
+        or the caller's ``extra_dead_holder`` predicate (same-process registry truth from the
+        lease client) — see ``_retire_stale_turn_lease_rows_on_conn``. The non-lazy entry point:
+        the gateway's per-profile state.db maintenance (60s tick and startup) and CLI startup
+        call it, so a quiescent store retires dead-holder residue too; acquisitions sweep lazily
+        as well. Returns rows removed."""
         def _do(conn):
             # Retry-safe shape (``_do`` re-runs on write replay): ``now`` is derived per
             # attempt and the doomed list is local to it.
-            return _retire_stale_turn_lease_rows_on_conn(conn, time.time())
+            return _retire_stale_turn_lease_rows_on_conn(conn, time.time(), extra_dead_holder)
         removed = self._execute_write(_do, patience_s=patience_s)
         if removed:
             logger.debug("Turn-lease sweep retired %d expired row(s)", removed)

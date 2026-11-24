@@ -9,8 +9,10 @@ bodies run on per-handle workers), not per-turn threads.
 """
 import logging
 import os
+import re
 import threading
 import time
+import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -29,6 +31,55 @@ LEASE_WAIT_SECONDS = 1800.0
 _REFRESH_WRITE_PATIENCE_S = 20.0
 # Headroom before expiry for one BEGIN IMMEDIATE blocked in the writer's 1s busy handler, plus jitter.
 _REFRESH_EXPIRY_MARGIN_S = 2.0
+
+
+# ── Same-process live-holder registry ────────────────────────────────────────
+# The store's holder-aware sweep proves PROCESS death only (``pid == os.getpid()`` is never
+# "dead" by design, and recycled pids read alive), so a lease abandoned by a dead or wedged
+# turn THREAD inside the live gateway rode the TTL backstop (formerly 24h) while the operational
+# verifier FAILED on the expired row every scan (contract phase1.session.operational, finding
+# 34ce45cd2093, incidents 2026-11-17/20). The registry is the in-process truth the sweep needs:
+# every admitted DurableTurnLease registers its holder; the maintenance paths pass
+# :func:`turn_lease_holder_is_orphaned` as the sweep's ``extra_dead_holder`` predicate so a
+# same-process expired row is retired within one tick instead of the backstop. Weakrefs keep the
+# registry from pinning leases whose turn loop died without unwinding: a collected lease is an
+# orphan by the next check. Cross-process holders keep the pid-liveness/backstop rules.
+_LIVE_TURN_LEASES: Dict[str, "weakref.ReferenceType"] = {}
+_LIVE_TURN_LEASES_LOCK = threading.Lock()
+_HOLDER_PID_RE = re.compile(r"^pid=(\d+)")
+
+
+def register_live_turn_lease(lease: "DurableTurnLease") -> None:
+    """Register an admitted lease under its holder string (unique per turn via the relay id)."""
+    with _LIVE_TURN_LEASES_LOCK:
+        _LIVE_TURN_LEASES[lease.holder] = weakref.ref(lease)
+
+
+def unregister_live_turn_lease(holder: str) -> None:
+    """Drop a holder's registry entry: called from ``release`` and ``stop_refresher`` — either
+    way no live renewal exists, so an expired row naming this holder must be reclaimable at the
+    next sweep rather than riding the backstop."""
+    with _LIVE_TURN_LEASES_LOCK:
+        _LIVE_TURN_LEASES.pop(holder, None)
+
+
+def turn_lease_holder_is_orphaned(holder: str) -> bool:
+    """``extra_dead_holder`` predicate for the store's turn-lease sweep: True when ``holder``
+    names THIS process and no live, renewing ``DurableTurnLease`` holds it (dead/wedged turn
+    thread, or a lease whose refresher was deliberately stopped). Holders naming another pid
+    (or unparseable) are never judged here — their rows follow the store's own pid-death and
+    backstop rules. Registration and the pid fence together bound a same-process incident to
+    one maintenance tick (~60s), inside the verifier's ~3–5 min cadence."""
+    match = _HOLDER_PID_RE.match(holder or "")
+    if match is None or int(match.group(1)) != os.getpid():
+        return False
+    with _LIVE_TURN_LEASES_LOCK:
+        ref = _LIVE_TURN_LEASES.get(holder)
+    lease = ref() if ref is not None else None
+    if lease is None:
+        return True  # unregistered or collected: nothing can renew this row
+    with lease._lock:
+        return lease.stop.is_set() or not lease.turn_active
 
 
 class DurableTurnLease:
@@ -97,7 +148,9 @@ class DurableTurnLease:
     def stop_refresher(self) -> None:
         """Stop renewal and deactivate the turn. Also the watchdog's deactivate callback: a wedge the
         hard interrupt cannot unwind must not keep the lease alive forever; TTL expiry lets
-        stale-turn cleanup reclaim the row."""
+        stale-turn cleanup reclaim the row — and the registry entry goes NOW so the sweep's
+        same-process predicate retires the expired row at the next tick, not the backstop."""
+        unregister_live_turn_lease(self.holder)
         with self._lock:
             self.turn_active = False
             self.stop.set()
@@ -115,6 +168,7 @@ class DurableTurnLease:
     def release(self) -> None:
         """Release the row and drop the agent's holder attrs (only if they still name this lease)."""
         agent = self.agent
+        unregister_live_turn_lease(self.holder)
         try:
             self.db.release_session_turn_lease(self.session_id, self.holder)
         except Exception:
@@ -356,9 +410,11 @@ def admit_durable_turn_lease(
     # Assign only after admission so the finally cannot release a holder that never owned the
     # row; persist paths read the agent attr so a late flush is fenced in the same transaction.
     lease = DurableTurnLease(
-        agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),
-    )
+        agent, db, session_id, holder, expires_at=_committed_lease_expiry(db, session_id, holder, authority_floor),    )
     agent._active_session_turn_lease_holder = holder
+    # Registry entry from admission: the store's maintenance sweep judges this row live only
+    # while a renewing lease holds it (see ``turn_lease_holder_is_orphaned``).
+    register_live_turn_lease(lease)
     agent._active_session_turn_lease_ttl_seconds = LEASE_TTL_SECONDS
     try:
         # Read the row only now: the previous holder may have created or deleted it while this

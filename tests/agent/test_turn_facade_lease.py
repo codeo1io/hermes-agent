@@ -264,3 +264,80 @@ def test_interrupt_turn_only_while_active():
     assert calls == ["lost"] and lease.interrupt_message == "lost"
     lease.deactivate_after_liveness_abort()
     assert lease.stop.is_set() and lease.is_turn_active() is False
+
+
+def test_live_holder_registry_lifecycle_and_orphan_predicate():
+    """The same-process live-holder registry (finding 34ce45cd2093, incidents 2026-11-17/20):
+    a registered, running lease keeps its holder non-orphaned; unregistering via release or
+    stop_refresher, or losing the lease object entirely (wedge the hard interrupt could not
+    unwind), makes the same-process holder read orphaned so the maintenance sweep retires its
+    expired row within one tick. Holders naming another pid — or sharing only a numeric prefix
+    with ours — are never judged here; they keep the store's pid-death and backstop rules."""
+    import gc
+    import os
+
+    import agent.turn_facade_lease as tfl
+
+    def started(holder):
+        lease = DurableTurnLease(_agent(_Db()), _Db(), "s1", holder)
+        with lease._lock:
+            lease.turn_active = True  # what start() sets before scheduling
+        return lease
+
+    live = started(f"pid={os.getpid()}:turn=t-live:platform=test")
+    tfl.register_live_turn_lease(live)
+    try:
+        assert tfl.turn_lease_holder_is_orphaned(live.holder) is False
+        # Unregistered same-process holder: the dead/wedged turn-thread shape.
+        assert tfl.turn_lease_holder_is_orphaned(f"pid={os.getpid()}:turn=t-dead:platform=test") is True
+        # Foreign pid and malformed holders are not ours to judge.
+        assert tfl.turn_lease_holder_is_orphaned("pid=999999999:turn=t:platform=test") is False
+        assert tfl.turn_lease_holder_is_orphaned("") is False
+        assert tfl.turn_lease_holder_is_orphaned("legacy-holder") is False
+        # Numeric prefix collision: pid=123 must not judge pid=1230's holder.
+        assert tfl.turn_lease_holder_is_orphaned(f"pid={os.getpid()}0:turn=t:platform=test") is False
+
+        # stop_refresher unregisters: a deliberately stopped refresher must not pin the row.
+        live.stop_refresher()
+        assert tfl.turn_lease_holder_is_orphaned(live.holder) is True
+
+        # A collected lease (turn loop died without unwinding) orphans its holder.
+        lost = started(f"pid={os.getpid()}:turn=t-lost:platform=test")
+        tfl.register_live_turn_lease(lost)
+        del lost
+        gc.collect()
+        assert tfl.turn_lease_holder_is_orphaned(f"pid={os.getpid()}:turn=t-lost:platform=test") is True
+
+        # release() unregisters too (normal turn end).
+        ending = started(f"pid={os.getpid()}:turn=t-end:platform=test")
+        tfl.register_live_turn_lease(ending)
+        ending.release()
+        assert tfl.turn_lease_holder_is_orphaned(ending.holder) is True
+    finally:
+        for holder in (f"pid={os.getpid()}:turn=t-live:platform=test",
+                       f"pid={os.getpid()}:turn=t-lost:platform=test",
+                       f"pid={os.getpid()}:turn=t-end:platform=test"):
+            tfl.unregister_live_turn_lease(holder)
+
+
+def test_admission_registers_and_release_unregisters_the_holder(monkeypatch):
+    """Wiring: admit_durable_turn_lease registers the admitted holder in the live registry;
+    the facade's release bracket unregisters it."""
+    import os
+
+    import agent.turn_facade_lease as tfl
+
+    monkeypatch.setattr(
+        "agent.turn_liveness.resolve_turn_liveness_settings", lambda cfg: (None, 1.0)
+    )
+    db = _Db()
+    agent = _agent(db)
+    admission = _admit(agent)
+    assert admission.lease is not None
+    holder = admission.lease.holder
+    assert holder.startswith(f"pid={os.getpid()}")
+    with tfl._LIVE_TURN_LEASES_LOCK:
+        assert holder in tfl._LIVE_TURN_LEASES
+    admission.lease.release()
+    with tfl._LIVE_TURN_LEASES_LOCK:
+        assert holder not in tfl._LIVE_TURN_LEASES

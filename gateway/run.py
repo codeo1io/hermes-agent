@@ -4326,8 +4326,11 @@ def _housekeeping_state_db_maintenance(launch: Optional[tuple[Path, Path]] = Non
     _sess_cfg = (_load_full_config().get("sessions") or {})
     _adb = acquire()
     try:
-        # Ungated and first: a killed holder's expired lease row is residue, not retention.
-        _adb.sweep_expired_turn_leases()
+        # Ungated and first: a killed holder's expired lease row is residue, not retention. The
+        # registry predicate adds this process's own turn-thread orphans (dead/wedged turns whose
+        # process is alive — invisible to the kernel pid proof) to the sweep's within-grace rules.
+        from agent.turn_facade_lease import turn_lease_holder_is_orphaned
+        _adb.sweep_expired_turn_leases(extra_dead_holder=turn_lease_holder_is_orphaned)
         if _sess_cfg.get("auto_archive", False):
             _adb.maybe_auto_archive(
                 idle_days=float(_sess_cfg.get("auto_archive_days", 3)),
