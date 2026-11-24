@@ -9,6 +9,7 @@ Covers:
 from __future__ import annotations
 
 import io
+import os
 from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -85,3 +86,59 @@ def test_list_unmanaged_itemizes_and_explains(curator_status_env):
     assert "curator adopt" in out
 
 
+
+
+def test_status_subprocess_contract_canary(tmp_path, monkeypatch):
+    """E2E failure-class canary (finding f8c3e3602c81).
+
+    Maestro probes `hermes curator status` as a subprocess with a 45s budget:
+    PASS = rc 0 + 'curator: ENABLED' on stdout. The pre-fix scan-loop
+    regression intermittently blew that budget under fleet load, so this runs
+    the REAL CLI boot path in a subprocess against a temp HERMES_HOME and
+    asserts the contract plus a generous wall bound (30s) that catches the
+    regression class without flapping when the CI host is busy.
+    """
+    import subprocess
+    import sys
+    import time
+
+    home = tmp_path / ".hermes"
+    skills = home / "skills"
+    skills.mkdir(parents=True)
+    (home / "logs").mkdir()
+    (home / "config.yaml").write_text("skills: {}\n")
+    for i in range(8):
+        d = skills / f"canary-skill-{i}"
+        d.mkdir()
+        (d / "SKILL.md").write_text(
+            f"---\nname: canary-skill-{i}\ndescription: canary fixture {i}\n---\n\n# {i}\n"
+        )
+
+    repo_root = Path(__file__).resolve().parents[2]
+    env = {
+        "HERMES_HOME": str(home),
+        "HOME": str(tmp_path),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONPATH": str(repo_root),
+        "TZ": "UTC",
+        "LANG": "C.UTF-8",
+        "PYTHONHASHSEED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, str(repo_root / "hermes_cli" / "main.py"), "curator", "status"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    elapsed = time.monotonic() - t0
+
+    assert proc.returncode == 0, f"rc={proc.returncode} stderr={proc.stderr[-800:]}"
+    assert "curator: ENABLED" in proc.stdout, proc.stdout[:400]
+    assert elapsed < 30.0, (
+        f"curator status took {elapsed:.1f}s on an 8-skill tree — the scan "
+        "regression class is back (probe budget is 45s)"
+    )
