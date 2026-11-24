@@ -802,7 +802,7 @@ def curated_report() -> list[dict[str, Any]]:
     # guard keeps stale records for deleted dirs from rendering as ghost rows.
     names.update(name for name, rec in data.items()
                  if rec.get("pinned") and is_curation_eligible(name, ctx=ctx) and _find_skill_dir(name, ctx=ctx) is not None)
-    return [_report_row(n, data.get(n), _persisted=n in data, provenance=provenance(n)) for n in sorted(names)]
+    return [_report_row(n, data.get(n), _persisted=n in data, provenance=provenance(n, ctx=ctx)) for n in sorted(names)]
 
 
 def is_external_only(skill_name: str, *, ctx: Optional[_ScanContext] = None) -> bool:
