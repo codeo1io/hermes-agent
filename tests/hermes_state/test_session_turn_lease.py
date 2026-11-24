@@ -601,7 +601,9 @@ def test_turn_lease_revives_expired_row_still_owned_by_writer(tmp_path):
 
 def test_turn_lease_acquisition_sweeps_long_expired_rows_of_other_conversations(tmp_path):
     """A holder that died without releasing leaves its row behind; the next acquisition anywhere
-    removes rows expired past the grace, and keeps recent expiries their live owner may renew."""
+    removes rows expired past the grace (1h since the operational-verifier remediation — the old
+    24h bound let unattributable residue FAIL the contract for a day), and keeps recent expiries
+    their live owner may renew."""
     db = SessionDB(tmp_path / "state.db")
     for sid in ("abandoned", "recent", "within-grace", "fresh"):
         db.create_session(sid, source="test")
@@ -610,9 +612,9 @@ def test_turn_lease_acquisition_sweeps_long_expired_rows_of_other_conversations(
         raw.executemany(
             "INSERT INTO session_turn_leases (conversation_id, holder, acquired_at, expires_at) "
             "VALUES (?, ?, ?, ?)",
-            [("abandoned", "pid=1:turn=crashed", time.time() - 86400 - 120, time.time() - 86400 - 60),
+            [("abandoned", "pid=1:turn=crashed", time.time() - 3600 - 120, time.time() - 3600 - 60),
              ("recent", f"pid={os.getpid()}:turn=starved", time.time() - 60, time.time() - 10),
-             ("within-grace", "pid=1:turn=suspended", time.time() - 86400, time.time() - 86400 + 60)])
+             ("within-grace", "pid=1:turn=suspended", time.time() - 3600 + 120, time.time() - 3600 + 180)])
 
     assert db.try_acquire_session_turn_lease("fresh", f"pid={os.getpid()}:turn=next", ttl_seconds=5)
 
