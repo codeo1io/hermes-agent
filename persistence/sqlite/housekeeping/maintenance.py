@@ -12,7 +12,7 @@ import os
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from persistence.conversation.sessions import CANONICAL_BOT_CHAT_TITLE
 from persistence.core.errors import ExportTooLarge
@@ -448,6 +448,29 @@ class SQLiteSessionMaintenance(SessionPortability):
         with translated():
             return self._store.holder()._write_rowcount(
                 "DELETE FROM gateway_heartbeats WHERE backend_id = ?", (str(backend_id),)) > 0
+
+    def list_backend_heartbeats(self) -> list[dict[str, Any]]:
+        with translated():
+            rows = self._store.holder()._read_all(
+                "SELECT backend_id, pid, started_at, last_heartbeat, profile, host"
+                " FROM gateway_heartbeats ORDER BY backend_id")
+        return [dict(row) for row in rows]
+
+    def drop_backend_heartbeats(self, observed: Mapping[str, float]) -> list[str]:
+        # One write per id (the table is tiny; partial deletes are independent), each guarded by
+        # the observed snapshot so a row refreshed between the reclaim pass's list and this
+        # delete survives whatever the fence decided a moment earlier.
+        removed: list[str] = []
+        with translated():
+            holder = self._store.holder()
+            for backend_id, stamp in observed.items():
+                if not backend_id:
+                    continue
+                if holder._write_rowcount(
+                        "DELETE FROM gateway_heartbeats WHERE backend_id = ? AND last_heartbeat <= ?",
+                        (str(backend_id), float(stamp))) > 0:
+                    removed.append(str(backend_id))
+        return removed
 
     # ── read-only probes ──────────────────────────────────────────────────
 

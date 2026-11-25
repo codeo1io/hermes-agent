@@ -635,6 +635,21 @@ class InMemoryMaintenance:
             return False
         return self._heartbeats().pop(backend_id, None) is not None
 
+    def list_backend_heartbeats(self) -> list[dict[str, Any]]:
+        return [dict(row) for _, row in sorted(self._heartbeats().items())]
+
+    def drop_backend_heartbeats(self, observed: Mapping[str, float]) -> list[str]:
+        table = self._heartbeats()
+        removed: list[str] = []
+        for backend_id, stamp in observed.items():
+            if not backend_id:
+                continue
+            row = table.get(str(backend_id))
+            if row is not None and row["last_heartbeat"] <= float(stamp):
+                table.pop(str(backend_id))
+                removed.append(str(backend_id))
+        return removed
+
     # ── read-only probes ──────────────────────────────────────────────────
 
     def session_projection_digest(self, *, busy_timeout_s: float = 0.05) -> Optional[tuple[tuple[str, ...], bytes]]:
