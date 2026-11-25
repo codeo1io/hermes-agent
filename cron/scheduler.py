@@ -2771,6 +2771,27 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
         heartbeat_thread.join(timeout=1.0)
 
 
+def _is_sqlite_busy_error(exc: BaseException) -> bool:
+    """True for lock-class SQLite contention errors (SQLITE_BUSY family).
+
+    Deliberately narrow: only ``sqlite3.OperationalError`` carrying the locked
+    message — schema/corruption errors propagate as failures. Wraps chained
+    exceptions raised through the external-worker dispatch path.
+    """
+    seen = exc
+    for _ in range(4):  # bounded unwrap: raise-from chains are shallow
+        if isinstance(seen, sqlite3.OperationalError) and (
+            "database is locked" in str(seen).lower()
+            or "database table is locked" in str(seen).lower()
+        ):
+            return True
+        cause = getattr(seen, "__cause__", None) or getattr(seen, "__context__", None)
+        if cause is None:
+            return False
+        seen = cause
+    return False
+
+
 def run_one_job(
     job: dict, *, adapters=None, loop=None, verbose: bool = False,
     extra_prompt: Optional[str] = None, cancel_event: Optional[_CancelEventLike] = None,
@@ -2799,6 +2820,26 @@ def run_one_job(
             # a worker's notice. A recovered unknown execution is different:
             # its worker never committed a terminal outcome.
             post_handoff = isinstance(handoff_error, _ExternalWorkerPostHandoffError)
+            if not post_handoff and _is_sqlite_busy_error(handoff_error):
+                # A lock-class failure before handoff is transient contention (the
+                # executions ledger's busy_timeout lost a race to a long foreign
+                # writer hold, e.g. a state.db convoy during an upstream model
+                # outage). No side effect can have run: the worker was never
+                # launched. Booking the job's occurrence as a failed run would
+                # mint incidents and failure-streak noise for a condition that
+                # the next healthy tick retries. Settle the never-started
+                # receipt best-effort (no job failure, no incident, no
+                # delivery) and let the next tick re-fire the occurrence. #488.
+                logger.warning(
+                    "Job '%s' not dispatched this tick: transient ledger lock contention "
+                    "before worker handoff (will retry next tick): %s",
+                    job["id"], handoff_error)
+                from cron.executions import settle_unstarted_execution
+                settle_unstarted_execution(
+                    execution_id, job["id"],
+                    f"Transient ledger lock contention before worker handoff "
+                    f"(occurrence deferred to next tick): {handoff_error}")
+                return True
             stage = "failed after handoff" if post_handoff else "dispatch failed"
             error = f"Restart-safe cron worker {stage}: {handoff_error}"
             if post_handoff:

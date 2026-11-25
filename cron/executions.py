@@ -141,6 +141,50 @@ def _transaction() -> Iterator[sqlite3.Connection]:
         yield conn
 
 
+# Bounded retry for dispatch-critical ledger writes under foreign-writer contention. The in-process
+# state.db writer mutex can hold for minutes during upstream model outages (turn-lease refresh/release
+# against stalled streams stretch 24s -> 147s; 2026-11-25 storms), and busy_timeout=5000 then fails
+# create_execution / mark_execution_handoff_pending outright — each failure skips the job's whole
+# occurrence or books it as a failed run with an incident. A lock-class SQLITE_BUSY is transient by
+# definition: the writer holds it, the read never conflicts. Retry those; propagate everything else
+# (schema errors, corruption) unchanged. #488.
+_DISPATCH_LOCK_RETRIES = 4
+_DISPATCH_LOCK_BACKOFF_S = 1.5
+
+
+def _is_busy_lock_error(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and ("database is locked" in str(exc).lower() or "database table is locked" in str(exc).lower())
+    )
+
+
+def _with_dispatch_lock_retry(operation_name: str, operation):
+    """Run a dispatch-critical ledger write, retrying only SQLITE_BUSY lock-class errors.
+
+    Retries are bounded (4 attempts, 1.5s exponential backoff) and every retry is logged so the
+    convoy stays observable. A lock error that survives the budget is re-raised for the caller's
+    existing failure lane; a non-lock error propagates immediately.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _DISPATCH_LOCK_RETRIES + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if not _is_busy_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt == _DISPATCH_LOCK_RETRIES:
+                break
+            delay = _DISPATCH_LOCK_BACKOFF_S * (2 ** (attempt - 1))
+            logger.warning(
+                "executions ledger write (%s) hit a busy lock (attempt %d/%d); retrying in %.1fs: %s",
+                operation_name, attempt, _DISPATCH_LOCK_RETRIES, delay, exc)
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
 def _fetch(conn: sqlite3.Connection, execution_id: str) -> Optional[dict[str, Any]]:
     row = conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
     return dict(row) if row is not None else None
@@ -254,18 +298,23 @@ def create_execution(
     now = _hermes_now().isoformat()
     execution_id = uuid.uuid4().hex
     pid = os.getpid()
-    with _transaction() as conn:
-        conn.execute(
-            """INSERT INTO executions
-               (id, job_id, source, process_id, pid, process_started_at,
-                status, claimed_at, scheduled_instant)
-               VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?)""",
-            (execution_id, str(job_id), str(source), _PROCESS_ID, pid,
-             _process_start_time(pid), now, canonical_instant(scheduled_instant)),
-        )
-        record = _fetch(conn, execution_id)
+
+    def _create() -> dict[str, Any]:
+        with _transaction() as conn:
+            conn.execute(
+                """INSERT INTO executions
+                   (id, job_id, source, process_id, pid, process_started_at,
+                    status, claimed_at, scheduled_instant)
+                   VALUES (?, ?, ?, ?, ?, ?, 'claimed', ?, ?)""",
+                (execution_id, str(job_id), str(source), _PROCESS_ID, pid,
+                 _process_start_time(pid), now, canonical_instant),
+            )
+            return _fetch(conn, execution_id)  # type: ignore[return-value]
+
+    canonical_instant = canonical_instant(scheduled_instant)
+    record = _with_dispatch_lock_retry("create_execution", _create)
     _emit_execution_state(record)
-    return record  # type: ignore[return-value]
+    return record
 
 
 def set_execution_occurrence(execution_id: str, instant: Optional[str]) -> None:
@@ -284,17 +333,24 @@ def set_execution_occurrence(execution_id: str, instant: Optional[str]) -> None:
 
 def mark_execution_handoff_pending(execution_id: str) -> Optional[dict[str, Any]]:
     """Fence restart recovery while an external worker is adopting a claim."""
-    with _transaction() as conn:
-        cur = conn.execute(
-            """UPDATE executions
-               SET handoff_pending=1, handoff_started_at=?
-               WHERE id=? AND status='claimed'
-                 AND process_id=? AND pid=?""",
-            (time.time(), execution_id, _PROCESS_ID, os.getpid()),
-        )
-        if cur.rowcount != 1:
-            return None
-        record = _fetch(conn, execution_id)
+    now = time.time()
+
+    def _mark() -> Optional[dict[str, Any]]:
+        with _transaction() as conn:
+            cur = conn.execute(
+                """UPDATE executions
+                   SET handoff_pending=1, handoff_started_at=?
+                   WHERE id=? AND status='claimed'
+                     AND process_id=? AND pid=?""",
+                (now, execution_id, _PROCESS_ID, os.getpid()),
+            )
+            if cur.rowcount != 1:
+                return None
+            return _fetch(conn, execution_id)
+
+    record = _with_dispatch_lock_retry("mark_execution_handoff_pending", _mark)
+    if record is None:
+        return None
     _emit_execution_state(record)
     return record
 
@@ -485,8 +541,11 @@ _OWNER_WEDGED_REASON = (
 def settle_unstarted_execution(execution_id: str, job_id: str, error: str) -> None:
     """Close the receipt of a run that never started: a ``claimed`` row never resolves. Best-effort
     so a ledger write cannot mask the failure the caller logs or re-raises."""
-    try:
+    def _settle() -> None:
         finish_execution(execution_id, success=False, error=error)
+
+    try:
+        _with_dispatch_lock_retry("settle_unstarted_execution", _settle)
     except (sqlite3.Error, OSError) as record_err:
         logger.error("Job '%s': failed to close execution receipt %s (%s): %s",
                      job_id, execution_id, error, record_err)
