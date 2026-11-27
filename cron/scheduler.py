@@ -3550,8 +3550,55 @@ def _wait_for_external_cron_worker_body(
     worker or change its ledger ownership.
     """
     def _is_terminal() -> bool:
-        current = get_execution(execution_id)
+        try:
+            current = get_execution(execution_id)
+        except sqlite3.OperationalError as exc:
+            from cron.executions import _is_busy_lock_error
+
+            if _is_busy_lock_error(exc):
+                # The ledger probe is a read, but each call opens a fresh connection and
+                # re-runs schema-init DDL, so a foreign writer's convoy (state.db writer
+                # mutex stretching 24s -> 147s during upstream model outages, #488/#589
+                # class) can exhaust busy_timeout here. The probe is advisory ONLY: the
+                # worker's process exit is this loop's real wakeup, and a busy ledger
+                # says nothing about whether the attempt is terminal. Report "not
+                # terminal" and keep waiting — the pre-fix behaviour raised out of the
+                # wait loop as a post-handoff worker failure and booked a false job
+                # failure over a live worker (2026-11-27: three multi-hour fires lost
+                # to a 31s writer hold: jobs 35978cccc04f 12:04Z, 34afa079 12:14Z,
+                # e409464d 12:17Z).
+                logger.warning(
+                    "Cron waiter terminal probe for %s hit a busy ledger; "
+                    "treating as not-yet-terminal and continuing to wait: %s",
+                    execution_id, exc)
+                return False
+            raise
         return bool(current and current.get("status") in _TERMINAL_STATES)
+
+    def _recheck_terminal() -> Optional[dict]:
+        """Re-read the attempt once the worker exited, riding out a transient busy lock.
+
+        Same failure class as ``_is_terminal``, but this read gates the unknown-outcome
+        decision, so it retries the probe itself (bounded, #589 budget) instead of
+        guessing. A busy lock that survives the budget is returned as ``None`` — the
+        caller's unknown-outcome lane already handles an unreadable row by falling
+        back to the generic dead-owner sweep, which is the honest state for an
+        unreadable ledger."""
+        from cron.executions import _is_busy_lock_error, _with_terminal_lock_retry
+
+        def _read():
+            return get_execution(execution_id)
+
+        try:
+            return _with_terminal_lock_retry("waiter_post_exit_read", _read)
+        except sqlite3.OperationalError as exc:
+            if not _is_busy_lock_error(exc):
+                raise
+            logger.error(
+                "Cron waiter post-exit ledger read for %s stayed busy after the retry "
+                "budget; falling back to the generic dead-owner sweep: %s",
+                execution_id, exc)
+            return None
 
     # The worker commits its terminal row before its process exits, so exit is
     # the correct wakeup.  Each ledger read opens a connection and re-runs
@@ -3574,8 +3621,10 @@ def _wait_for_external_cron_worker_body(
                 return True
         # The worker can commit its terminal row and exit between the first
         # read and wait(). Re-read the exact attempt before declaring that
-        # it died without terminalizing.
-        current = get_execution(execution_id)
+        # it died without terminalizing. A busy lock that survives the retry
+        # budget reads as None (unreadable), which falls through to the
+        # unknown-outcome lane below rather than guessing terminal.
+        current = _recheck_terminal()
         if current and current.get("status") in FIRER_FINISHED_STATES:
             return True
         # If the adopted worker died without terminalizing, its owner is
@@ -3597,7 +3646,7 @@ def _wait_for_external_cron_worker_body(
             recover_interrupted_executions()
             # A concurrent sweep may have won the unknown transition. Still
             # surface this waiter's exit code and stderr instead of discarding them.
-            current = get_execution(execution_id)
+            current = _recheck_terminal()
             if current and current.get("status") in FIRER_FINISHED_STATES:
                 return True
         stderr_tail = ""

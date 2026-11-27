@@ -185,6 +185,42 @@ def _with_dispatch_lock_retry(operation_name: str, operation):
     raise last_exc
 
 
+_TERMINAL_LOCK_RETRIES = 4
+_TERMINAL_LOCK_BACKOFF_S = 1.5
+
+def _with_terminal_lock_retry(operation_name: str, operation):
+    """Run a settlement-critical ledger write, retrying only SQLITE_BUSY lock-class errors.
+
+    #589 gave dispatch-critical writes (create_execution / mark_execution_handoff_pending /
+    settle_unstarted_execution) a bounded busy-lock ride so a transient foreign-writer convoy
+    cannot burn the job's whole occurrence. The SAME convoy hits the writes that close an
+    attempt AFTER its side effects ran: finish_execution, recover_receipted_execution and
+    terminalize_dead_owner. A busy lock there is strictly worse — the work already happened,
+    so a hard raise discards hours of completed run and books a false failure over a healthy
+    terminal row. Terminal attempts stay immutable (finish_execution's owner-fenced UPDATE
+    still guards every retry); a lock error that survives the budget re-raises unchanged,
+    non-lock errors propagate immediately.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, _TERMINAL_LOCK_RETRIES + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if not _is_busy_lock_error(exc):
+                raise
+            last_exc = exc
+            if attempt == _TERMINAL_LOCK_RETRIES:
+                break
+            delay = _TERMINAL_LOCK_BACKOFF_S * (2 ** (attempt - 1))
+            logger.warning(
+                "executions ledger terminal write (%s) hit a busy lock (attempt %d/%d); "
+                "retrying in %.1fs: %s",
+                operation_name, attempt, _TERMINAL_LOCK_RETRIES, delay, exc)
+            time.sleep(delay)
+    assert last_exc is not None
+    raise last_exc
+
+
 def _fetch(conn: sqlite3.Connection, execution_id: str) -> Optional[dict[str, Any]]:
     row = conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
     return dict(row) if row is not None else None
@@ -416,20 +452,24 @@ def finish_execution(
         # executions.db is durable like jobs.json: scrub raw error text before it lands on disk.
         from cron.jobs_error_text import sanitize_persisted_error
         detail = sanitize_persisted_error(detail)
-    with _transaction() as conn:
-        owner = (_PROCESS_ID, os.getpid())
-        cur = conn.execute(
-            """UPDATE executions
-               SET status=?, finished_at=?, error=?, handoff_pending=0,
-                   handoff_started_at=NULL, delivery_outcome=?
-               WHERE id=? AND status IN ('claimed','running')
-                 AND process_id=? AND pid=?""",
-            (status, now, detail, delivery_outcome, execution_id, *owner),
-        )
-        if cur.rowcount != 1:
-            return None
-        _prune_unlocked(conn)
-        record = _fetch(conn, execution_id)
+    with _lock:
+        def _finish() -> Optional[dict[str, Any]]:
+            with _transaction() as conn:
+                owner = (_PROCESS_ID, os.getpid())
+                cur = conn.execute(
+                    """UPDATE executions
+                       SET status=?, finished_at=?, error=?, handoff_pending=0,
+                           handoff_started_at=NULL, delivery_outcome=?
+                       WHERE id=? AND status IN ('claimed','running')
+                         AND process_id=? AND pid=?""",
+                    (status, now, detail, delivery_outcome, execution_id, *owner),
+                )
+                if cur.rowcount != 1:
+                    return None
+                _prune_unlocked(conn)
+                return _fetch(conn, execution_id)
+
+        record = _with_terminal_lock_retry("finish_execution", _finish)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     record_cron_finish(record, delivery_outcome)
     return record
@@ -473,16 +513,20 @@ def recover_receipted_execution(execution_id, job_id, *, success, error=None, de
 
     now = _hermes_now().isoformat()
     detail = None if success else sanitize_persisted_error(str(error) if error else 'unknown failure')
-    with _transaction() as conn:
-        row = _recoverable_row(conn, execution_id, job_id)
-        if row is None or _row_owner_live(row):
-            return None
-        conn.execute(
-            """UPDATE executions SET status=?, finished_at=?, error=?, handoff_pending=0,
-               handoff_started_at=NULL, delivery_outcome=? WHERE id=?""",
-            ('completed' if success else 'failed', now, detail, delivery_outcome, execution_id))
-        _prune_unlocked(conn)
-        record = _fetch(conn, execution_id)
+    with _lock:
+        def _recover() -> Optional[dict[str, Any]]:
+            with _transaction() as conn:
+                row = _recoverable_row(conn, execution_id, job_id)
+                if row is None or _row_owner_live(row):
+                    return None
+                conn.execute(
+                    """UPDATE executions SET status=?, finished_at=?, error=?, handoff_pending=0,
+                       handoff_started_at=NULL, delivery_outcome=? WHERE id=?""",
+                    ('completed' if success else 'failed', now, detail, delivery_outcome, execution_id))
+                _prune_unlocked(conn)
+                return _fetch(conn, execution_id)
+
+        record = _with_terminal_lock_retry("recover_receipted_execution", _recover)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     record_cron_finish(record, delivery_outcome)
     return record
@@ -647,37 +691,44 @@ def terminalize_dead_owner(execution_id: str, *, reason: str) -> bool:
     worker that is still running must never be terminalized out from under itself.
     """
     now = _hermes_now().isoformat()
-    with _transaction() as conn:
-        row = conn.execute(
-            """SELECT id, status, process_id, pid, process_started_at,
-                      handoff_pending, handoff_started_at
-               FROM executions WHERE id=?""",
-            (execution_id,),
-        ).fetchone()
-        if row is None or row["status"] not in ("claimed", "running"):
-            return False
-        if row["process_id"] == _PROCESS_ID:
-            return False
-        if _owner_is_live(int(row["pid"]), row["process_started_at"]):
-            return False
-        handoff_started_at = row["handoff_started_at"]
-        if (
-            row["handoff_pending"]
-            and handoff_started_at is not None
-            and time.time() - float(handoff_started_at) < HANDOFF_ADOPTION_GRACE_SECONDS
-        ):
-            return False
-        cur = conn.execute(
-            """UPDATE executions
-               SET status='unknown', finished_at=?, error=?,
-                   handoff_pending=0, handoff_started_at=NULL
-               WHERE id=? AND status=? AND process_id=? AND pid=?""",
-            (now, reason, row["id"], row["status"], row["process_id"], row["pid"]),
-        )
-        if cur.rowcount != 1:
-            return False
-        record = _fetch(conn, execution_id)
-        _prune_unlocked(conn)
+    with _lock:
+        def _terminalize() -> Optional[dict[str, Any]]:
+            with _transaction() as conn:
+                row = conn.execute(
+                    """SELECT id, status, process_id, pid, process_started_at,
+                              handoff_pending, handoff_started_at
+                       FROM executions WHERE id=?""",
+                    (execution_id,),
+                ).fetchone()
+                if row is None or row["status"] not in ("claimed", "running"):
+                    return None
+                if row["process_id"] == _PROCESS_ID:
+                    return None
+                if _owner_is_live(int(row["pid"]), row["process_started_at"]):
+                    return None
+                handoff_started_at = row["handoff_started_at"]
+                if (
+                    row["handoff_pending"]
+                    and handoff_started_at is not None
+                    and time.time() - float(handoff_started_at) < HANDOFF_ADOPTION_GRACE_SECONDS
+                ):
+                    return None
+                cur = conn.execute(
+                    """UPDATE executions
+                       SET status='unknown', finished_at=?, error=?,
+                           handoff_pending=0, handoff_started_at=NULL
+                       WHERE id=? AND status=? AND process_id=? AND pid=?""",
+                    (now, reason, row["id"], row["status"], row["process_id"], row["pid"]),
+                )
+                if cur.rowcount != 1:
+                    return None
+                record = _fetch(conn, execution_id)
+                _prune_unlocked(conn)
+                return record
+
+        record = _with_terminal_lock_retry("terminalize_dead_owner", _terminalize)
+    if record is None:
+        return False
     _emit_execution_state(record)
     return True
 
