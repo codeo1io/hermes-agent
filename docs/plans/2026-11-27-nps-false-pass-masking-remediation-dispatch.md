@@ -2,7 +2,7 @@
 
 **Finding:** `f5067dbabedca71fbac75cf0` — `phase3.supervisor.continuity.supervisor-nps-false-pass-masking` (MEDIUM, OPEN)
 **Run:** `9b9034174f7f421d869da6374c1f3a23` (hermes-agent-bound decision vehicle; stewardship contract `stc-9b9034174f7f421d869da6374c1f3a23`, single surface = this document, no code surfaces)
-**Date:** 2026-11-27 · **Authorship:** brainstorm `c5d70e69…`, plan `c50c60266…`, stewardship `55bc0c48…`, implement-1 `2e9743a0…` (all delegate attempts of this run)
+**Date:** 2026-11-27 · **Authorship:** brainstorm `c5d70e69…`, plan `c50c60266…`, stewardship `55bc0c48…`, implement-1 `2e9743a0…`, implement-2 `6165453f…` (all delegate attempts of this run)
 
 This document is the durable in-repo record of a cross-repo remediation decision. It is
 the ONLY surface this run is permitted to change (stewardship contract; supervisor
@@ -12,9 +12,9 @@ other repositories and is dispatched as new runs (see §2).
 
 ## Task registry (lane split)
 
-The planned change decomposes into eight task items. implement-1 authors the
-odd-numbered items fully; implement-2 authors the even-numbered items into the
-placeholders below. Content authority for every item is the plan artifact:
+The planned change decomposes into eight task items. implement-1 authored the
+odd-numbered items fully; implement-2 authored the even-numbered items into
+the same document (all eight items are complete). Content authority for every item is the plan artifact:
 `/home/agent/.hermes/conductor-delegate-spool-maestro/c50c60266de94c59a59b5c36ea50c0f5-plan-supervisor-nps-false-pass-masking-f5067dba.md`.
 
 | # | Task item | Lane |
@@ -78,14 +78,38 @@ code and fleet databases:
    maestro code). The fix belongs in **hermes-conductor** (primary) and
    **maestro** (secondary).
 
-## 2. Routing decision & run dispositions (implement-2 — placeholder)
+## 2. Routing decision & run dispositions (implement-2)
 
-> **[implement-2]** Transcribe from plan §0/§4 + stewardship
-> `delegate/55bc0c48ed374d5f9fad1bc5d5a81a8d.json`: the supervisor decision
-> (supersede this run + re-create the remediation as hermes-conductor and
-> maestro runs), this run's doc-only disposition if the supersede has not
-> landed by implement time, and the must_remain_separate contract (HC run vs
-> M run; no hermes-agent source changes from this run).
+**Supervisor decision (stewardship phase, 2026-11-27):** supersede this run
+and re-create the remediation as hermes-conductor (+ maestro) runs from the
+folded plan; the stewardship phase nonetheless returned a minimal VALID
+request (this single doc surface) so the run would not be left as a
+c270c06e-style `awaiting_evidence` zombie while the supersede lands.
+
+**Why the decision was forced (gate bind, fold-code-verified):** the
+stewardship gate cannot express the plan's zero-delta disposition —
+`repositories` must resolve against the run's own anchored set
+(`spool_outcomes.py anchored_repository_candidates`: campaign → canonical →
+workspace; this run anchors to hermes-agent only — conductor/maestro paths
+are structurally rejected as unanchored), and `validate_contract` requires
+≥1 change unit (`stewardship/policy.py:204-215`, "contract must declare at
+least one ChangeUnit"), so a no-surface request cannot fold. Any
+hermes-agent surface set for the actual remediation would be fabricated
+work.
+
+**Disposition as executed:** the supersede had NOT landed by implement time
+(run still `running`, next action `implement:implement-2` at 19:13Z), so the
+implement lanes execute the supervisor's fallback verbatim: author ONLY
+this document — no code, no other files. If the supersede lands
+mid-ladder, this record is pointer-complete: every brief's content
+authority is the spool plan artifact (§7).
+
+**Separation contract (stewardship `must_remain_separate`):**
+1. The hermes-conductor remediation run (Track HC) and the maestro
+   remediation run (Track M) ride SEPARATE runs and separate landing PRs —
+   different repositories, different ownership, no cross-pollination.
+2. This dispatch-record document and any hermes-agent source code: this run
+   may never change source, tests, or configuration in this repository.
 
 ## 3. Track O — operational brief (implement-1)
 
@@ -107,19 +131,69 @@ recovery surfaces. Evidence for every item is in §7.
   1 FROM attempts WHERE attempts.run_id = runs.id AND attempts.status='open')`.
   Feed the count to the HC run's regression tests.
 
-## 4. Track HC — hermes-conductor remediation brief (implement-2 — placeholder)
+## 4. Track HC — hermes-conductor remediation brief (implement-2)
 
-> **[implement-2]** Transcribe HC-U1 (owner-progress truth column
-> `runs.last_owner_progress_at` stamped only on real transitions — discipline
-> precedent `integration_queue.last_durable_progress_at`, store.py:1602;
-> census predicate excludes `runs.updated_at`/`last_reconciled_at`/scheduler
-> defer stamps; migration backfill from terminal attempts; consumer audit),
-> HC-U2 (additive census field `owner_progress_age_seconds`; row schema
-> string must stay `conductor.run-ownership/v1` or maestro drops the rows),
-> HC-U3 (completion-boundary repair, root-cause-first; repro c270c06e; leads:
-> review-cycle `state=findings` re-fire, native mission-gate outcome oracle
-> "delegation terminal failed", completion_delivery_ledger), with tests,
-> validation and KTD13 expectations — from plan §2.
+New run against `/work/projects/hermes-conductor` (this section is its
+authoritative brief; plan §2 is the long form).
+
+**HC-U1 — owner-progress truth column + census predicate fix.** Targets:
+`run_ownership.py:427-449` (`_last_durable_progress`), `store.py` (runs
+schema + save paths), `engine.py` (transition stamping).
+1. Add `runs.last_owner_progress_at` (TEXT ISO), stamped ONLY on real owner
+   transitions: attempt dispatch→terminal, phase-result fold, work-receipt
+   mint, blocker mint/clear, run status transition. In-repo discipline
+   precedent: `integration_queue.last_durable_progress_at` (store.py:1602
+   "stamped only by real transitions"; integration.py:1048/1073).
+2. `_last_durable_progress` reads the new column (migration fallback: MAX
+   over TERMINAL attempts' `updated_at`). EXCLUDE `runs.updated_at`,
+   `runs.last_reconciled_at`, and `scheduler_state.updated_at/
+   last_decision_at` from the progress projection — bookkeeping/liveness,
+   not progress.
+3. Backfill (one bounded pass, indexed run_id lookups):
+   `UPDATE runs SET last_owner_progress_at = (SELECT MAX(updated_at) FROM
+   attempts WHERE run_id = runs.id AND status IN ('succeeded','failed',
+   'superseded'))`.
+4. Consumer audit (in-unit, blocking): every reader of census
+   `last_durable_progress` — maestro `noprogress/evidence.py:679`, conductor
+   `just_works.py:799`, `application.py:284/880`, and run_ownership's own
+   `_resource_wait_holder_liveness` (T4) — re-derived against the new
+   semantics before the predicate switches.
+
+Tests (behaviour contracts): reconcile/bookkeeping touch with no attempt
+transition does NOT advance the census clock (the exact c270c06e shape);
+scheduler defer does NOT advance; attempt terminal DOES; receipt mint DOES;
+census projection golden (a parked done run ages in hours, not minutes).
+
+**HC-U2 — typed census signal.** Additive `owner_progress_age_seconds` on
+the `conductor.run-ownership/v1` row, distinct from `updated_at`. Constraint:
+maestro's `collect_ownership_census` drops rows whose schema string differs
+from `conductor.run-ownership/v1` — the additive field must NOT bump the row
+schema string; a parse test runs against the exact maestro consumer shape.
+
+**HC-U3 — completion-boundary landing repair (root-cause-first).** Repro:
+c270c06e — every attempt terminal, reconcile SUCCEEDED, 14 work_receipts
+minted, yet 12 work_units stuck `lifecycle_fact='dispatched'`,
+`next_action_id` NULL, `awaiting_evidence` forever. Investigation order:
+(1) unit lifecycle advancement — who moves a unit dispatched → landed, and
+why doesn't a minted receipt advance it (`engine.reconcile` →
+`mint_phase_receipts` → `promote`); (2) review-cycle state machine — the
+run's own independent_review seq 2 outcome records "the engine had folded my
+first review but left the review cycle in state=findings (implementation
+unknown) and re-fired 60 seconds later"; (3) native mission-gate outcome
+oracle — `mission_authority` G4 ("plan-linked envelopes fold only through
+the native oracle: delegation-terminal + contract SATISFIED") with seq 17
+"native authority gate: delegation failed; delegation terminal failed";
+check `plan_outcome_sweep_fold_decision` and `completion_delivery_ledger`
+rows for c270c06e. Fix invariant: all attempts terminal + receipts minted +
+next_action NULL ⇒ the run reaches a terminal state within one reconcile
+pass (complete, or fail with a typed blocker — never `awaiting_evidence`
+forever). Validation: scoped pytest (ownership/reconcile/closeout) + the
+new regression contracts.
+
+**KTD13 for the HC run:** declare every touched file in
+`validation_evidence.changed_surfaces` (repo-relative) — expected ≈
+`src/hermes_conductor/run_ownership.py`, `store.py`, `engine.py`, the
+mission-gate locus, plus new test files.
 
 ## 5. Track M — maestro remediation brief (implement-1)
 
@@ -155,13 +229,27 @@ recovery surfaces. Evidence for every item is in §7.
   capacity-blocked still holds; SOURCE-STALE/SOURCE-DEGRADED semantics
   unchanged (finding 46b4abf1's U1/U4 contracts stay intact).
 
-## 6. This run's constraints & fold expectations (implement-2 — placeholder)
+## 6. This run's constraints & fold expectations (implement-2)
 
-> **[implement-2]** Transcribe from plan §4 + stewardship decision: doc-only
-> delta (`changed_surfaces` = [this file] and nothing else; engine-derived
-> tree delta must show exactly this file); no executable surface touched
-> (validation scope `none`, risk_class `low`); commit/push/pr ship the doc on
-> a conductor branch; the remediation code NEVER lands in this repo.
+- **Doc-only delta.** `validation_evidence.changed_surfaces` = [this file]
+  and nothing else, for BOTH implement lanes: implement-1 authored the file
+  (checkpointed by the engine as commit `f0a4b9a9b66` "conductor checkpoint:
+  9b9034174f7f integration"); implement-2 modified it in place (this
+  attempt). The engine-derived tree delta must show exactly this one file —
+  any other tree change violates the stewardship contract.
+- **No executable surface touched:** validation scope `none`, risk_class
+  `low`; no validation digest (the work order carried no validation block,
+  and no executable surface changed).
+- **Landing:** commit/push/pr phases ship the doc on the conductor branch
+  (`conductor/run-9b9034174f7f`); the PR is an operator-review vehicle for
+  the dispatch record. The remediation code NEVER lands in this repository.
+- **Downstream gates:** targeted_tests/full_tests treat this as a docs-only
+  delta (digest inspection, no test scope); independent_review verifies the
+  delta matches the contract's single surface and the no-code separation
+  constraint.
+- **KTD13 semantics:** never declare an empty `changed_surfaces` list over a
+  non-zero delta — here the single doc surface is declared exactly, in both
+  lanes' phase results.
 
 ## 7. Evidence appendix (implement-1)
 
@@ -191,11 +279,41 @@ Live-verified 2026-11-27 (read-only queries + source reads):
   and its mission binding (`msn-8d111fc83cfff9420745`, plan_status draft) are
   the first places HC-U3's root-cause pass should look.
 
-## 8. Acceptance criteria & sequencing (implement-2 — placeholder)
+## 8. Acceptance criteria & sequencing (implement-2)
 
-> **[implement-2]** Transcribe from plan §5/§7: sequencing graph (O now; M-U1
-> parallel-now; HC-U1 → HC-U2 → M-U2; HC-U3 independent), the per-unit
-> verification matrix, risks (consumer regressions, over-escalation,
-> schema-string mismatch, KTD13 empty-list semantics, row-regrowth), and the
-> audit-corroboration follow-up (suspected_root_cause_repository gate before
-> it steers run repo selection).
+**Sequencing:**
+
+```
+O-1/O-2/O-3 (now, no code)  ──►  evidence feeds HC-U3's tests
+M-U1 (now, independent)     ──►  catches the masked class immediately
+HC-U1  ──►  HC-U2  ──►  M-U2          (typed signal before clock gating)
+HC-U3 (independent of HC-U1/U2; needs its own root-cause pass)
+```
+
+**Verification matrix:**
+
+| Unit | Verification |
+|---|---|
+| HC-U1 | 4 behaviour tests + census golden; scoped pytest green |
+| HC-U2 | additive-diff + maestro-consumer parse test |
+| HC-U3 | synthetic done-run reaches terminal in one reconcile; c270c06e-shaped regression |
+| M-U1 | golden replay of the 08:04–08:37 shape escalates |
+| M-U2 | per-layer truth tests; capacity hold intact; 46b4abf1 semantics unchanged |
+| O-1/2/3 | run terminal + finding re-attributed + sweep count recorded |
+| this run | worktree delta == exactly this document, both lanes |
+
+**Risks & mitigations:** census consumer regressions (HC-U1 consumer audit
+before the predicate switches); over-escalation of capacity-deferred runs
+(corroborated `capacity-blocked` hold kept intact — fresh scheduler reads
+only, KTD5); census schema-string mismatch silently dropping rows
+(additive-only change + parse test); KTD13 empty-list semantics (never []
+over a non-zero delta); row-regrowth recurrence (new contract inserts on
+first detection only, coalescing discipline preserved); c270c06e must never
+be completed by hand — DB hand-edits corrupt ledger truth (conductor CLI
+recovery surface only).
+
+**Structural follow-up (kept OUT of these runs by design):** a
+corroborated gate on the continuity audit's `suspected_root_cause_repository`
+before it steers remediation-run repo selection — this misattribution
+(f5067dba → hermes-agent) cost this run its scope and forced the re-route
+recorded in §2.
