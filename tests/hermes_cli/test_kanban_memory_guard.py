@@ -17,6 +17,7 @@ Covers the two safeguards added in response:
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,56 @@ def test_resolve_max_in_progress_unset_and_unknown_memory_is_uncapped(monkeypatc
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("full_psi", "expected"),
+    [(0.0, "ok"), (4.99, "ok"), (5.0, "elevated"),
+     (9.99, "elevated"), (10.0, "critical"), (70.0, "critical"),
+     (-1.0, "ok"), (101.0, "ok"), (float("nan"), "ok"), (True, "ok")],
+)
+def test_full_stall_psi_overrides_healthy_memavailable(full_psi, expected):
+    sample = {
+        "mem_total_kib": GIB,
+        "mem_available_kib": GIB // 2,
+        "memory_full_psi_avg60": full_psi,
+    }
+    assert kbd._memory_pressure_level(sample) == expected
+
+
+def test_critical_memavailable_stays_critical_with_moderate_psi():
+    sample = {
+        "mem_total_kib": GIB,
+        "mem_available_kib": 32 * 1024,
+        "memory_full_psi_avg60": 5.5,
+    }
+    assert kbd._memory_pressure_level(sample) == "critical"
+
+
+@pytest.mark.real_memory_guard
+def test_memory_sample_includes_full_stall_psi(monkeypatch):
+    from gateway import lifecycle_ledger
+
+    monkeypatch.setattr(
+        lifecycle_ledger, "sample_memory",
+        lambda: {"mem_total_kib": GIB, "mem_available_kib": GIB // 2},
+    )
+    monkeypatch.setattr(kbd, "_psi_full_avg60", lambda: 27.5)
+    sample = kbd._system_memory_sample()
+    assert sample["memory_full_psi_avg60"] == 27.5
+    assert kbd._memory_pressure_level(sample) == "critical"
+
+
+def test_psi_reader_extracts_full_avg60_not_some(monkeypatch):
+    data = "some avg10=99.0 avg60=95.0 avg300=80.0 total=1\nfull avg10=12.0 avg60=10.5 avg300=8.0 total=2\n"
+    monkeypatch.setattr(kbd, "open", lambda *a, **kw: StringIO(data), raising=False)
+    assert kbd._psi_full_avg60() == 10.5
+
+
+def test_psi_reader_missing_or_malformed_falls_back(monkeypatch):
+    for data in ("some avg60=99.0\n", "full avg60=nan\n", "full avg60=garbage\n"):
+        monkeypatch.setattr(kbd, "open", lambda *a, **kw: StringIO(data), raising=False)
+        assert kbd._psi_full_avg60() is None
+
+
 
 
 
@@ -106,12 +157,17 @@ def _pressure_sample(level: str) -> dict:
     return {"mem_available_kib": total // 2, "mem_total_kib": total}
 
 
+@pytest.mark.parametrize(
+    "sample",
+    [
+        _pressure_sample("critical"),
+        {**_pressure_sample("ok"), "memory_full_psi_avg60": 70.0},
+    ],
+)
 def test_dispatch_spawns_nothing_under_critical_pressure(
-    kanban_home, all_assignees_spawnable, monkeypatch,
+    kanban_home, all_assignees_spawnable, monkeypatch, sample,
 ):
-    monkeypatch.setattr(
-        kbd, "_system_memory_sample", lambda: _pressure_sample("critical")
-    )
+    monkeypatch.setattr(kbd, "_system_memory_sample", lambda: sample)
     spawns = []
 
     def fake_spawn(task, workspace, board=None):
