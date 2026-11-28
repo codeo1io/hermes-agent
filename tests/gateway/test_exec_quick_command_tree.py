@@ -58,5 +58,10 @@ async def test_cancelled_exec_command_kills_shell_and_child(tmp_path):
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await async_wait_until(lambda: not _alive(shell) and not _alive(child), timeout=10,
+    # 10s measured a full kill+reap over budget once on a 12-worker CI shard
+    # (main push 46120416567) while the same test passed 100+ local runs: the
+    # kill itself (group SIGKILL + tree sweep) is synchronous and bounded; the
+    # wait is only for the kernel to report the deaths through psutil. Raise
+    # the patience for that observation, not for the kill.
+    await async_wait_until(lambda: not _alive(shell) and not _alive(child), timeout=30,
                            what='the shell and its child to stop')
