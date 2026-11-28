@@ -639,7 +639,10 @@ async def test_trigger_cron_job_forces_paused_job_atomically(
         def fire_due(self, job_id, *, adapters=None, loop=None, force=False):
             observed["force"] = force
             assert cron_jobs.claim_job_for_fire(job_id, force=force) is True
-            cron_jobs.mark_job_run(job_id, success=True)
+            # Fenced doctrine (2026-11-28): the fire's owner marks its own completion; an
+            # unfenced mark is refused over the claim this fire still holds.
+            owner = cron_jobs.get_job(job_id)["fire_claim"]["by"]
+            cron_jobs.mark_job_run(job_id, success=True, expected_fire_owner=owner)
             return True
 
     monkeypatch.setattr(
