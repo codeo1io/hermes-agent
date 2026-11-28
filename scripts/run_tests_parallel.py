@@ -35,8 +35,8 @@ Usage:
     pytest failure. Tokens after ``--`` are never validated.
 
 Environment:
-    HERMES_TEST_WORKERS  Hard override of the worker count (never
-                         cgroup-capped). The default is cpu_count*2
+    HERMES_TEST_WORKERS  Requested worker count, subject to cgroup and
+                         shared validation budget caps. The default is cpu_count*2
                          bounded by the ambient cgroup: at most the most
                          binding cpu.max over the self→root chain,
                          pids.max/32, and (pids.max - pids.current)/8 of
@@ -1477,6 +1477,23 @@ def _build_arg_parser(cgroup_limits, derived_jobs) -> argparse.ArgumentParser:
     return parser
 
 
+def _bounded_requested_jobs(requested: int, limits, derived: int) -> int:
+    """Keep explicit requests within the actual cgroup and validation lease."""
+    caps = [requested]
+    cpu_ceiling, pids_max, _ = limits
+    if cpu_ceiling is not None or pids_max is not None:
+        caps.append(derived)
+    raw = os.environ.get("CONDUCTOR_LOCAL_VALIDATION_WORKERS", "")
+    if raw:
+        try:
+            budget = int(raw)
+        except ValueError:
+            budget = 0
+        if budget > 0:
+            caps.append(budget)
+    return max(1, min(caps))
+
+
 def main() -> int:
     _make_stdio_glyph_safe()
     # Cgroup truth is read ONCE here and threaded to both the argparse
@@ -1557,6 +1574,14 @@ def main() -> int:
         i += 1
 
     args = parser.parse_args(our_args)
+    requested_jobs = args.jobs
+    # The requested value is not a resource authorization. Explicit -j and
+    # environment overrides must honor the same kernel ceilings as defaults.
+    # A shared validation lease can be smaller than this process's cgroup.
+    args.jobs = _bounded_requested_jobs(requested_jobs, cgroup_limits, derived_jobs)
+    if args.jobs < requested_jobs:
+        print(f"validation worker budget: {requested_jobs} -> {args.jobs} workers",
+              file=sys.stderr, flush=True)
 
     # Bare tokens are validated against pytest's option set so a typo fails
     # here with usage instead of once per discovered file. Anything after a
@@ -1685,7 +1710,7 @@ def main() -> int:
             detail.append(f"cpu.max={math.ceil(_cpu_ceiling)} cores")
         print(
             f"cgroup bounds: {legacy_default} → {args.jobs} workers "
-            f"({' '.join(detail)}; override: -j or HERMES_TEST_WORKERS)",
+            f"({' '.join(detail)}; lower via -j or HERMES_TEST_WORKERS)",
             file=sys.stderr,
             flush=True,
         )
