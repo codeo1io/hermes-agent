@@ -1990,7 +1990,11 @@ def _run_agent_with_watchdog(
             while True:
                 done, _ = concurrent.futures.wait({_cron_future}, timeout=_POLL_INTERVAL)
                 if done:
-                    _abort_if_fire_claim_lost()
+                    # A turn that already finished must survive a cancel signal that raced it:
+                    # the interrupt can no longer change the outcome, and the store-level fence
+                    # (re-checked against the live claim) decides a REAL ownership loss. Aborting
+                    # here instead booked a completed turn as a retryable "stopped" failure and
+                    # discarded its result (2026-11-28: execution 72b2fef174f5477394e2218509e91272).
                     result = _cron_future.result()
                     break
                 if _inactivity_timeout:
@@ -2693,40 +2697,19 @@ def _teardown_cron_agent(
         timeout_seconds=timeout_seconds)
 
 
-def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
-    """Run ``run`` while keeping this job's owned durable fire claim fresh."""
-    claim = job.get("fire_claim")
-    owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
-    if not owner:
-        return run(None)
+def _start_fire_claim_heartbeat(
+        job_id: str, owner: str) -> Optional[tuple]:
+    """Start the daemon thread refreshing ``job_id``'s fire claim while ``owner`` holds it.
 
-    job_id = str(job.get("id") or "")
+    Returns ``(stop, lost, thread)``: set ``stop`` once the owning run ends; ``lost`` latches
+    after a CONFIRMED store miss (one miss is a sample, not a verdict, #113357) or a store
+    that stayed unreachable past the grace window. ``None`` when the thread could not start.
+    Shared by the firer-side lease monitor and the gateway session's owner-side run wrapper —
+    whichever process executes the turn keeps the claim alive, and a genuine takeover
+    interrupts the turn through ``lost``.
+    """
     stop = threading.Event()
     lost_ownership = threading.Event()
-
-    def _finish_unstarted(error: str) -> None:
-        execution_id = job.get("execution_id")
-        if not execution_id:
-            return
-        try:
-            finish_lost_execution(execution_id, error)
-        except Exception:
-            logger.warning(
-                "Job '%s': failed to close unstarted execution ledger row",
-                job_id,
-                exc_info=True)
-
-    try:
-        owns_fire_claim = heartbeat_fire_claim(job_id, expected_owner=owner)
-    except Exception:
-        logger.warning("Job '%s': initial fire_claim validation failed", job_id, exc_info=True)
-        _finish_unstarted("Fire claim ownership could not be validated before execution started.")
-        return True
-
-    if owns_fire_claim is False:
-        logger.warning("Job '%s': fire claim ownership was already lost before execution", job_id)
-        _finish_unstarted("Fire claim ownership lost before execution started.")
-        return True
 
     def _heartbeat_loop() -> None:
         last_confirmed = time.monotonic()
@@ -2767,8 +2750,48 @@ def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
         lambda: logger.warning(
             "Job '%s': could not start fire_claim heartbeat", job_id, exc_info=True))
     if heartbeat_thread is None:
+        return None
+    return stop, lost_ownership, heartbeat_thread
+
+
+def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
+    """Run ``run`` while keeping this job's owned durable fire claim fresh."""
+    claim = job.get("fire_claim")
+    owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
+    if not owner:
+        return run(None)
+
+    job_id = str(job.get("id") or "")
+
+    def _finish_unstarted(error: str) -> None:
+        execution_id = job.get("execution_id")
+        if not execution_id:
+            return
+        try:
+            finish_lost_execution(execution_id, error)
+        except Exception:
+            logger.warning(
+                "Job '%s': failed to close unstarted execution ledger row",
+                job_id,
+                exc_info=True)
+
+    try:
+        owns_fire_claim = heartbeat_fire_claim(job_id, expected_owner=owner)
+    except Exception:
+        logger.warning("Job '%s': initial fire_claim validation failed", job_id, exc_info=True)
+        _finish_unstarted("Fire claim ownership could not be validated before execution started.")
+        return True
+
+    if owns_fire_claim is False:
+        logger.warning("Job '%s': fire claim ownership was already lost before execution", job_id)
+        _finish_unstarted("Fire claim ownership lost before execution started.")
+        return True
+
+    started = _start_fire_claim_heartbeat(job_id, owner)
+    if started is None:
         _finish_unstarted("Fire claim heartbeat could not be started; execution was not run.")
         return True
+    stop, lost_ownership, heartbeat_thread = started
 
     try:
         return run(lost_ownership)

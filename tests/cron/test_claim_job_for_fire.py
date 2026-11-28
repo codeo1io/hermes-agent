@@ -91,15 +91,23 @@ def test_stale_claim_is_reclaimable(temp_home, monkeypatch):
 
 def test_mark_job_run_clears_claim(temp_home):
     """After a recurring job completes, its claim is cleared so the next fire
-    can be claimed again."""
+    can be claimed again. The claimer proves ownership (``expected_fire_owner``) —
+    an unfenced mark must be refused while the claim is still live (2026-11-28:
+    exactly that wipe aborted a healthy in-flight gateway fire and discarded its
+    result; see test_live_fire_claim_unfenced_mark.py)."""
     from cron.jobs import create_job, claim_job_for_fire, mark_job_run, get_job
 
     job = create_job(prompt="x", schedule="every 5m", name="c")
     jid = job["id"]
     assert claim_job_for_fire(jid) is True
+    owner = get_job(jid)["fire_claim"]["by"]
+
+    # An unfenced writer cannot clear a live claim it does not own.
+    assert mark_job_run(jid, success=True) is False
     assert get_job(jid).get("fire_claim") is not None
 
-    mark_job_run(jid, success=True)
+    # The owner's fenced completion clears it…
+    assert mark_job_run(jid, success=True, expected_fire_owner=owner) is True
     assert get_job(jid).get("fire_claim") is None
     # …and the re-armed recurring job is claimable again.
     assert claim_job_for_fire(jid) is True

@@ -2469,7 +2469,10 @@ def mark_job_run(
     ``delivery_error`` is separate from the agent error: agent succeeded but delivery failed records
     ``last_status = "delivery_failed"`` (never "ok") while ``failure_streak`` is left alone. An
     explicit ``status`` (e.g. "blocked_config") overrides the derived value. False when the fence
-    can't be taken, the job is missing, or ``expected_fire_owner`` no longer holds the fire claim.
+    can't be taken, the job is missing, or ``expected_fire_owner`` no longer holds the fire claim —
+    and also when NO owner is supplied while a still-live fire claim holds the job: an unfenced
+    writer (receipt recovery for a dead firer, the stale-inflight sweep) must never wipe the
+    claim of an in-flight fire it does not own.
 
     ``model_unreachable``: this failed run never reached the model (transient network/DNS error,
     zero API calls). Recurring jobs then get a bounded automatic re-run — ``next_run_at`` is pulled
@@ -2494,6 +2497,18 @@ def mark_job_run(
                     "mark_job_run: job_id %s fire claim owner changed; discarding stale completion",
                     job_id)
                 return False
+        elif _claim_is_live(job.get("fire_claim"), _hermes_now(), FIRE_CLAIM_TTL_SECONDS):
+            # An unfenced writer — receipt recovery for a dead firer, the stale-inflight sweep —
+            # books a completion it does not own. While a LIVE fire claim holds this job, that
+            # mark would wipe the in-flight fire's claim and stamp stale bookkeeping under it
+            # (2026-11-28: exactly this aborted a healthy 4h15m gateway-admitted turn mid-run
+            # and discarded its result). The claim's own owner clears it fenced, or the TTL does.
+            claim = job["fire_claim"]
+            logger.warning(
+                "mark_job_run: job_id %s holds a live fire claim (owner %s); "
+                "refusing an unfenced mark over an in-flight fire",
+                job_id, claim.get("by"))
+            return False
         now = _hermes_now().isoformat()
         extra = extra_fire.is_extra(job)  # read before the outcome clears the claim
         held = extra_fire.held_markers(job) if extra else {}
