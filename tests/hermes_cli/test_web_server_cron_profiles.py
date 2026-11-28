@@ -639,7 +639,7 @@ async def test_trigger_cron_job_forces_paused_job_atomically(
         def fire_due(self, job_id, *, adapters=None, loop=None, force=False):
             observed["force"] = force
             assert cron_jobs.claim_job_for_fire(job_id, force=force) is True
-            cron_jobs.mark_job_run(job_id, success=True)
+            cron_jobs.mark_job_run(job_id, success=True, expected_fire_owner=cron_jobs.get_job(job_id)["fire_claim"]["by"])
             return True
 
     monkeypatch.setattr(

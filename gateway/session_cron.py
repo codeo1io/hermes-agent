@@ -289,6 +289,34 @@ def _run_identified(run_job, job, execution_id, **kwargs):
         exit_cron_execution(token)
 
 
+def _run_with_session_fire_claim(job, run):
+    """Run the owner-side turn while keeping this admission's frozen fire claim fresh.
+
+    The firing scheduler heartbeats the claim only while ITS process lives; the session that
+    executes the turn is the one that knows how long the turn actually runs. A gateway-admitted
+    fire whose firer died keeps its claim for the whole turn (no takeover, no duplicate fire),
+    and a claim genuinely taken over interrupts the turn through ``lost`` — the same cancel seam
+    an operator's ``cron.cancel`` reaches (2026-11-28: an unfenced receipt-recovery mark wiped
+    the LIVE claim of a healthy 4h15m turn; the mark is fenced now, and this side owns the
+    lease for as long as it does the work)."""
+    from cron.scheduler import _start_fire_claim_heartbeat
+
+    claim = job.get("fire_claim")
+    owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
+    if not owner:
+        return run(None)
+    started = _start_fire_claim_heartbeat(str(job.get("id") or ""), owner)
+    if started is None:
+        # The firer's own heartbeat still covers the claim; this side just runs unrefreshed.
+        return run(None)
+    stop, lost, thread = started
+    try:
+        return run(lost)
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)
+
+
 async def execute(authority, ref, row, policy):
     from cron.scheduler import run_job
     from gateway.run import _profile_runtime_scope
@@ -320,8 +348,18 @@ async def execute(authority, ref, row, policy):
             # The forwarded ``cron.cancel`` carries no reason, so the operator's marker is read here
             # first: a stopped agent run reports "cancelled on request", not a lost fire claim.
             stop = _CombinedCancelEvent(CancelRequest(execution_id), cancel)
-            result = await asyncio.to_thread(_run_identified, run_job, job, execution_id,
-                                             extra_prompt=data['extra_prompt'], cancel_event=stop)
+
+            def _claim_owned_run(job, *, execution_id=None, extra_prompt=None, cancel_event=None):
+                # The session executing the fire keeps the frozen claim alive for the WHOLE turn
+                # and folds a genuine ownership takeover into this run's cancel seam.
+                def _run(lost_ownership):
+                    return run_job(job, execution_id=execution_id, extra_prompt=extra_prompt,
+                                   cancel_event=_CombinedCancelEvent(cancel_event, lost_ownership))
+                return _run_with_session_fire_claim(job, _run)
+
+            result = await asyncio.to_thread(
+                _run_identified, _claim_owned_run, job, execution_id,
+                extra_prompt=data['extra_prompt'], cancel_event=stop)
         # run_job stamps run-side verdicts on ITS job copy (quota hold, unreachable model); the
         # firing scheduler's bookkeeping reads them off its own dict, so they ride the result.
         flags = {key: job[key] for key in RUN_JOB_FLAGS if key in job}
