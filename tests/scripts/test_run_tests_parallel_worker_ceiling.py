@@ -359,4 +359,38 @@ def test_main_wires_derived_default_into_jobs_and_banner(
     assert "running with -j 16" in out
     assert "cgroup bounds: 28 → 16 workers" in err
     assert "pids.max=768 pids.current=640" in err
-    assert "override: -j or HERMES_TEST_WORKERS" in err
+    assert "lower via -j or HERMES_TEST_WORKERS" in err
+
+
+@pytest.mark.parametrize("requested,limits,derived,lease,expected", [
+    (8, (2.0, None, None), 2, None, 2),
+    (8, (6.0, 768, 640), 6, "1", 1),
+    (1, (6.0, None, None), 6, "2", 1),
+    (8, (None, None, None), 28, None, 8),
+    (8, (None, None, None), 28, "2", 2),
+])
+def test_explicit_worker_request_honors_actual_budget(monkeypatch, requested, limits,
+                                                       derived, lease, expected):
+    runner = _load_runner()
+    if lease is None:
+        monkeypatch.delenv("CONDUCTOR_LOCAL_VALIDATION_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("CONDUCTOR_LOCAL_VALIDATION_WORKERS", lease)
+    assert runner._bounded_requested_jobs(requested, limits, derived) == expected
+
+
+def test_main_caps_explicit_jobs(tmp_path, monkeypatch, capsys):
+    runner = _load_runner()
+    suite = tmp_path / "tiny-suite"
+    suite.mkdir()
+    (suite / "test_smoke.py").write_text("def test_ok():\n    assert True\n")
+    proc, root = _v2_tree(tmp_path, "explicit", unit={"cpu_max": "200000 100000"})
+    monkeypatch.setattr(runner, "_PROC_SELF_CGROUP", str(proc))
+    monkeypatch.setattr(runner, "_CGROUP_V2_MOUNT_ROOT", str(root))
+    monkeypatch.setattr("os.cpu_count", lambda: _CPU)
+    monkeypatch.setenv("CONDUCTOR_LOCAL_VALIDATION_WORKERS", "1")
+    monkeypatch.setattr(sys, "argv", [str(_RUNNER_PATH), "--paths", str(suite), "-j", "8"])
+    assert runner.main() == 0
+    out, err = capsys.readouterr()
+    assert "running with -j 1" in out
+    assert "validation worker budget: 8 -> 1 workers" in err

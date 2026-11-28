@@ -35,8 +35,8 @@ Usage:
     pytest failure. Tokens after ``--`` are never validated.
 
 Environment:
-    HERMES_TEST_WORKERS  Hard override of the worker count (never
-                         cgroup-capped). The default is cpu_count*2
+    HERMES_TEST_WORKERS  Requested worker count, subject to cgroup and
+                         shared validation budget caps. The default is cpu_count*2
                          bounded by the ambient cgroup: at most the most
                          binding cpu.max over the self→root chain,
                          pids.max/32, and (pids.max - pids.current)/8 of
@@ -76,6 +76,8 @@ try:  # scripts dir is sys.path[0] when run as a script; tests copy this file al
         _cgroup_chain_limits,
         _derive_default_workers,
         _env_workers_override,
+        _bounded_requested_jobs as _bounded_requested_jobs,
+        _parse_bounded_args,
     )
 except ImportError:  # anchor to this file's own directory instead
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -85,6 +87,8 @@ except ImportError:  # anchor to this file's own directory instead
         _cgroup_chain_limits,
         _derive_default_workers,
         _env_workers_override,
+        _bounded_requested_jobs as _bounded_requested_jobs,
+        _parse_bounded_args,
     )
 
 # Re-exported for tests that drive the cgroup helpers through this module.
@@ -1556,7 +1560,7 @@ def main() -> int:
             our_args.append(tok)
         i += 1
 
-    args = parser.parse_args(our_args)
+    args = _parse_bounded_args(parser, our_args, cgroup_limits, derived_jobs)
 
     # Bare tokens are validated against pytest's option set so a typo fails
     # here with usage instead of once per discovered file. Anything after a
@@ -1685,7 +1689,7 @@ def main() -> int:
             detail.append(f"cpu.max={math.ceil(_cpu_ceiling)} cores")
         print(
             f"cgroup bounds: {legacy_default} → {args.jobs} workers "
-            f"({' '.join(detail)}; override: -j or HERMES_TEST_WORKERS)",
+            f"({' '.join(detail)}; lower via -j or HERMES_TEST_WORKERS)",
             file=sys.stderr,
             flush=True,
         )
