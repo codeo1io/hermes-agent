@@ -1924,7 +1924,13 @@ def test_hard_stop_waits_for_commit_already_admitted(tmp_path: Path) -> None:
         daemon=True,
     )
     compression.start()
-    assert commit_started.wait(timeout=2)
+    # 2s measured cold-start reach-admission once on CI (main push 46120416567,
+    # BOTH attempts) and locally on a cold first run: the commit thread has to
+    # build an AIAgent, refresh main credentials and clear the lazy feasibility
+    # probe before db.messages.compact can ever fire. The reach event is what
+    # the test synchronizes on; patience for it is test scaffolding, not the
+    # behavior under test (the stop-side deadlines below stay tight).
+    assert commit_started.wait(timeout=10), "commit thread never reached the archive admission"
 
     stop = threading.Thread(
         target=lambda: (
@@ -1936,8 +1942,8 @@ def test_hard_stop_waits_for_commit_already_admitted(tmp_path: Path) -> None:
     stop.start()
     assert not stop_returned.wait(timeout=0.1)
     allow_commit.set()
-    compression.join(timeout=5)
-    stop.join(timeout=5)
+    compression.join(timeout=30)
+    stop.join(timeout=30)
 
     assert not compression.is_alive()
     assert not stop.is_alive()
