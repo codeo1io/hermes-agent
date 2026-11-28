@@ -193,3 +193,68 @@ def test_dispatch_guard_releases_after_sessiondb_finalization_hang(tmp_path):
         release.set()
         sched._running_job_ids.discard(sched._inflight_key("cleanup-guard-hang"))
         sched._shutdown_parallel_pool()
+
+
+class _LatchingTitleStore:
+    """Reproduces the 2026-11-28 07:27Z production death (item 508).
+
+    The real ``_BoundedCronSessionDB`` proxy latches ``disabled`` after the first
+    cleanup timeout; every later proxied call then raises RuntimeError immediately
+    (``session finalization disabled after prior cleanup failure``). The production
+    store additionally exposes ``next_title_in_lineage`` — and the title-recovery
+    block in ``_finalize_cron_session`` evaluated
+    ``getattr(_sessions, "next_title_in_lineage", ...)(...)`` OUTSIDE its try, so the
+    latched call escaped the handler, escaped the finally block, and booked a
+    completed 2h run as ``failed`` with a 0-byte output document.
+    """
+
+    def __init__(self):
+        self._title_calls = 0
+        self.latched = False
+        self.lineage = self  # expose lineage.tip
+
+    def tip(self, _session_id):
+        return None  # no compression rotation
+
+    def set_title(self, session_id, title):
+        self._title_calls += 1
+        if self.latched:
+            raise RuntimeError("session finalization disabled after prior cleanup failure")
+        # First write hangs: drives the first title write past the cleanup timeout.
+        self.latched = True
+        raise TimeoutError("simulated first title write exceeding cleanup patience")
+
+    def next_title_in_lineage(self, base):
+        # Bounded proxy call AFTER the latch: raises RuntimeError immediately.
+        raise RuntimeError("session finalization disabled after prior cleanup failure")
+
+    def end(self, *_a, **_k):
+        self.ended = True
+
+    def close(self):
+        self.closed = True
+
+    def sessions(self):  # pragma: no cover - attribute access path
+        return self
+
+
+def test_title_fallback_latch_never_escapes_finalization(tmp_path):
+    """A latched bounded-proxy must never fail the whole run (item 508)."""
+    from cron.scheduler import _finalize_cron_session
+
+    store = _LatchingTitleStore()
+    db_state = {"closed": False}
+    fake_db = SimpleNamespace(
+        sessions=store, lineage=store, db_path=tmp_path / "state.db",
+        close=lambda: db_state.__setitem__("closed", True))
+
+    # Patch the cleanup timeout down so the first hanging write times out quickly.
+    with patch("cron.scheduler._cron_cleanup_timeout_seconds", return_value=0.05):
+        # Must NOT raise: the title fallback runs INSIDE the guard now.
+        _finalize_cron_session(fake_db, None, "item508-title-latch", "item508 job",
+                               "cron_item508-title-latch", workdir=None)
+
+    # The store still got its end()/close() calls: finalization continued past the
+    # latched title failure instead of dying on the escaping RuntimeError.
+    assert store.ended is True
+    assert db_state["closed"] is True

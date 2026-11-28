@@ -2118,11 +2118,17 @@ def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_s
         logger.debug("Job '%s': failed to set cron session title: %s", job_id, e)
         # Never leave the session untitled.
         # Try the next free title in the lineage, then a bare id-stamped title. See #50535.
+        # The lineage fallback is evaluated lazily (a zero-arg callable) rather than in the
+        # tuple literal: a post-timeout _BoundedCronSessionDB latch makes every proxied
+        # call raise immediately ("session finalization disabled after prior cleanup
+        # failure"), and an eagerly evaluated first element would raise OUTSIDE this
+        # handler, escaping _finalize_cron_session and failing the whole run over a
+        # cosmetic title (item 508, 2026-11-28: 2h run booked failed, 0-byte output doc).
         for _fallback in (
-            getattr(_sessions, "next_title_in_lineage", lambda b: b)(f"cron {job_id}"),
-            f"cron {job_id} {_final_cron_session_id[-6:]}"):
+            lambda: getattr(_sessions, "next_title_in_lineage", lambda b: b)(f"cron {job_id}"),
+            lambda: f"cron {job_id} {_final_cron_session_id[-6:]}"):
             try:
-                if _set_cron_session_title(_sessions, _final_cron_session_id, _fallback):
+                if _set_cron_session_title(_sessions, _final_cron_session_id, _fallback()):
                     break
             except (Exception, KeyboardInterrupt):
                 continue
