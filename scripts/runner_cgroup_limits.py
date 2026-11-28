@@ -196,6 +196,33 @@ def _derive_default_workers(
     return max(1, min(candidates))
 
 
+def _bounded_requested_jobs(requested: int, limits, derived: int) -> int:
+    """Keep explicit requests within the actual cgroup and validation lease."""
+    caps = [requested]
+    cpu_ceiling, pids_max, _ = limits
+    if cpu_ceiling is not None or pids_max is not None:
+        caps.append(derived)
+    try:
+        budget = int(os.environ.get("CONDUCTOR_LOCAL_VALIDATION_WORKERS", "0"))
+    except ValueError:
+        budget = 0
+    if budget > 0:
+        caps.append(budget)
+    return max(1, min(caps))
+
+
+def _parse_bounded_args(parser, argv, limits, derived):
+    """Apply actual allocation after argparse resolves requested parallelism."""
+    import sys
+    args = parser.parse_args(argv)
+    requested = args.jobs
+    args.jobs = _bounded_requested_jobs(requested, limits, derived)
+    if args.jobs < requested:
+        print(f"validation worker budget: {requested} -> {args.jobs} workers",
+              file=sys.stderr, flush=True)
+    return args
+
+
 def _env_workers_override(env: Optional[dict[str, str]] = None) -> Optional[int]:
     """HERMES_TEST_WORKERS as a positive int, or None (unset, malformed, or
     non-positive — tolerant so one bad value can't crash main() at

@@ -76,6 +76,8 @@ try:  # scripts dir is sys.path[0] when run as a script; tests copy this file al
         _cgroup_chain_limits,
         _derive_default_workers,
         _env_workers_override,
+        _bounded_requested_jobs as _bounded_requested_jobs,
+        _parse_bounded_args,
     )
 except ImportError:  # anchor to this file's own directory instead
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -85,6 +87,8 @@ except ImportError:  # anchor to this file's own directory instead
         _cgroup_chain_limits,
         _derive_default_workers,
         _env_workers_override,
+        _bounded_requested_jobs as _bounded_requested_jobs,
+        _parse_bounded_args,
     )
 
 # Re-exported for tests that drive the cgroup helpers through this module.
@@ -1477,23 +1481,6 @@ def _build_arg_parser(cgroup_limits, derived_jobs) -> argparse.ArgumentParser:
     return parser
 
 
-def _bounded_requested_jobs(requested: int, limits, derived: int) -> int:
-    """Keep explicit requests within the actual cgroup and validation lease."""
-    caps = [requested]
-    cpu_ceiling, pids_max, _ = limits
-    if cpu_ceiling is not None or pids_max is not None:
-        caps.append(derived)
-    raw = os.environ.get("CONDUCTOR_LOCAL_VALIDATION_WORKERS", "")
-    if raw:
-        try:
-            budget = int(raw)
-        except ValueError:
-            budget = 0
-        if budget > 0:
-            caps.append(budget)
-    return max(1, min(caps))
-
-
 def main() -> int:
     _make_stdio_glyph_safe()
     # Cgroup truth is read ONCE here and threaded to both the argparse
@@ -1573,15 +1560,7 @@ def main() -> int:
             our_args.append(tok)
         i += 1
 
-    args = parser.parse_args(our_args)
-    requested_jobs = args.jobs
-    # The requested value is not a resource authorization. Explicit -j and
-    # environment overrides must honor the same kernel ceilings as defaults.
-    # A shared validation lease can be smaller than this process's cgroup.
-    args.jobs = _bounded_requested_jobs(requested_jobs, cgroup_limits, derived_jobs)
-    if args.jobs < requested_jobs:
-        print(f"validation worker budget: {requested_jobs} -> {args.jobs} workers",
-              file=sys.stderr, flush=True)
+    args = _parse_bounded_args(parser, our_args, cgroup_limits, derived_jobs)
 
     # Bare tokens are validated against pytest's option set so a typo fails
     # here with usage instead of once per discovered file. Anything after a
