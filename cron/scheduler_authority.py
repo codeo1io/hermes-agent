@@ -353,9 +353,13 @@ def reconcile_pending(*, allow_connect=True):
             success, output, answer, error = state['result']
             job = dict(state['job'], **(state.get('job_flags') or {}))
             job['execution_id'] = params['request_id']
-            # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE] and a
-            # blank answer are failures, whichever process books them.
-            success, error, declared = _apply_agent_failure_marker(job, success, error, answer)
+            # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE], a
+            # blank answer, and the identity-bound completion-evidence gate — whichever process
+            # books them. The execution id is the journal's request_id: without it the gate's
+            # claim lookup reads an empty record and fail-closes a stamped run as a false
+            # failure (incident 35978c_ba81d4a1ce52, execution f9ee8c21cf9a4c26a80ae65358beef27).
+            success, error, declared = _apply_agent_failure_marker(
+                job, success, error, answer, execution_id=params['request_id'])
             delivery = _RunDelivery(job, success, error, agent_declared=declared)
             # The canonical receipt supplies the result; a dead scheduler's fire claim does not
             # authorize replay and must not prevent finishing its durable bookkeeping.

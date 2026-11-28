@@ -80,3 +80,54 @@ def test_terminal_receipt_lifts_the_unknown_pause_it_caused(tmp_path, monkeypatc
         jobs.pause_job(job['id'], reason='operator hold')
         scheduler_authority.reconcile_pending()
         assert jobs.get_job(job['id'])['paused_reason'] == 'operator hold'
+
+
+def test_recovery_settlement_honors_evidence_gate_with_execution_id(
+    tmp_path, monkeypatch
+):
+    """A recovered terminal receipt for an evidence-gated job settles by the SAME
+    identity-bound verdict as the live tail (incident 35978c_ba81d4a1ce52 /
+    execution f9ee8c21...: reconcile_pending dropped the execution id, the claim
+    lookup returned an empty record, and a stamped, completed run booked failed
+    with "no durable claim: 'claimed_at'")."""
+    import hashlib
+    import time
+
+    # Shape the job like the production evidence-gated executor: receipt root +
+    # artifact roots, with a genuine identity-bound receipt on disk.
+    root = tmp_path / "receipts"
+    root.mkdir()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    artifact = artifact_root / "repair.json"
+    artifact.write_text('{"kind": "runtime_repair"}\n')
+    with jobs.use_cron_store(tmp_path / 'cron'):
+        job = jobs.create_job(prompt='report', schedule='every 1h', deliver='local')
+        evidence_job = dict(job, completion_evidence_root=str(root),
+                            completion_artifact_roots=[str(artifact_root)])
+        fire = executions.create_execution(job['id'], source='test')['id']
+        # A genuine identity-bound receipt for THIS execution (the stamp tool's shape).
+        receipt = {
+            "job_id": job['id'],
+            "execution_id": fire,
+            "kind": "runtime_repair",
+            "artifacts": [
+                {"path": str(artifact), "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}
+            ],
+        }
+        receipt_path = root / f"{fire}.json"
+        receipt_path.write_text(json.dumps(receipt))
+        answer = "[CRON_EVIDENCE]\nsha256:" + hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        executions.mark_execution_running(fire)
+        journal = _foreign_journal(job, fire)
+        # The owner's terminal receipt returns the job record with the evidence
+        # configuration; the journal's request_id is the execution id.
+        _peer(monkeypatch, lambda method: {
+            'status': 'terminal', 'job': evidence_job,
+            'result': [True, 'document', answer, None],
+        })
+        scheduler_authority.reconcile_pending()
+        saved = jobs.get_job(job['id'])
+        assert saved['last_status'] == 'ok', saved.get('last_error')
+        assert executions.get_execution(fire)['status'] == 'completed'
+        assert not journal.exists()
