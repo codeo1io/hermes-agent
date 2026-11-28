@@ -457,8 +457,6 @@ def test_compression_heartbeat_stop_persists_completed_over_in_progress(
 
 def test_compression_heartbeat_does_not_clobber_timeout_provenance() -> None:
     """Detached heartbeat/stop must not overwrite a host timeout stamp."""
-    from types import SimpleNamespace
-
     from agent.conversation_compression import _CompressionActivityHeartbeat
     from agent.session_activity import ActivityProvenance
 
@@ -485,8 +483,6 @@ def test_compression_heartbeat_does_not_clobber_timeout_provenance() -> None:
 
 def test_compression_heartbeat_start_republishes_after_terminal_provenance() -> None:
     """A new compression episode may overwrite a prior timeout/cooldown stamp."""
-    from types import SimpleNamespace
-
     from agent.conversation_compression import _CompressionActivityHeartbeat
     from agent.session_activity import ActivityProvenance
 
@@ -519,8 +515,6 @@ def test_compression_heartbeat_start_republishes_after_terminal_provenance() -> 
 
 def test_compression_heartbeat_does_not_rearm_after_unknown_provenance() -> None:
     """After a terminal stamp, UNKNOWN must not re-arm a detached heartbeat."""
-    from types import SimpleNamespace
-
     from agent.conversation_compression import _CompressionActivityHeartbeat
     from agent.session_activity import ActivityProvenance
 
@@ -552,8 +546,6 @@ def test_compression_heartbeat_does_not_rearm_after_unknown_provenance() -> None
 
 def test_compression_heartbeat_stops_when_commit_fence_cancelled() -> None:
     """Host fence cancel must silence detached heartbeat refresh and late stop."""
-    from types import SimpleNamespace
-
     from agent.conversation_compression import (
         CompressionCommitFence,
         _CompressionActivityHeartbeat,
